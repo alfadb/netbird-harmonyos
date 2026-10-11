@@ -35,7 +35,8 @@ import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
 // — process memory only, never persisted, never re-derived here.
 import { lastKilledVpnProcess } from '../vpnextensionability/NetBirdSystemEvents';
 import type { ProcessExitRecord } from '../vpnextensionability/NetBirdSystemEventsCore';
-import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
+import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, ACCOUNT_LOGIN_REQUIRED_CLASS,
+  ACCOUNT_LOGIN_REQUIRED_TEXT, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
@@ -2211,8 +2212,12 @@ struct Index {
     // Chinese reason — it beats the generic disconnect notice (and there is
     // no live document to read a class from).
     if (this.published === null) {
-      if (this.connectFailureClass === 'account-login-required') {
-        return '账户登录已过期，请重新登录';
+      // 2026-10-11 (account auth fix): the core's account-login-required class
+      // (JWT-less login rejected / the stored one-shot JWT already used) — the
+      // line names the 账户登录 button, because retrying this credential can
+      // never succeed.
+      if (this.connectFailureClass === ACCOUNT_LOGIN_REQUIRED_CLASS) {
+        return ACCOUNT_LOGIN_REQUIRED_TEXT;
       }
       if (this.connectFailureClass.length > 0) {
         return connectFailureText(this.connectFailureClass);

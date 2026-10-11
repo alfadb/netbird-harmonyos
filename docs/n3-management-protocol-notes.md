@@ -356,13 +356,17 @@ connector_stop()     幂等：abort worker（关 Sync 流）→ 尽力 logout
   `ca_pem`（`https://` 必填，字符串或数组）、`server_name`、`hostname`/`os_name`/
   `os_version`/`netbird_version`、`connect_timeout_ms`/`request_timeout_ms`、
   `session_renew_lead_ms`/`renew_check_interval_ms`。
-  `setupKeyJson`：`{"setup_key":"..."}` 与/或 `{"jwt":"..."}`（至少一个非空）。
+  `setupKeyJson`：`{"setup_key":"..."}` 与/或 `{"jwt":"..."}`；**字段可以全空**
+  （2026-10-11 账号修复：已注册 peer 的普通重连只靠 WireGuard 公钥，upstream
+  `GrpcClient::Login` grpc.go:650-656 不带任何 token；账号模式在一次性 JWT 用掉后
+  由壳层清空 `jwt` 字段后就是这种形态）。字段类型/形状非法仍是 `invalid-credentials`。
 - `connector_status()` → `{"running","state","started_at_unix","last_update_unix",
   "peer_count","route_count","reconnects","last_error","session_expiry",
   "session_expires_at_unix","session_renew_attempts","wg_apply_failed",
   "wg_apply_errors","logout_ok"}`。`state` 复用 `state.rs` 六态；
   `last_error` 仅 `{"class","status"}` 分类（network/timeout/auth/request/
-  server/parse/unsupported_url），**无任何 server/transport message**；
+  server/parse/unsupported_url，以及 2026-10-11 起的 `account-login-required`
+  ——账号模式需要重新交互登录，**无任何 server/transport message**）；
   `session_expiry` 三态 `unknown`/`disabled`/`set`。
 - `connector_stop()` → `{"ok":true,"already_stopped":bool,"state"}`（幂等；
   无连接器时同样返回 ok）。stop 后槽位释放，可再次 start。

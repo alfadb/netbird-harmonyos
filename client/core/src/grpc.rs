@@ -75,6 +75,13 @@
 //! Envelope crypto failures reuse the same classes — see `crate::envelope`
 //! module docs ("Error classification").
 //!
+//! 2026-10-11 A1/A2: this mapping is the RAW status→class translation and is
+//! unchanged. The account-mode login SEQUENCE on top of it
+//! (`crate::connector`) retries a JWT-less `Login` once with the stored JWT
+//! when [`is_login_needed`] holds, and turns a rejected one-shot JWT into
+//! `ManagementError::AccountLoginRequired` — see `crate::connector`'s
+//! "login sequence" docs.
+//!
 //! ## N3-4 additions: Sync stream, Logout, ExtendAuthSession
 //!
 //! - [`ManagementGrpcClient::open_sync_stream`] opens the `Sync` RPC
@@ -205,9 +212,11 @@ pub struct PeerMeta {
 /// `GrpcClient::Register(...)` (`shared/management/client/grpc.go`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoginParams {
-    /// Pre-authorized setup key (can be empty for SSO logins).
+    /// Pre-authorized setup key (empty for SSO/account logins).
     pub setup_key: String,
-    /// SSO JWT token (can be empty for setup-key registration).
+    /// SSO JWT token (empty for setup-key registration AND for the plain
+    /// reconnect of an already-registered peer, which carries neither field —
+    /// upstream grpc.go:650-656).
     pub jwt_token: String,
     pub peer_keys: PeerKeySet,
     pub meta: PeerMeta,
@@ -282,6 +291,24 @@ pub fn map_grpc_status(status: Status) -> ManagementError {
         tonic::Code::DeadlineExceeded => ManagementError::Timeout,
         _ => ManagementError::Server { status: num },
     }
+}
+
+/// Numeric gRPC codes the login sequencing branches on (the same numbers
+/// [`map_grpc_status`] preserves).
+pub const GRPC_INVALID_ARGUMENT: u16 = tonic::Code::InvalidArgument as u16;
+pub const GRPC_PERMISSION_DENIED: u16 = tonic::Code::PermissionDenied as u16;
+pub const GRPC_UNAUTHENTICATED: u16 = tonic::Code::Unauthenticated as u16;
+
+/// 2026-10-11 A1: upstream `isLoginNeeded` / `isRegistrationNeeded`
+/// (`client/internal/auth/auth.go:491-521`) — ONLY `InvalidArgument` and
+/// `PermissionDenied` mean "this peer must (re)register / the user must log
+/// in". Every other code (including `Unauthenticated`, which upstream keeps
+/// retryable) is not that signal. `Unauthenticated` is deliberately NOT here:
+/// it is what the server answers to a one-shot JWT that was already consumed
+/// (`management/server/auth/session.go` `ErrTokenAlreadyUsed`) or expired, a
+/// verdict about the TOKEN, not about the peer record.
+pub fn is_login_needed(err: &ManagementError) -> bool {
+    matches!(err.status_code(), GRPC_INVALID_ARGUMENT | GRPC_PERMISSION_DENIED)
 }
 
 /// Map a tonic transport (connect/handshake/IO) failure onto the fixed
@@ -485,18 +512,19 @@ impl ManagementGrpcClient {
     /// envelope AND in `PeerKeys.wgPubKey` always comes from the injected
     /// key pair (upstream `c.key`; `PeerKeys.wgPubKey` = the BYTES OF THE
     /// base64 STRING, grpc.go:643-647), overriding any caller-set value.
+    ///
+    /// 2026-10-11 A1: a login with NEITHER a setup key NOR a JWT is legal —
+    /// that is the upstream reconnect shape (`GrpcClient::Login`,
+    /// grpc.go:650-656: system meta + `PeerKeys` with the WireGuard public
+    /// key and NOTHING token-shaped), where a registered peer is identified
+    /// by its persistent WireGuard key pair alone. The old both-empty
+    /// pre-flight rejection is gone; who may send no credential at all is the
+    /// caller's policy (see the account-mode sequence in [`crate::connector`]).
     pub async fn login_with_mode(
         &mut self,
         params: LoginParams,
         mode: LoginBodyMode,
     ) -> Result<LoginOutcome, ManagementError> {
-        if params.setup_key.is_empty() && params.jwt_token.is_empty() {
-            return Err(ManagementError::Request {
-                status: 0,
-                message: "login needs a setup key or a jwt token (both empty)".into(),
-            });
-        }
-
         let mut request = Self::build_login_request(&params);
         // Upstream single source of identity: our own public key, base64
         // string for EncryptedMessage.wgPubKey (grpc.go:608) and the bytes

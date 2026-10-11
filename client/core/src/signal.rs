@@ -324,6 +324,9 @@ fn heartbeat_failure_token(error: &ManagementError) -> String {
         ManagementError::Network(_) => "network",
         ManagementError::Timeout => "timeout",
         ManagementError::Auth { .. } => "auth",
+        // 2026-10-11 A2: not produced by the signal RPCs (the login sequence
+        // owns this class), token kept aligned with `ErrorClass::as_str`.
+        ManagementError::AccountLoginRequired { .. } => "account-login-required",
         ManagementError::Request { .. } => "request",
         ManagementError::Server { .. } => "server",
         ManagementError::Parse(_) => "parse",

@@ -12,6 +12,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ETS = join(HERE, '..', 'src', 'main', 'ets');
 const ext = readFileSync(join(ETS, 'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
 const mode = readFileSync(join(ETS, 'login', 'NetBirdAccountMode.ets'), 'utf8');
+const drop = ext.slice(ext.indexOf('private async dropStoredAccountJwt('),
+  ext.indexOf('private writeConnectFailureForUi('));
 const start = ext.slice(ext.indexOf('    let setupKey: string ='), ext.indexOf('    if (this.destroyRequested)',
   ext.indexOf('    let setupKey: string =')));
 let passed = 0;
@@ -41,11 +43,39 @@ check('account failure paths publish one stable login-required class without err
 check('account credentials pass JWT only; legacy credentials retain setup_key',
   ext.includes("? { 'jwt': accountJwt } : { 'setup_key': setupKey }") &&
   !start.includes('refreshToken') && !start.includes('clearAccountCredentials'));
-check('mode decision covers empty credentials and positive expiry while allowing unknown expiry',
+check('mode decision blocks only a missing store or an elapsed stored token',
   mode.includes("return 'account-login-required'") &&
+  mode.includes('if (!hasCredentials)') &&
   mode.includes('jwt.length === 0') &&
   mode.includes('isAccountCredentialExpired(expiresAtMs, nowMs)') &&
   mode.includes('expiresAtMs > 0'));
+
+// 2026-10-11 (account auth fix): the stored management JWT is a ONE-SHOT
+// identity proof (a second Login with it answers "JWT already used"), so the
+// extension drops it — once the login it was offered to COMPLETED, and once the
+// core reports the login-required class (token already used / peer session
+// expired). The rewrite touches ONLY the `jwt` field and goes through the
+// encrypted account store; the token never reaches a log line.
+check('a completed account login drops the spent one-shot JWT',
+  ext.includes('if (net !== null && authMode === ACCOUNT_MODE_ACCOUNT && accountJwt.length > 0)') &&
+  ext.includes("await this.dropStoredAccountJwt('login-completed');"));
+check('the core account-login-required class drops the stored JWT before the failure notice',
+  ext.includes("if (failureClass === 'account-login-required')") &&
+  ext.includes("await this.dropStoredAccountJwt('login-required');") &&
+  ext.indexOf("await this.dropStoredAccountJwt('login-required');") <
+    ext.indexOf('this.writeConnectFailureForUi(failureClass);'));
+check('the drop rewrites only the jwt field through the encrypted account store',
+  drop.includes('await loadAccountCredentials(this.context.filesDir)') &&
+  drop.includes('await saveAccountCredentials(this.context.filesDir, cleared)') &&
+  drop.includes("jwt: '',") && drop.includes('managementUrl: stored.managementUrl') &&
+  drop.includes('clientId: stored.clientId') && drop.includes('tokenEndpoint: stored.tokenEndpoint') &&
+  drop.includes('refreshToken: stored.refreshToken') &&
+  !drop.includes('fs.write') && !drop.includes('fs.openSync') &&
+  ext.includes("import { loadAccountCredentials, saveAccountCredentials } from '../login/NetBirdAccountStore'"));
+check('the drop is best-effort and never logs the token',
+  drop.includes("'VPN_ACCOUNT_JWT_DROPPED|requestId=%{public}s|reason=%{public}s|field=jwt'") &&
+  drop.includes("'VPN_ACCOUNT_JWT_DROP_FAILED|requestId=%{public}s|reason=%{public}s|code=%{public}s'") &&
+  drop.includes('stored.jwt.length === 0'));
 
 console.log(`RESULT passed=${passed} failed=${failed}`);
 if (failed > 0) { process.exitCode = 1; }

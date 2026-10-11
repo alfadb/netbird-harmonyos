@@ -175,6 +175,22 @@ try {
     codedMessage === 'unsupported');
 
   await writeFile(join(filesDir, 'netbird-setup-key'), 'untouched');
+
+  // 2026-10-11 (account auth fix): the extension drops the spent ONE-SHOT
+  // management JWT by rewriting the credential document with jwt: ''. That
+  // shape must save and round-trip — an empty jwt is a valid "no token stored"
+  // account session (the next connect logs in by WireGuard public key alone),
+  // while every other field survives so account mode stays selected.
+  const dropped = { ...creds, jwt: '' };
+  await module.saveAccountCredentials(filesDir, dropped);
+  check('an emptied JWT saves and round-trips with the rest of the account intact',
+    JSON.stringify(await module.loadAccountCredentials(filesDir)) === JSON.stringify(dropped));
+  const droppedBytes = await readFile(accountPath);
+  check('the emptied document still carries no JWT/refresh-token/URL plaintext',
+    !droppedBytes.includes(Buffer.from(creds.jwt)) &&
+    !droppedBytes.includes(Buffer.from(creds.refreshToken)) &&
+    !droppedBytes.includes(Buffer.from(creds.managementUrl)));
+
   await module.clearAccountCredentials(filesDir);
   let accountExists = true;
   try { await access(accountPath); } catch (error) { accountExists = false; }

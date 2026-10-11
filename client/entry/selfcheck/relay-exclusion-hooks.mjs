@@ -207,7 +207,13 @@ const ACCOUNT_MODE = 'data:text/javascript,' + encodeURIComponent(
   'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
   ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
   'export const decideAccountCredentialMode = () => "account-login-required";');
-const ACCOUNT_STORE = 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D';
+// 2026-10-11 (account auth fix): the extension also imports
+// `saveAccountCredentials` by value (dropping the spent one-shot JWT). This
+// suite never reaches that path, but the named export must exist for the
+// staged fixture to link.
+const ACCOUNT_STORE = 'data:text/javascript,' + encodeURIComponent(
+  'export async function loadAccountCredentials() { return null; }\n' +
+  'export async function saveAccountCredentials() {}');
 
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,

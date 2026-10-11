@@ -23,6 +23,14 @@ export function isAccountCredentialExpired(expiresAtMs: number, nowMs: number): 
   return expiresAtMs > 0 && expiresAtMs <= nowMs;
 }
 
+// 2026-10-11 (account auth fix): account mode starts a connect even when the
+// stored JWT is EMPTY. The management JWT is a one-shot identity proof — after
+// it was used (or rejected as already used) the extension drops it while the
+// rest of the account store stays, and a reconnect then has to identify the
+// peer by its WireGuard public key alone (upstream: a normal reconnect sends
+// Login with no JWT and no setup key; the core tries exactly that first). The
+// still-relevant gates: no account document at all, or an EXPIRED stored token
+// -> ask for 账户登录 instead of starting a connect that cannot register.
 export function decideAccountCredentialMode(mode: string, hasCredentials: boolean, jwt: string,
   expiresAtMs: number, nowMs: number): string {
   if (mode === ACCOUNT_MODE_SETUP_KEY) {
@@ -31,7 +39,13 @@ export function decideAccountCredentialMode(mode: string, hasCredentials: boolea
   if (mode !== ACCOUNT_MODE_ACCOUNT) {
     return ACCOUNT_MODE_INVALID;
   }
-  if (!hasCredentials || jwt.length === 0 || isAccountCredentialExpired(expiresAtMs, nowMs)) {
+  if (!hasCredentials) {
+    return 'account-login-required';
+  }
+  if (jwt.length === 0) {
+    return ACCOUNT_MODE_ACCOUNT;
+  }
+  if (isAccountCredentialExpired(expiresAtMs, nowMs)) {
     return 'account-login-required';
   }
   return ACCOUNT_MODE_ACCOUNT;

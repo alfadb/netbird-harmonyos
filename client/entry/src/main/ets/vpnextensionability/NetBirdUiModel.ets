@@ -1122,6 +1122,15 @@ export function lastHandshakeText(seconds: number | null): string {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
+// 2026-10-11 (account auth fix): the stable token the CORE reports when account
+// mode needs a fresh interactive login (connector.rs `ErrorClass::
+// AccountLoginRequired` → the LAST_ERROR class in the status document, and the
+// connect-failure notice token). It is NOT the generic `auth` class: no retry
+// of the same credential can succeed, so the UI names the action instead of
+// offering a retry loop.
+export const ACCOUNT_LOGIN_REQUIRED_CLASS: string = 'account-login-required';
+export const ACCOUNT_LOGIN_REQUIRED_TEXT: string = '账户登录已过期，请重新点“账户登录”';
+
 // Actionable hint for the last error class ('' when none) — mirrors the
 // core's class-only discipline (network / timeout / auth).
 export function lastErrorText(errorClass: string): string {
@@ -1131,6 +1140,13 @@ export function lastErrorText(errorClass: string): string {
   }
   if (errorClass === 'auth') {
     return '设备未注册或 Setup Key 无效，请到设置重新配置';
+  }
+  // 2026-10-11 (account auth fix): the core's own "account login required"
+  // class (a JWT-less login rejected because the peer session expired, or the
+  // stored one-shot JWT already used/expired). Retrying cannot help — the
+  // user has to run 账户登录 again, so the line names that button.
+  if (errorClass === ACCOUNT_LOGIN_REQUIRED_CLASS) {
+    return ACCOUNT_LOGIN_REQUIRED_TEXT;
   }
   if (errorClass === 'timeout') {
     return '连接管理服务器超时，请检查网络后重试';

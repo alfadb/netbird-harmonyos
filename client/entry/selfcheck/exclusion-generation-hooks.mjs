@@ -916,7 +916,13 @@ const STUBS = {
     'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
     ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
     'export const decideAccountCredentialMode = () => "account-login-required";'),
-  '../login/NetBirdAccountStore': 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D',
+  // 2026-10-11 (account auth fix): the extension imports both
+  // `loadAccountCredentials` and `saveAccountCredentials` by value now (the
+  // spent one-shot JWT is dropped). This suite never reaches either path, but
+  // both named exports must exist for the staged fixture to link.
+  '../login/NetBirdAccountStore': 'data:text/javascript,' + encodeURIComponent(
+    'export async function loadAccountCredentials() { return null; }\n' +
+    'export async function saveAccountCredentials() {}'),
   // 2026-10-10 后台保活（0.0.19, 方案 A）: the REAL EntryAbility now registers the
   // borrowed DATA_TRANSFER continuous task on its onCreate/onDestroy, so this
   // specifier must resolve for the byte-identical ability fixture to link. The

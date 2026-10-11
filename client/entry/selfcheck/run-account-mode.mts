@@ -42,10 +42,18 @@ try {
   check('valid account JWT is accepted with unknown or future expiry',
     mode.decideAccountCredentialMode('account', true, 'jwt', 0, 1000) === 'account' &&
     mode.decideAccountCredentialMode('account', true, 'jwt', 1001, 1000) === 'account');
-  check('missing credentials, empty JWT, and elapsed expiry require account login',
+  check('missing credentials and an elapsed stored token require account login',
     mode.decideAccountCredentialMode('account', false, '', 0, 1000) === 'account-login-required' &&
-    mode.decideAccountCredentialMode('account', true, '', 0, 1000) === 'account-login-required' &&
-    mode.decideAccountCredentialMode('account', true, 'jwt', 1000, 1000) === 'account-login-required');
+    mode.decideAccountCredentialMode('account', true, 'jwt', 1000, 1000) === 'account-login-required' &&
+    mode.decideAccountCredentialMode('account', false, 'jwt', 1001, 1000) === 'account-login-required');
+  // 2026-10-11 (account auth fix): the stored management JWT is a ONE-SHOT
+  // identity proof, dropped by the extension once it was used. An account store
+  // with an empty JWT is therefore a normal, usable state: the next connect
+  // logs in by WireGuard public key alone (the core tries a JWT-less Login
+  // first), and the mode decision must not block it.
+  check('an empty stored JWT is a valid public-key-only account session',
+    mode.decideAccountCredentialMode('account', true, '', 0, 1000) === 'account' &&
+    mode.decideAccountCredentialMode('account', true, '', 1000, 1000) === 'account');
   check('invalid explicit mode is not classified as legacy or account',
     mode.decideAccountCredentialMode('invalid', true, 'jwt', 0, 1000) === 'invalid');
   console.log(`RESULT passed=${passed} failed=${failed}`);

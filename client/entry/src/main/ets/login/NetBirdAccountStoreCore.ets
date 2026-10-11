@@ -94,7 +94,15 @@ export function validateCredentials(credentials: AccountCredentials): void {
     hasWhitespaceOrControl(credentials.clientId)) {
     throw new AccountStoreError(REASON_MALFORMED);
   }
-  if (typeof credentials.useIdToken !== 'boolean' || credentials.jwt.length === 0 ||
+  // 2026-10-11 (account auth fix): `jwt` may be EMPTY. The stored JWT is a
+  // one-shot identity proof; once the connector reports a completed login (or
+  // the token is rejected as already used) the extension rewrites this
+  // document with jwt: '' so the dead token can never be resent. The
+  // management URL / client id / token endpoint / refresh token stay, so
+  // account mode remains selected and the next connect logs in by WireGuard
+  // public key alone. A non-empty token is still length-checked and
+  // whitespace-free.
+  if (typeof credentials.useIdToken !== 'boolean' ||
     credentials.jwt.length > MAX_TOKEN_CHARS || hasWhitespaceOrControl(credentials.jwt) ||
     credentials.refreshToken.length > MAX_TOKEN_CHARS || hasWhitespaceOrControl(credentials.refreshToken)) {
     throw new AccountStoreError(REASON_MALFORMED);

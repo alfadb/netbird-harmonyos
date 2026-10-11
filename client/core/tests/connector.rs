@@ -286,6 +286,13 @@ struct MgmtMock {
     keys: EnvelopeKeyPair,
     login_response: Arc<Mutex<Option<LoginResponse>>>,
     login_fail: Arc<Mutex<Option<Status>>>,
+    /// 2026-10-11 A1: optional SCRIPTED verdict per Login call, popped in
+    /// order — entry 1 answers the account-mode JWT-less attempt, entry 2 the
+    /// one allowed JWT retry. Empty (every pre-existing test) = the
+    /// single-verdict knobs below. Scripted calls are decoded and captured
+    /// BEFORE their verdict, so a REJECTED attempt's wire shape is assertable
+    /// (that is exactly what the sequencing tests pin).
+    login_script: Arc<Mutex<VecDeque<Result<LoginResponse, Status>>>>,
     /// EVERY Login RPC seen, including ones rejected by `login_fail` —
     /// this is what pins the retry-count upper bounds.
     login_attempts: Arc<Mutex<usize>>,
@@ -303,6 +310,7 @@ impl Default for MgmtMock {
             keys: EnvelopeKeyPair::generate().expect("server key pair"),
             login_response: Arc::new(Mutex::new(None)),
             login_fail: Arc::new(Mutex::new(None)),
+            login_script: Arc::new(Mutex::new(VecDeque::new())),
             login_attempts: Arc::new(Mutex::new(0)),
             login_calls: Arc::new(Mutex::new(Vec::new())),
             sync_script: Arc::new(Mutex::new(VecDeque::new())),
@@ -311,6 +319,32 @@ impl Default for MgmtMock {
             logout_fail: Arc::new(Mutex::new(None)),
             extend_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+}
+
+impl MgmtMock {
+    /// Decode+capture ONE Login body (wire fields only). Never echoes a body.
+    fn capture_login(&self, env: &EncryptedMessage) -> Result<CapturedLogin, Status> {
+        let plaintext = decrypt_body(&self.keys, env)?;
+        let req = LoginRequest::decode(plaintext.as_slice())
+            .map_err(|e| Status::invalid_argument(format!("body is not LoginRequest: {e}")))?;
+        Ok(CapturedLogin {
+            setup_key: req.setup_key.clone(),
+            jwt_token: req.jwt_token.clone(),
+            meta_hostname: req.meta.as_ref().map(|m| m.hostname.clone()).unwrap_or_default(),
+        })
+    }
+
+    /// Seal `response` for the requesting client identity.
+    fn seal_login_reply(
+        &self,
+        env: EncryptedMessage,
+        response: LoginResponse,
+    ) -> Result<Response<EncryptedMessage>, Status> {
+        let client_pk = EnvelopePublicKey::from_base64(&env.wg_pub_key).expect("client pk");
+        let sealed = envelope::seal(&client_pk, &self.keys, &response.encode_to_vec())
+            .expect("seal login reply");
+        Ok(Response::new(EncryptedMessage { wg_pub_key: env.wg_pub_key, body: sealed, version: 0 }))
     }
 }
 
@@ -341,28 +375,30 @@ impl ManagementService for MgmtMock {
         // count the attempt BEFORE any rejection so retry bounds are
         // observable even for failed logins
         *self.login_attempts.lock().expect("attempts") += 1;
+        let env = request.into_inner();
+        // 2026-10-11 A1: a scripted verdict, if any, answers THIS call — the
+        // account-mode two-step drives the 1st against `no-jwt` and the 2nd
+        // against the stored JWT. Captured before the verdict on purpose.
+        if let Some(step) = self.login_script.lock().expect("login script").pop_front() {
+            let captured = self.capture_login(&env)?;
+            self.login_calls.lock().expect("login calls").push(captured);
+            return match step {
+                Err(status) => Err(status),
+                Ok(response) => self.seal_login_reply(env, response),
+            };
+        }
         if let Some(status) = self.login_fail.lock().expect("login fail").clone() {
             return Err(status);
         }
-        let env = request.into_inner();
-        let plaintext = decrypt_body(&self.keys, &env)?;
-        let req = LoginRequest::decode(plaintext.as_slice())
-            .map_err(|e| Status::invalid_argument(format!("body is not LoginRequest: {e}")))?;
-        self.login_calls.lock().expect("login calls").push(CapturedLogin {
-            setup_key: req.setup_key.clone(),
-            jwt_token: req.jwt_token.clone(),
-            meta_hostname: req.meta.as_ref().map(|m| m.hostname.clone()).unwrap_or_default(),
-        });
+        let captured = self.capture_login(&env)?;
+        self.login_calls.lock().expect("login calls").push(captured);
         let response = self
             .login_response
             .lock()
             .expect("login response")
             .clone()
             .unwrap_or_default();
-        let client_pk = EnvelopePublicKey::from_base64(&env.wg_pub_key).expect("client pk");
-        let sealed = envelope::seal(&client_pk, &self.keys, &response.encode_to_vec())
-            .expect("seal login reply");
-        Ok(Response::new(EncryptedMessage { wg_pub_key: env.wg_pub_key, body: sealed, version: 0 }))
+        self.seal_login_reply(env, response)
     }
 
     async fn sync(
@@ -781,6 +817,314 @@ async fn permission_denied_on_login_is_terminal() {
     handle.stop();
 }
 
+// ---------------------------------------------------------------------------
+// 2026-10-11 A1/A2: account-mode login sequencing
+// (upstream client/internal/auth/auth.go:184-236, :327-355, :491-521;
+//  client/internal/connect.go:373-377 — see connector.rs `login_sequence`)
+//
+// The management JWT is a ONE-SHOT identity proof, not a session credential:
+// these tests pin that a normal reconnect sends NO token at all, that the
+// stored JWT is used at most once and only when the server says the peer must
+// (re)register, and that a consumed/rejected token surfaces as
+// `account-login-required` (never as the generic permanent `auth`).
+// ---------------------------------------------------------------------------
+
+/// The device failure itself: an already-registered peer reconnects with a
+/// JWT sitting in the store — and the JWT must NOT go on the wire. The
+/// JWT-less Login is accepted, the connector reaches Connected, exactly one
+/// Login is attempted.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_reconnect_never_sends_the_stored_jwt() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 1, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        // account mode: no setup key, a STALE stored one-shot JWT
+        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected after the JWT-less login", || {
+        handle.status().state == ConnState::Connected
+    })
+    .await;
+
+    assert_eq!(
+        *mock.login_attempts.lock().expect("attempts"),
+        1,
+        "a registered peer needs exactly ONE JWT-less Login"
+    );
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 1);
+    assert_eq!(logins[0].jwt_token, "", "the stored one-shot JWT must never be replayed");
+    assert_eq!(logins[0].setup_key, "");
+    assert_eq!(handle.status().last_error, None);
+    assert!(handle.status().running);
+    handle.stop();
+}
+
+/// JWT-less Login rejected with `PermissionDenied` (peer login expired /
+/// registration needed) AND a stored JWT available → exactly one JWT retry,
+/// which registers successfully. Two Login calls total: the first with no
+/// token, the second with the token.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_permission_denied_then_jwt_registration_succeeds() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 2, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected after the JWT registration", || {
+        handle.status().state == ConnState::Connected
+    })
+    .await;
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 2, "both attempts are captured (the rejected one too)");
+    assert_eq!(logins[0].jwt_token, "", "attempt 1 must be JWT-less");
+    assert_eq!(logins[1].jwt_token, SENTINEL_JWT, "attempt 2 carries the one-shot JWT");
+    assert_eq!(logins[0].setup_key, "");
+    assert_eq!(logins[1].setup_key, "");
+    assert_eq!(handle.status().last_error, None, "a successful retry records no error");
+    handle.stop();
+}
+
+/// `InvalidArgument` is the other half of upstream's `isLoginNeeded`
+/// (`auth.go:491-521`) and must trigger the same single JWT retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_invalid_argument_then_jwt_registration_succeeds() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::invalid_argument(
+        "peer is not registered",
+    )));
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 1, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected after the InvalidArgument retry", || {
+        handle.status().state == ConnState::Connected
+    })
+    .await;
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins[0].jwt_token, "");
+    assert_eq!(logins[1].jwt_token, SENTINEL_JWT);
+    handle.stop();
+}
+
+/// The exact device symptom: the JWT-less Login needs a registration, the
+/// stored JWT is dead (`Unauthenticated: JWT already used`) → the connector
+/// parks in Failed with ITS OWN class `account-login-required` (status 16),
+/// terminal, no retry loop, and the Sync RPC is never attempted.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_one_shot_jwt_already_used_is_login_required() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    mock.login_script.lock().expect("script").push_back(Err(Status::unauthenticated(
+        "JWT already used",
+    )));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
+        Duration::from_secs(600),
+        Duration::from_millis(10),
+        Some(Duration::from_secs(60)), // a REAL budget: a retry loop would be visible
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("terminal Failed state", || handle.status().state == ConnState::Failed).await;
+
+    let status = handle.status();
+    assert!(!status.running, "worker exited");
+    assert!(status.terminal, "account-login-required is terminal for this attempt");
+    assert_eq!(
+        status.last_error,
+        Some(ErrorClass::AccountLoginRequired { status: 16 }),
+        "a consumed one-shot JWT is account-login-required(16), NOT the generic auth class"
+    );
+    assert_eq!(status.reconnects, 0, "fatal: no retryable failures counted");
+    let json = handle.status_json();
+    assert!(json.contains("\"class\":\"account-login-required\",\"status\":16"), "{json}");
+    // the server's own words never reach the class-only JSON surface
+    assert!(!json.contains("JWT already used"), "{json}");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        *mock.login_attempts.lock().expect("attempts"),
+        2,
+        "no third Login after the JWT was rejected"
+    );
+    assert!(
+        mock.sync_connects.lock().expect("sync").is_empty(),
+        "the Sync RPC is never attempted after a fatal login"
+    );
+    handle.stop();
+}
+
+/// After the shell drops the stored JWT, a reconnect whose server-side peer
+/// session expired has NO token to (re)register with: the JWT-less
+/// `PermissionDenied` IS "log in again" — one attempt, the
+/// account-login-required class with the server's status preserved.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_peer_login_expired_without_a_jwt_is_login_required() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        // the shell already dropped the one-shot JWT: the pubkey-only shape
+        ConnectorSecrets { setup_key: String::new(), jwt: String::new() },
+        Duration::from_secs(600),
+        Duration::from_millis(10),
+        Some(Duration::from_secs(60)),
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("terminal Failed state", || handle.status().state == ConnState::Failed).await;
+
+    assert_eq!(
+        handle.status().last_error,
+        Some(ErrorClass::AccountLoginRequired { status: 7 }),
+        "PermissionDenied on a JWT-less account login means re-login, not a setup-key problem"
+    );
+    assert!(handle.status().terminal);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        *mock.login_attempts.lock().expect("attempts"),
+        1,
+        "with no JWT at hand there is no retry to make"
+    );
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 1);
+    assert_eq!(logins[0].jwt_token, "");
+    handle.stop();
+}
+
+/// Transient failures keep the OLD behaviour: retried with backoff until the
+/// next attempt succeeds. `Unauthenticated` on a JWT-less attempt is NOT
+/// re-classified (upstream only re-classifies the one-shot JWT verdicts).
+#[tokio::test(flavor = "multi_thread")]
+async fn account_mode_transient_login_failure_is_retried() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::unavailable(
+        "management temporarily unreachable",
+    )));
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 1, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: String::new(), jwt: String::new() },
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected after the transient retry", || {
+        handle.status().state == ConnState::Connected
+    })
+    .await;
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+    // last_error is a HISTORICAL record (it does not self-clear) — the point
+    // here is that the transient class was retried, not re-classified
+    assert_eq!(
+        handle.status().last_error,
+        Some(ErrorClass::Network),
+        "the transient failure keeps its own class and is retried"
+    );
+    assert_eq!(handle.status().reconnects, 1, "the retried failure is counted once");
+    handle.stop();
+}
+
+/// Setup-key mode is UNCHANGED: one Login, carrying the setup key and no JWT
+/// even when an account token happens to be stored.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_key_mode_is_unchanged_and_never_sends_a_stored_jwt() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 1, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: SENTINEL_JWT.into() },
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected", || handle.status().state == ConnState::Connected).await;
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1, "no two-step in setup-key mode");
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 1);
+    assert_eq!(logins[0].setup_key, SENTINEL_SETUP_KEY);
+    assert_eq!(logins[0].jwt_token, "");
+    handle.stop();
+}
+
 /// Retry-budget exhaustion through an INJECTED failing management factory
 /// (the ManagementFactory seam): attempts are bounded (here: exactly one —
 /// the budget is spent after the first failure), the state machine parks in
@@ -1056,7 +1400,11 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
     {
         let logins = mock.login_calls.lock().expect("logins");
         assert_eq!(logins[logins.len() - 1].setup_key, SENTINEL_SETUP_KEY);
-        assert_eq!(logins[logins.len() - 1].jwt_token, SENTINEL_JWT);
+        // 2026-10-11 A1: setup-key mode sends the setup key and NOTHING else —
+        // a stored account JWT is not this mode's credential and must never
+        // ride along on the wire (it stays a local secret, which is exactly why
+        // the leak scan above/below keeps covering it).
+        assert_eq!(logins[logins.len() - 1].jwt_token, "");
         assert_eq!(logins[logins.len() - 1].meta_hostname, "ohos-connector");
     }
     handle2.stop();
@@ -1207,8 +1555,13 @@ async fn session_renewal_fires_only_when_jwt_and_near_expiry() {
 async fn napi_global_start_status_stop_roundtrip() {
     use netbird_core::connector::{connector_start_json, connector_status_json, connector_stop_json};
 
-    // invalid credentials are rejected with a stable reason
-    let json = connector_start_json(&config_json_for(std::net::SocketAddr::from(([127, 0, 0, 1], 1))), "{}");
+    // invalid credentials are rejected with a stable reason (2026-10-11 A1:
+    // an ALL-EMPTY document is a VALID pubkey-only reconnect now — the
+    // rejection is for a malformed one).
+    let json = connector_start_json(
+        &config_json_for(std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+        "{\"setup_key\":7}",
+    );
     assert!(json.contains("\"started\":false"), "{json}");
     assert!(json.contains("invalid-credentials"), "{json}");
 
