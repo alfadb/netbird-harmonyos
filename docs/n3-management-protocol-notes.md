@@ -354,20 +354,36 @@ connector_stop()     幂等：abort worker（关 Sync 流）→ 尽力 logout
   `{"started":false,"error":"already-running"|"invalid-config"|"invalid-credentials"}`。
   `configJson`：`management_url`（必填）、`private_key`（必填，base64 32B）、
   `ca_pem`（`https://` 必填，字符串或数组）、`server_name`、`hostname`/`os_name`/
-  `os_version`/`netbird_version`、`connect_timeout_ms`/`request_timeout_ms`、
-  `session_renew_lead_ms`/`renew_check_interval_ms`。
-  `setupKeyJson`：`{"setup_key":"..."}` 与/或 `{"jwt":"..."}`；**字段可以全空**
-  （2026-10-11 账号修复：已注册 peer 的普通重连只靠 WireGuard 公钥，upstream
-  `GrpcClient::Login` grpc.go:650-656 不带任何 token；账号模式在一次性 JWT 用掉后
-  由壳层清空 `jwt` 字段后就是这种形态）。字段类型/形状非法仍是 `invalid-credentials`。
+  `os_version`/`netbird_version`、`connect_timeout_ms`/`request_timeout_ms`。
+  `setupKeyJson`：`{"setup_key":"..."}`；**可以整个为 `{}` 或省略**
+  （2026-10-12：连接路径只带持久 WireGuard 公钥、不带任何 token，upstream
+  `GrpcClient::Login` grpc.go:650-656；账号模式的连接就是这种形态，JWT 根本不会
+  到达连接器）。**没有 `jwt` 字段**：JWT 只在 UI 进程的 login action 里用一次
+  （见下），连接路径永远无 token。setup key 由核心在 key-less `Login` 被
+  `PermissionDenied`/`InvalidArgument` 拒绝后送进 `Register` 第二步
+  （upstream auth.go:208-236、grpc.go:641-648）。字段类型/形状非法仍是
+  `invalid-credentials`。
+- `account_login_start(requestJson)` / `account_login_poll(id)` /
+  `account_login_cancel(id)` → login action 的管理面步骤（upstream
+  `client/android/client.go:194-215` → `auth.go:184-236`）：`requestJson` =
+  `{"config": <同 connector_start 的 config 文档>, "jwt": <token exchange 结果>}`；
+  两步 = 先无 token `Login`，仅当被 `PermissionDenied`/`InvalidArgument` 拒绝才
+  `Register` 带 JWT。poll 回 `{"state":"pending"}` /
+  `{"state":"done","outcome":"success"|"needs-login"}` /
+  `{"state":"failed","error":"invalid-input"|"jwt-required"|"invalid-config"|
+  "network-error"|"timeout"|"management-error"}`。**JWT 只存在于该 job 的内存里，
+  任何一步都不落盘**（upstream profilemanager/config.go:62-135 无 token 字段）。
 - `connector_status()` → `{"running","state","started_at_unix","last_update_unix",
   "peer_count","route_count","reconnects","last_error","session_expiry",
-  "session_expires_at_unix","session_renew_attempts","wg_apply_failed",
+  "session_expires_at_unix","wg_apply_failed",
   "wg_apply_errors","logout_ok"}`。`state` 复用 `state.rs` 六态；
   `last_error` 仅 `{"class","status"}` 分类（network/timeout/auth/request/
-  server/parse/unsupported_url，以及 2026-10-11 起的 `account-login-required`
-  ——账号模式需要重新交互登录，**无任何 server/transport message**）；
-  `session_expiry` 三态 `unknown`/`disabled`/`set`。
+  server/parse/unsupported_url，以及 2026-10-12 起的 `needs-login`
+  ——upstream `StatusNeedsLogin`（connect.go:373-377 / state.go:15）：管理端拒绝了
+  本 peer（会话过期 / 尚未注册），**无任何 server/transport message**）；
+  `session_expiry` 三态 `unknown`/`disabled`/`set`。2026-10-12：静默续期
+  （`session_renew_attempts`）随 token 一起删除——上游的续期是 App 进程的交互
+  流程（`client/android/session.go:127-155`），核心只发布期限。
 - `connector_stop()` → `{"ok":true,"already_stopped":bool,"state"}`（幂等；
   无连接器时同样返回 ok）。stop 后槽位释放，可再次 start。
 
@@ -385,19 +401,23 @@ connector_stop()     幂等：abort worker（关 Sync 流）→ 尽力 logout
 - 壳侧配置：`ConfigApplier` trait（路由/DNS/本机地址交宿主；生产默认
   `LoggingConfigApplier` 只打点——壳侧真实应用器是下一增量）。
 
-## 会话续期时机（出处）
+## 会话续期时机（出处）—— 2026-10-12 起改为"只发布期限，不自行续期"
 
 Login/Sync 上的 3 态 `sessionExpiresAt` 按上游
 `client/internal/engine_authsession.go:17-62`（`ApplySessionDeadline`：
-nil=保持、显式零=禁用、有效值=新期限）锚定；剩余寿命小于
-`session_renew_lead_ms`（默认 10 分钟，即上游交互警告提前量
-`client/internal/auth/sessionwatch/watcher.go:34-37`）时调用
-`ExtendAuthSession`。入口语义对照 `engine_authsession.go:83-107`：
-空 JWT 本地拒绝不发起 I/O（L84-86）；只刷新期限、不重同步不动隧道
-（L71-73 注释、L97-102）；响应 3 态写回（L102 + management.proto
-L306-310）。续期失败记录净化分类后等下一 tick 重试（上游把错误交还
-调用方由警告流重触发，engine_authsession.go:98-100；HarmonyOS 侧暂无
-对应警告流）。
+nil=保持、显式零=禁用、有效值=新期限）锚定，并原样发布到状态文档
+（`session_expiry` + `session_expires_at_unix`）供壳层显示。
+
+**核心不再自行调用 `ExtendAuthSession`**：上游的续期是 **App 进程的交互
+流程**——`client/android/session.go:127-155` `ExtendAuthSession` 先跑一次
+SSO 拿新 JWT（`client/android/login.go:191-204`），再把 token 交给引擎的
+`engine_authsession.go:83-107`（空 JWT 本地拒绝 L84-86；只刷新期限、不重同步
+不动隧道 L71-73/L97-102；响应 3 态写回 L102 + management.proto L306-310），
+而且 Android 引擎自己不设任何到期定时器（`session.go:20-24` 注释）。本仓核心
+**没有任何 token**，因此静默续期路径（`renew_check_interval` /
+`session_renew_lead_ms` / `session_renew_attempts`）已随 2026-10-12 的
+"JWT 不落盘"改动一并删除；对应的交互入口（UI 进程 SSO → 核心 extend）尚未
+实现，是已知缺口。
 
 ## ⚠️ 限制（不得误读为"已能连上 peer"）
 

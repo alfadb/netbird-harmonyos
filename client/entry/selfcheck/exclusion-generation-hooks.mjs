@@ -914,15 +914,7 @@ const STUBS = {
     'export const ACCOUNT_MODE_FILE_NAME = "netbird-auth-mode";\n' +
     'export const ACCOUNT_MODE_SETUP_KEY = "setup-key";\n' +
     'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
-    ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
-    'export const decideAccountCredentialMode = () => "account-login-required";'),
-  // 2026-10-11 (account auth fix): the extension imports both
-  // `loadAccountCredentials` and `saveAccountCredentials` by value now (the
-  // spent one-shot JWT is dropped). This suite never reaches either path, but
-  // both named exports must exist for the staged fixture to link.
-  '../login/NetBirdAccountStore': 'data:text/javascript,' + encodeURIComponent(
-    'export async function loadAccountCredentials() { return null; }\n' +
-    'export async function saveAccountCredentials() {}'),
+    ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";'),
   // 2026-10-10 后台保活（0.0.19, 方案 A）: the REAL EntryAbility now registers the
   // borrowed DATA_TRANSFER continuous task on its onCreate/onDestroy, so this
   // specifier must resolve for the byte-identical ability fixture to link. The

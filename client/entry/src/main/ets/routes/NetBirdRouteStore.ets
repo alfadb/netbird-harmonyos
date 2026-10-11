@@ -2,12 +2,12 @@
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
 // File adapter for the per-NetID route-selection document and the public route
-// catalog. Same minimal IO pattern as NetBirdAccountStore (private file, temp
+// catalog. Same minimal IO pattern as NetBirdKeepAliveStore (private file, temp
 // file, fsync, rename) but with NO key material and NO crypto: both documents
 // are plain public configuration (a management URL and route NetIDs/prefixes
 // are not secrets). The path whitelist below can only ever name these two
 // files plus their temp siblings, so this module can never touch the device
-// config, the setup key or the account document.
+// config or the setup key.
 //
 // Scope rules (NetBirdRoutePreferences owns the parsing):
 // - missing selection file / a selection for ANOTHER management URL -> null

@@ -96,13 +96,12 @@ import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
-  decideAccountCredentialMode, parseAuthMode }
+  parseAuthMode }
   from '../login/NetBirdAccountMode';
-import { loadAccountCredentials, saveAccountCredentials } from '../login/NetBirdAccountStore';
-// type-only: erased at runtime (same rule as the shapes above) — the dropped
-// one-shot JWT is written back through the SAME encrypted store, never through
-// a hand-rolled document.
-import type { AccountCredentials } from '../login/NetBirdAccountStoreCore';
+// 2026-10-12: no account credential store any more. Upstream keeps no token
+// (client/internal/profilemanager/config.go:62-135): the management JWT is used
+// once by the UI-process login action (NetBirdAccountLogin → the core's
+// `account_login_*` NAPI job) and every connect is token-less.
 
 import { isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
@@ -1732,7 +1731,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     let setupKey: string = '';
-    let accountJwt: string = '';
     let authMode: string = ACCOUNT_MODE_SETUP_KEY;
     let device: DeviceConfigFile;
     let credentialFailure: string = 'credentials-missing';
@@ -1747,18 +1745,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         setupKey = readCredentialFileText(filesDir, setupKeyFile);
         device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
       } else if (authMode === ACCOUNT_MODE_ACCOUNT) {
-        credentialFailure = 'account-login-required';
+        // 2026-10-12: the account mode start reads the DEVICE CONFIG only. The
+        // peer identity (persistent WireGuard key) and the management URL are
+        // all a connect needs — upstream sends `Login` with no token and
+        // identifies the peer by that key (grpc.go:650-656). A missing/invalid
+        // config is the only local abort, and its class is the server's own
+        // needs-login verdict (the fix is an interactive 账户登录, which
+        // registers this very identity).
+        credentialFailure = 'needs-login';
         device = parseDeviceConfig(readPrivateFileText(filesDir, deviceFile));
-        const stored = await loadAccountCredentials(filesDir, device.management_url);
-        const decision: string = decideAccountCredentialMode(authMode, stored !== null,
-          stored?.jwt ?? '', stored?.expiresAtMs ?? 0, Date.now());
-        if (decision !== ACCOUNT_MODE_ACCOUNT || stored === null) {
-          throw new Error('account-login-required');
-        }
-        accountJwt = stored.jwt;
       } else {
-        credentialFailure = 'account-login-required';
-        throw new Error('account-login-required');
+        credentialFailure = 'needs-login';
+        throw new Error('needs-login');
       }
     } catch (error) {
       this.writeConnectFailureForUi(credentialFailure);
@@ -1892,8 +1890,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
     // 4. start the connector over the protected socket (Rust dup-consumes
     // the fd per dial; the original number stays shell-owned — fd contract)
+    // 2026-10-12: account mode sends NO credential at all (`{}`): the connect
+    // identifies the peer by its persistent WireGuard public key, exactly like
+    // upstream's `Login` (shared/management/client/grpc.go:650-656). The setup
+    // key is the only credential left, and the core hands it to the `Register`
+    // second step on a login-needed verdict (upstream auth.go:208-236).
     const creds: Record<string, Object> = authMode === ACCOUNT_MODE_ACCOUNT
-      ? { 'jwt': accountJwt } : { 'setup_key': setupKey };
+      ? {} : { 'setup_key': setupKey };
     let start: ConnectorStartResult;
     try {
       start = connectorStartWithSocket(mgmtFd,
@@ -1955,19 +1958,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
-    // 2026-10-11 (account auth fix, one-shot JWT hygiene): a network map means
-    // the management login COMPLETED — whether it went through the stored JWT
-    // (the core only sends it when the JWT-less login was rejected as "peer
-    // not registered / peer login expired") or without it. Either way the
-    // token is spent and must never be resent: the management server rejects a
-    // second use ("JWT already used"), which is exactly the device failure
-    // this fixes. Drop it now; the rest of the account store (management URL,
-    // client id, token endpoint, refresh token) stays, so account mode remains
-    // selected and the next connect logs in by WireGuard public key alone.
-    if (net !== null && authMode === ACCOUNT_MODE_ACCOUNT && accountJwt.length > 0) {
-      await this.dropStoredAccountJwt('login-completed');
-    }
-
     // N5d signal provisioning (fail-closed, governance §二.4 — signal is an
     // enumerated protect socket): the core's real signal link dials ONLY
     // over shell-protected sockets. The signal URI rides the network-config
@@ -2011,14 +2001,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           failureClass = 'none';
         }
       }
-      // 2026-10-11 (account auth fix): the core's own class says the account
-      // must log in again (JWT-less login rejected as "peer login expired", or
-      // the stored one-shot JWT already used / expired). The stored token is
-      // dead in every one of those cases — drop it so no later connect can
-      // replay it, and let the class travel to the UI as 需要重新登录.
-      if (failureClass === 'account-login-required') {
-        await this.dropStoredAccountJwt('login-required');
-      }
+      // 2026-10-12: the core's own class travels to the UI unchanged — the
+      // `needs-login` one (upstream StatusNeedsLogin) renders as the official
+      // 「需要登录」 label, and nothing has to be dropped on the way: there is
+      // no stored token anywhere.
       this.writeConnectFailureForUi(failureClass);
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-uri|' +
@@ -7274,49 +7260,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return 'FD_CLOSED_CONFIRMED';
     }
     return 'FD_NOT_OPEN_AFTER_DESTROY';
-  }
-
-  // 2026-10-11 (account auth fix): drop the ONE-SHOT management JWT from the
-  // account store while keeping everything else it holds (management URL,
-  // client id, token endpoint, refresh token, expiry). The management server
-  // consumes a JWT on the first Login that carries it
-  // (management/server/auth/session.go `RegisterToken` → "JWT already used"),
-  // so a token that was sent once is dead: keeping it would only make the next
-  // connect replay it (the core's account sequence would then report
-  // 账户登录已过期 instead of simply logging in by WireGuard public key). The
-  // core tries a JWT-less Login FIRST on every connect, so account mode keeps
-  // working with an empty jwt field (NetBirdAccountMode).
-  //
-  // Only the jwt field is rewritten, through the SAME encrypted store
-  // (NetBirdAccountStore: AES-GCM envelope + AssetStoreKit key), never a raw
-  // file write; the token never reaches a log line. Best-effort: a failed
-  // rewrite only costs one replay of a dead token, which the core's
-  // no-JWT-first sequence already tolerates.
-  private async dropStoredAccountJwt(reason: string): Promise<void> {
-    try {
-      const stored: AccountCredentials | null =
-        await loadAccountCredentials(this.context.filesDir);
-      if (stored === null || stored.jwt.length === 0) {
-        return;
-      }
-      const cleared: AccountCredentials = {
-        managementUrl: stored.managementUrl,
-        clientId: stored.clientId,
-        tokenEndpoint: stored.tokenEndpoint,
-        useIdToken: stored.useIdToken,
-        jwt: '',
-        refreshToken: stored.refreshToken,
-        expiresAtMs: stored.expiresAtMs
-      };
-      await saveAccountCredentials(this.context.filesDir, cleared);
-      hilog.info(DOMAIN, TAG,
-        'VPN_ACCOUNT_JWT_DROPPED|requestId=%{public}s|reason=%{public}s|field=jwt',
-        this.requestId, reason);
-    } catch (error) {
-      hilog.warn(DOMAIN, TAG,
-        'VPN_ACCOUNT_JWT_DROP_FAILED|requestId=%{public}s|reason=%{public}s|code=%{public}s',
-        this.requestId, reason, String((error as BusinessFailure).code ?? 'none'));
-    }
   }
 
   // 2026-10-06 登录失败可见性: persist ONE connect-failure notice into the

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
 // Host-side per-NetID route-selection checks (no device, no network, no
-// compiler). Same principle as run-account-store.mts: the REAL production
+// compiler). Same principle as the other run-*.mts suites: the REAL production
 // modules are copied byte-for-byte into an OS-temp fixture (.ts) at run time —
 // the code under test is the shipped code, never a hand-held mirror:
 //   NetBirdRoutePreferences.ets  (pure state + document parsing)

@@ -13,7 +13,9 @@
 - 使用 OAuth 授权码流程和 PKCE S256；校验服务器提供的精确回调 URI 与会话 `state`，拒绝隐式流程令牌。
 - 授权端点和令牌交换均通过 HTTPS。服务端配置的 loopback 回调可能是 `http://localhost:53000/` 或 `http://localhost:54000/`；客户端遵循本次发现的精确 URI，不固定端口。
 - 当前公开配置为 `https://api.netcenter.alfadb.cn/oauth2/auth` 和 `https://api.netcenter.alfadb.cn/oauth2/token`。未请求 `offline_access`；连接使用 `access_token`，不以 `id_token` 替代。令牌到期时提示用户重新登录，不自动刷新。
-- 令牌存入应用私有文件前使用 AES-256-GCM 加密；随机 32 字节密钥保存在 AssetStoreKit。未实现从 JWT 显示用户名的功能。
+- **2026-10-12：令牌完全不落盘。** 与官方客户端一致（`client/internal/profilemanager/config.go:62-135` 没有 token 字段），登录动作在交换到 JWT 之后**立即**用它完成管理面登录/注册（先试不带 token 的 `Login`；仅当被 `PermissionDenied`/`InvalidArgument` 拒绝才带 JWT 走 `Register`，upstream `client/android/client.go:194-215` → `client/internal/auth/auth.go:184-236`），随后令牌随调用一起丢弃：不进文件、不进 UI 状态、不进任何后续连接。原来的加密凭据文件（AES-256-GCM + AssetStoreKit 密钥）已随本次改动整体删除。此前"先存令牌、之后每次连接都带上"的做法在第二次连接时会被管理端以 `JWT already used` 拒绝（一次性凭证），这正是 0.0.24 在 PC 上的故障形态。
+- 连接阶段只带设备身份（持久 WireGuard 公钥）+ 管理 URL，与上游 `Login`（`shared/management/client/grpc.go:650-656`）一致。服务端拒绝（会话过期 / 尚未注册）时状态类是 `needs-login`（upstream `StatusNeedsLogin`），界面显示官方文案「需要登录」（Android `main_status_login_required` = "Login required"）。
+- 未实现从 JWT 显示用户名的功能。
 
 ## 验证记录
 

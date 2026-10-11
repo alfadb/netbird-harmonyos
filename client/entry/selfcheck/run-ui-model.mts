@@ -779,27 +779,30 @@ try {
   check('failure texts: extension stage tokens',
     m.connectFailureText('credentials-missing').indexOf('Setup Key') >= 0 &&
     m.connectFailureText('no-signal-uri').indexOf('Signal') >= 0);
-  // 2026-10-11 (account auth fix): the core's own account-login-required class
-  // gets a sentence that names the 账户登录 button, is NOT the setup-key/reconfigure
-  // line, and is reachable from BOTH class surfaces (live status last_error_class
-  // and the persistent connect-failure notice). The class token itself is
-  // cross-checked against the REST of the pipeline: the core's ErrorClass token
-  // and the Index.ets wiring both have to spell it the same way.
-  check('account login required text names the 账户登录 button and is not the auth text',
-    m.ACCOUNT_LOGIN_REQUIRED_CLASS === 'account-login-required' &&
-    m.ACCOUNT_LOGIN_REQUIRED_TEXT.indexOf('账户登录') >= 0 &&
-    m.lastErrorText(m.ACCOUNT_LOGIN_REQUIRED_CLASS) === m.ACCOUNT_LOGIN_REQUIRED_TEXT &&
-    m.connectFailureText(m.ACCOUNT_LOGIN_REQUIRED_CLASS) === m.ACCOUNT_LOGIN_REQUIRED_TEXT &&
-    m.connectFailureText(m.ACCOUNT_LOGIN_REQUIRED_CLASS) !== m.connectFailureText('auth'));
+  // 2026-10-12: the core's own needs-login class (upstream StatusNeedsLogin,
+  // client/internal/state.go:15) is rendered as the OFFICIAL label — Android's
+  // `main_status_login_required` = "Login required"
+  // (android-client/app/src/main/res/values/strings.xml:32), i.e. 「需要登录」.
+  // It is reachable from BOTH class surfaces (live status last_error_class and
+  // the persistent connect-failure notice) and is NOT the setup-key/reconfigure
+  // line. The class token itself is cross-checked against the REST of the
+  // pipeline: the core's ErrorClass token and the Index.ets wiring both have to
+  // spell it the same way.
+  check('needs-login renders the official Login required label and is not the auth text',
+    m.NEEDS_LOGIN_CLASS === 'needs-login' &&
+    m.NEEDS_LOGIN_TEXT === '需要登录' &&
+    m.lastErrorText(m.NEEDS_LOGIN_CLASS) === m.NEEDS_LOGIN_TEXT &&
+    m.connectFailureText(m.NEEDS_LOGIN_CLASS) === m.NEEDS_LOGIN_TEXT &&
+    m.connectFailureText(m.NEEDS_LOGIN_CLASS) !== m.connectFailureText('auth'));
   const CORE_CONNECTOR = readFileSync(join(here, '..', '..', 'core', 'src', 'connector.rs'), 'utf8');
   const PAGE = readFileSync(join(here, '..', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
-  check('the account-login-required token is the SAME string in the core, the UI model and the page',
-    CORE_CONNECTOR.includes('ErrorClass::AccountLoginRequired { .. } => "account-login-required"') &&
-    CORE_CONNECTOR.includes('ManagementError::AccountLoginRequired') &&
-    PAGE.includes("import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, ACCOUNT_LOGIN_REQUIRED_CLASS,") &&
-    PAGE.includes('if (this.connectFailureClass === ACCOUNT_LOGIN_REQUIRED_CLASS)') &&
-    PAGE.includes('return ACCOUNT_LOGIN_REQUIRED_TEXT;') &&
-    !PAGE.includes("'账户登录已过期，请重新登录'"));
+  check('the needs-login token is the SAME string in the core, the UI model and the page',
+    CORE_CONNECTOR.includes('ErrorClass::NeedsLogin { .. } => "needs-login"') &&
+    CORE_CONNECTOR.includes('ManagementError::NeedsLogin') &&
+    PAGE.includes("import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, NEEDS_LOGIN_CLASS,") &&
+    PAGE.includes('if (this.connectFailureClass === NEEDS_LOGIN_CLASS)') &&
+    PAGE.includes('return NEEDS_LOGIN_TEXT;') &&
+    !PAGE.includes('账户登录已过期'));
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

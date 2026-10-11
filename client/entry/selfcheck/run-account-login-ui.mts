@@ -29,7 +29,7 @@ const cancelEdit = sliceFrom(PAGE, 'private cancelConfigurationEdit(): void', 'p
 const configForm = sliceFrom(PAGE, 'setupFormCard() {', 'serverConfigCard() {');
 const configSummary = sliceFrom(PAGE, 'serverConfigCard() {', 'logoutAction() {');
 const webView = sliceFrom(PAGE, '  build() {\n    if (this.accountLoginOpen)', '\n  }\n}');
-const accountErrorText = sliceFrom(PAGE, 'private accountStoreFailureSuffix(',
+const accountErrorText = sliceFrom(PAGE, 'private accountLoginErrorText(',
   'private async beginAccountLogin()');
 
 check('configuration summary separates server address and login method and has one edit entry',
@@ -48,12 +48,25 @@ check('controller builds login state from checked management URL and bundled CA 
   begin.includes('checkManagementUrl(this.urlInput)') &&
   begin.includes('readPackagedCaRootsPem(getContext(this).resourceManager)') &&
   begin.includes('this.accountLoginController.begin(urlCheck.url, caPem)'));
-check('account commit starts VPN only after credentials, config, and auth mode persist',
-  finish.indexOf('await saveAccountCredentials(') >= 0 &&
-  finish.indexOf('await saveAccountCredentials(') < finish.indexOf('writeSetupFile(SETUP_CONFIG_FILE') &&
+// 2026-10-12: the login action registers the peer with the JWT through the core
+// (same device identity + management URL the extension dials) BEFORE the VPN
+// starts, and persists only the device config + mode marker. No credential
+// document is written — upstream stores no token.
+check('account commit runs the core login action with the extension config, then starts VPN',
+  finish.includes('buildConnectorConfigJson(device, false, null)') &&
+  finish.includes('this.accountLoginController.finish(code, connectorConfig)') &&
+  finish.indexOf('this.accountLoginController.finish(code, connectorConfig)') <
+    finish.indexOf('writeSetupFile(SETUP_CONFIG_FILE') &&
   finish.indexOf('writeSetupFile(SETUP_CONFIG_FILE') < finish.indexOf('writeSetupFile(ACCOUNT_MODE_FILE_NAME') &&
   finish.indexOf('writeSetupFile(ACCOUNT_MODE_FILE_NAME') < finish.indexOf('this.requestStart();') &&
   finish.split('this.requestStart();').length === 2);
+check('account commit writes no credential document and keeps no token in UI state',
+  !finish.includes('saveAccountCredentials') && !finish.includes('AccountCredentials') &&
+  !finish.includes('refreshToken') && !finish.includes("'jwt'") &&
+  !PAGE.includes('ACCOUNT_CREDENTIALS_FILE'));
+check('the connector config the login action registers is built from the device identity',
+  finish.includes('const privateKey: string = this.devicePrivateKey();') &&
+  finish.includes('ca_pem: caPem') && finish.includes('relay_enabled: this.deviceRelayEnabled()'));
 check('Setup Key save starts VPN once only after every save succeeds',
   setupSave.indexOf('if (!this.writeSetupFile(SETUP_CONFIG_FILE') >= 0 &&
   setupSave.includes("this.formError = '保存失败，请重试';\n      return;\n    }\n    // Drop the secret") &&
@@ -62,7 +75,7 @@ check('canceling a configured edit restores persisted mode and URL without writi
   cancelEdit.includes('this.refreshSetupState();') && cancelEdit.includes('this.urlInput = this.configuredUrl;') &&
   cancelEdit.includes('this.keyInput = \'\';') && !cancelEdit.includes('writeSetupFile(') &&
   !cancelEdit.includes('this.configured = false'));
-check('configured state is derived from stored credentials, not editor visibility',
+check('configured state is derived from the stored device config, not editor visibility',
   PAGE.includes('this.configured = storedMode === ACCOUNT_MODE_ACCOUNT') &&
   !PAGE.includes('this.configured = false'));
 check('active/connecting VPN disables configuration entry and reports the reason before submit',
@@ -73,65 +86,45 @@ check('active/connecting VPN disables configuration entry and reports the reason
 check('device identity is reused and Setup Key files are not removed when switching modes',
   finish.includes('this.devicePrivateKey()') && finish.includes('this.deviceRelayEnabled()') &&
   !finish.includes('removeSetupFile(SETUP_KEY_FILE)'));
+// 2026-10-12: the committing latch is armed BEFORE the login action (a cancel
+// must not interleave with the JWT registration that is already in flight);
+// the discovery cancel path is unchanged.
 check('cancel invalidates discovery or token exchange and cancels the private controller',
   cancel.includes('this.accountLoginGeneration++') && cancel.includes('this.accountLoginController.cancel()') &&
-  PAGE.includes('const credentials: AccountCredentials = await this.accountLoginController.finish(code);') &&
-  PAGE.indexOf('await this.accountLoginController.finish(code);') < PAGE.indexOf('this.accountLoginCommitting = true;') &&
+  PAGE.includes('this.accountLoginController.finish(code, connectorConfig);') &&
+  PAGE.indexOf('this.accountLoginCommitting = true;') <
+    PAGE.indexOf('this.accountLoginController.finish(code, connectorConfig);') &&
   PAGE.includes("Button('取消登录')") &&
   PAGE.includes('if (!this.accountLoginCommitting) {\n      this.cancelAccountLogin(false);'));
 check('auth mode cannot be switched while VPN is connecting or active',
   PAGE.includes('return this.requestSent || (this.published !== null && vpnActiveState(this.published.state));') &&
   setupSave.includes("this.formError = '断开 VPN 后可更改配置';"));
 check('UI state contains no persisted or transient token material',
-  !/@State\s+(?:private\s+)?\w+\s*:\s*(?:AccountCredentials|.*(?:jwt|refreshToken|verifier|token))/i.test(PAGE));
-check('explicit logout clears encrypted account credentials after the existing logout flow',
-  PAGE.includes('clearAccountCredentials(getContext(this).filesDir).then(') &&
-  PAGE.includes('this.removeSetupFile(ACCOUNT_MODE_FILE_NAME);'));
-// 0.0.22: run the two REAL helpers (type annotations stripped) against a coded
-// failure, so "step + platform code reaches the sentence" is proven by output,
-// not by a source pin.
+  !/@State\s+(?:private\s+)?\w+\s*:\s*(?:AccountCredentials|.*(?:jwt|refreshToken|verifier|token))/i.test(PAGE) &&
+  !PAGE.includes('saveAccountCredentials') && !PAGE.includes('loadAccountCredentials'));
+check('explicit logout clears the local configuration without touching a credential store',
+  PAGE.includes('this.removeSetupFile(ACCOUNT_MODE_FILE_NAME);') &&
+  !PAGE.includes('clearAccountCredentials'));
+// The login-action reason tokens are rendered by the REAL helper (type
+// annotations stripped), so "token → sentence" is proven by output, not by a
+// source pin.
 const errorTextSource = accountErrorText
-  .replace('private accountStoreFailureSuffix(', 'function accountStoreFailureSuffix(')
   .replace('private accountLoginErrorText(', 'function accountLoginErrorText(')
-  .replace(/this\.accountStoreFailureSuffix/g, 'accountStoreFailureSuffix')
+  .replace(/this\.NEEDS_LOGIN_TEXT/g, 'NEEDS_LOGIN_TEXT')
   .replace(/: Error \| string/g, '')
   .replace(/: string/g, '');
-class FakeAccountStoreError extends Error {
-  constructor(reason: string, step: string, code: number, detail: string) {
-    super(reason);
-    (this as any).reason = reason;
-    (this as any).step = step;
-    (this as any).code = code;
-    (this as any).detail = detail;
-  }
-}
-const errorText = new Function('AccountStoreError',
-  `${errorTextSource}; return { accountLoginErrorText };`)(FakeAccountStoreError) as {
+const errorText = new Function('NEEDS_LOGIN_TEXT',
+  `${errorTextSource}; return { accountLoginErrorText };`)('需要登录') as {
     accountLoginErrorText: (error: Error | string) => string;
   };
-function coded(reason: string, step: string, code: number): Error {
-  return new FakeAccountStoreError(reason, step, code, 'PLATFORM_RAW_SENTINEL');
-}
 
-check('a coded secure-storage failure renders step and platform code in the user message',
-  errorText.accountLoginErrorText(coded('unavailable', 'asset.add', 24000001)) ===
-    '安全存储不可用，无法保存账户凭据。（asset.add 错误码 24000001）' &&
-  errorText.accountLoginErrorText(coded('unsupported', 'asset.query', 202)) ===
-    '安全存储不可用，无法保存账户凭据。（asset.query 错误码 202）' &&
-  errorText.accountLoginErrorText(coded('malformed', 'file.write', 0)) ===
-    '账户登录失败，请重试。（file.write 错误码 0）' &&
-  !errorText.accountLoginErrorText(coded('unavailable', 'asset.add', 24000001))
-    .includes('PLATFORM_RAW_SENTINEL'));
-check('an uncoded store failure and the non-store reasons keep the exact old sentences',
-  errorText.accountLoginErrorText(coded('unavailable', '', 0)) === '安全存储不可用，无法保存账户凭据。' &&
+check('the login action reason tokens render their own sentences',
   errorText.accountLoginErrorText('discovery_timeout') === '连接管理服务器超时，请检查网络后重试。' &&
+  errorText.accountLoginErrorText('login_timeout') === '连接管理服务器超时，请检查网络后重试。' &&
+  errorText.accountLoginErrorText('network-error') === '网络不可用或服务器无法访问，请检查网络后重试。' &&
   errorText.accountLoginErrorText('cancelled') === '' &&
+  errorText.accountLoginErrorText('needs-login') === '需要登录' &&
   errorText.accountLoginErrorText(new Error('device_key_unavailable')) === '账户登录失败，请重试。');
-check('the same failure is logged once with reason, step, code and the platform text only',
-  finish.split('ACCOUNT_STORE_FAILED').length === 2 &&
-  finish.includes("'ACCOUNT_STORE_FAILED|reason=%{public}s|step=%{public}s|code=%{public}d|message=%{public}s'") &&
-  finish.includes('failure.reason, failure.step, failure.code, failure.detail') &&
-  !finish.includes('failure.message'));
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) { process.exitCode = 1; }

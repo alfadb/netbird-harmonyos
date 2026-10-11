@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
-// Host-side checks for account-mode marker parsing and token-expiry policy.
+// Host-side checks for the auth-mode marker (which login method the local
+// configuration uses). The account credential / expiry policy this suite used
+// to drive is GONE with the account store: upstream keeps no token
+// (client/internal/profilemanager/config.go:62-135), so there is no stored
+// credential left to expire.
 // Run: node client/entry/selfcheck/run-account-mode.mts
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,30 +36,11 @@ try {
     mode.parseAuthMode('account') === 'account' && mode.parseAuthMode('setup-key') === 'setup-key');
   check('unknown explicit marker is rejected, not treated as Setup Key',
     mode.parseAuthMode('Account') === 'invalid' && mode.parseAuthMode('account-v2') === 'invalid');
-  check('zero/unknown expiry is server-validated; elapsed positive expiry is rejected',
-    !mode.isAccountCredentialExpired(0, 1000) &&
-    !mode.isAccountCredentialExpired(-1, 1000) &&
-    mode.isAccountCredentialExpired(999, 1000) &&
-    !mode.isAccountCredentialExpired(1001, 1000));
-  check('legacy mode decision never requires account credentials',
-    mode.decideAccountCredentialMode('setup-key', false, '', 0, 1000) === 'setup-key');
-  check('valid account JWT is accepted with unknown or future expiry',
-    mode.decideAccountCredentialMode('account', true, 'jwt', 0, 1000) === 'account' &&
-    mode.decideAccountCredentialMode('account', true, 'jwt', 1001, 1000) === 'account');
-  check('missing credentials and an elapsed stored token require account login',
-    mode.decideAccountCredentialMode('account', false, '', 0, 1000) === 'account-login-required' &&
-    mode.decideAccountCredentialMode('account', true, 'jwt', 1000, 1000) === 'account-login-required' &&
-    mode.decideAccountCredentialMode('account', false, 'jwt', 1001, 1000) === 'account-login-required');
-  // 2026-10-11 (account auth fix): the stored management JWT is a ONE-SHOT
-  // identity proof, dropped by the extension once it was used. An account store
-  // with an empty JWT is therefore a normal, usable state: the next connect
-  // logs in by WireGuard public key alone (the core tries a JWT-less Login
-  // first), and the mode decision must not block it.
-  check('an empty stored JWT is a valid public-key-only account session',
-    mode.decideAccountCredentialMode('account', true, '', 0, 1000) === 'account' &&
-    mode.decideAccountCredentialMode('account', true, '', 1000, 1000) === 'account');
-  check('invalid explicit mode is not classified as legacy or account',
-    mode.decideAccountCredentialMode('invalid', true, 'jwt', 0, 1000) === 'invalid');
+  check('the module carries no credential/token policy any more',
+    bytes.toString('utf8').includes('export function parseAuthMode') &&
+    !bytes.toString('utf8').includes('decideAccountCredentialMode') &&
+    !bytes.toString('utf8').includes('isAccountCredentialExpired') &&
+    !/export (const|function) .*(jwt|token)/i.test(bytes.toString('utf8')));
   console.log(`RESULT passed=${passed} failed=${failed}`);
   if (failed > 0) { process.exitCode = 1; }
 } finally {

@@ -35,8 +35,8 @@ import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
 // — process memory only, never persisted, never re-derived here.
 import { lastKilledVpnProcess } from '../vpnextensionability/NetBirdSystemEvents';
 import type { ProcessExitRecord } from '../vpnextensionability/NetBirdSystemEventsCore';
-import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, ACCOUNT_LOGIN_REQUIRED_CLASS,
-  ACCOUNT_LOGIN_REQUIRED_TEXT, connectFailureText,
+import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, NEEDS_LOGIN_CLASS,
+  NEEDS_LOGIN_TEXT, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
@@ -46,13 +46,11 @@ import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
 import { NetBirdAccountWebView } from '../login/NetBirdAccountWebView';
 import { AccountLoginController } from '../login/NetBirdAccountLogin';
-import type { PreparedAccountLogin } from '../login/NetBirdAccountLogin';
-import { AccountStoreError } from '../login/NetBirdAccountStoreCore';
-import type { AccountCredentials } from '../login/NetBirdAccountStoreCore';
-import { ACCOUNT_CREDENTIALS_FILE, saveAccountCredentials, clearAccountCredentials } from '../login/NetBirdAccountStore';
+import type { AccountLoginResult, PreparedAccountLogin } from '../login/NetBirdAccountLogin';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
   parseAuthMode } from '../login/NetBirdAccountMode';
-import { readPackagedCaRootsPem } from '../vpnextensionability/NetBirdConnector';
+import { buildConnectorConfigJson, readPackagedCaRootsPem } from '../vpnextensionability/NetBirdConnector';
+import type { DeviceConfigFile } from '../vpnextensionability/NetBirdConnector';
 // 诊断（2026-10-05 日志导出增量）：本页只发安全事件（事件名 + 计数），绝不带
 // Setup Key / 服务器地址 / 配置内容；日志导出的文件系统与上限逻辑全在
 // NetBirdLogExport 里，本页只取结果并如实渲染。
@@ -2212,12 +2210,11 @@ struct Index {
     // Chinese reason — it beats the generic disconnect notice (and there is
     // no live document to read a class from).
     if (this.published === null) {
-      // 2026-10-11 (account auth fix): the core's account-login-required class
-      // (JWT-less login rejected / the stored one-shot JWT already used) — the
-      // line names the 账户登录 button, because retrying this credential can
-      // never succeed.
-      if (this.connectFailureClass === ACCOUNT_LOGIN_REQUIRED_CLASS) {
-        return ACCOUNT_LOGIN_REQUIRED_TEXT;
+      // 2026-10-12: the core's needs-login class (upstream StatusNeedsLogin —
+      // the management server refused this peer, its session expired or it is
+      // not registered). The official label is the whole message.
+      if (this.connectFailureClass === NEEDS_LOGIN_CLASS) {
+        return NEEDS_LOGIN_TEXT;
       }
       if (this.connectFailureClass.length > 0) {
         return connectFailureText(this.connectFailureClass);
@@ -2269,15 +2266,14 @@ struct Index {
     } catch (error) {
       storedMode = ACCOUNT_MODE_SETUP_KEY;
     }
-    let accountStored: boolean = false;
-    try {
-      accountStored = fs.accessSync(`${filesDir}/${ACCOUNT_CREDENTIALS_FILE}`);
-    } catch (error) {
-      accountStored = false;
-    }
+    // 2026-10-12: account mode has NO credential document any more — upstream
+    // stores no token (client/internal/profilemanager/config.go:62-135). What
+    // makes an account session "configured" is the device config (management
+    // URL + WireGuard identity) plus the account marker; whether the peer still
+    // has to log in is a SERVER verdict, reported as 需要登录.
     this.authMode = storedMode;
     this.configured = storedMode === ACCOUNT_MODE_ACCOUNT
-      ? url.length > 0 && accountStored : url.length > 0 && keyStored;
+      ? url.length > 0 : url.length > 0 && keyStored;
     this.configuredUrl = url;
     this.keyStored = keyStored;
   }
@@ -2364,28 +2360,24 @@ struct Index {
     return this.requestSent || (this.published !== null && vpnActiveState(this.published.state));
   }
 
-  // 0.0.22（PC 上"安全存储不可用"无从定位）：安全存储把每个失败都压成一个稳定
-  // reason，平台错误码和失败步骤一起丢了。这里把两者拼回用户可见文案——只来自
-  // AccountStoreError（error.step/error.code），错误码 0 = 平台没给数字码；步骤名
-  // 缺失时写 unknown，绝不猜。
-  private accountStoreFailureSuffix(error: Error | string): string {
-    if (!(error instanceof AccountStoreError) || error.step.length === 0 && error.code === 0) {
-      return '';
-    }
-    const step: string = error.step.length > 0 ? error.step : 'unknown';
-    return `（${step} 错误码 ${error.code}）`;
-  }
-
+  // 2026-10-12: the account store is gone, so the 0.0.22 secure-storage
+  // diagnostics went with it. What remains are the stable reason tokens the
+  // login action (NetBirdAccountLogin) reports: discovery / crypto /
+  // management-login failures.
   private accountLoginErrorText(error: Error | string): string {
     const reason: string = typeof error === 'string' ? error : error.message;
-    const suffix: string = this.accountStoreFailureSuffix(error);
     if (reason === 'cancelled') { return ''; }
-    if (reason === 'discovery_unavailable') { return '账户登录暂不可用，请更新应用后重试。'; }
-    if (reason === 'discovery_timeout') { return '连接管理服务器超时，请检查网络后重试。'; }
-    if (reason === 'unsupported' || reason === 'unavailable') {
-      return `安全存储不可用，无法保存账户凭据。${suffix}`;
+    if (reason === 'discovery_unavailable' || reason === 'login_unavailable') {
+      return '账户登录暂不可用，请更新应用后重试。';
     }
-    return `账户登录失败，请重试。${suffix}`;
+    if (reason === 'discovery_timeout' || reason === 'login_timeout') {
+      return '连接管理服务器超时，请检查网络后重试。';
+    }
+    if (reason === 'network-error') { return '网络不可用或服务器无法访问，请检查网络后重试。'; }
+    // the management server did not accept this account: the same
+    // 「需要登录」 the connect path reports — the account is not logged in.
+    if (reason === 'needs-login') { return NEEDS_LOGIN_TEXT; }
+    return '账户登录失败，请重试。';
   }
 
   private async beginAccountLogin(): Promise<void> {
@@ -2435,28 +2427,40 @@ struct Index {
     this.accountLoginBusy = true;
     this.accountLoginOpen = false;
     try {
-      const credentials: AccountCredentials = await this.accountLoginController.finish(code);
-      if (generation !== this.accountLoginGeneration) {
-        return;
-      }
-      this.accountLoginCommitting = true;
+      // The device identity and the management URL the extension will dial:
+      // the login action registers EXACTLY this peer (and with the packaged
+      // trust roots the extension uses for https).
       const privateKey: string = this.devicePrivateKey();
       if (privateKey.length === 0) {
         throw new Error('device_key_unavailable');
       }
-      const configText: string = buildDeviceConfigJson(credentials.managementUrl, privateKey,
-        this.deviceRelayEnabled());
-      await saveAccountCredentials(getContext(this).filesDir, credentials);
+      const caPem: string = readPackagedCaRootsPem(getContext(this).resourceManager);
+      const device: DeviceConfigFile = {
+        management_url: this.accountManagementUrl(),
+        private_key: privateKey,
+        ca_pem: caPem,
+        relay_enabled: this.deviceRelayEnabled()
+      };
+      const connectorConfig: string = buildConnectorConfigJson(device, false, null);
+      this.accountLoginCommitting = true;
+      // The login action: exchange the code, register the peer with the JWT
+      // through the core, and keep NOTHING token-shaped (upstream stores no
+      // token). It also runs BEFORE the VPN starts, exactly like upstream's
+      // `auth.login(...)` before `connectClient.Run`.
+      const result: AccountLoginResult =
+        await this.accountLoginController.finish(code, connectorConfig);
       if (generation !== this.accountLoginGeneration) {
         return;
       }
+      const configText: string = buildDeviceConfigJson(result.managementUrl, privateKey,
+        this.deviceRelayEnabled());
       if (!this.writeSetupFile(SETUP_CONFIG_FILE, configText)) {
         throw new Error('configuration_save_failed');
       }
       if (!this.writeSetupFile(ACCOUNT_MODE_FILE_NAME, `${ACCOUNT_MODE_ACCOUNT}\n`)) {
         throw new Error('mode_save_failed');
       }
-      this.urlInput = credentials.managementUrl;
+      this.urlInput = result.managementUrl;
       this.showSetupForm = false;
       this.accountLoginError = '';
       this.formHint = '账户已登录，正在连接 VPN。';
@@ -2464,16 +2468,7 @@ struct Index {
       this.requestStart();
     } catch (error) {
       if (generation === this.accountLoginGeneration) {
-        const failure: Error | string = error instanceof Error ? error : 'login_failed';
-        // 0.0.22：安全存储失败只落这一条日志——记 reason / step / code 与平台报错
-        // 原文（AccountStoreError.detail 只在平台错误带数字码时才有值），绝不带
-        // 凭据、令牌、密钥或 JSON 内容。
-        if (failure instanceof AccountStoreError) {
-          hilog.error(DOMAIN, TAG,
-            'ACCOUNT_STORE_FAILED|reason=%{public}s|step=%{public}s|code=%{public}d|message=%{public}s',
-            failure.reason, failure.step, failure.code, failure.detail);
-        }
-        this.accountLoginError = this.accountLoginErrorText(failure);
+        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error : 'login_failed');
       }
     } finally {
       if (generation === this.accountLoginGeneration) {
@@ -2481,6 +2476,25 @@ struct Index {
         this.accountLoginCommitting = false;
       }
     }
+  }
+
+  // The management URL this login targets: the checked form input when the
+  // form is open, else the stored device config. '' when neither is readable
+  // (the login then fails closed as invalid input).
+  private accountManagementUrl(): string {
+    const checked: UrlCheck = checkManagementUrl(this.urlInput);
+    if (checked.ok) {
+      return checked.url;
+    }
+    try {
+      const configPath: string = `${getContext(this).filesDir}/${SETUP_CONFIG_FILE}`;
+      if (fs.accessSync(configPath)) {
+        return readStoredManagementUrl(fs.readTextSync(configPath));
+      }
+    } catch (error) {
+      return '';
+    }
+    return '';
   }
 
   private cancelAccountLogin(showError: boolean): void {
@@ -2691,17 +2705,15 @@ struct Index {
     this.urlInput = DEFAULT_MANAGEMENT_URL;
     this.keyInput = '';
     this.formError = '';
-    this.formHint = '正在清除本机账户凭据…';
+    this.formHint = '';
     this.showSetupForm = false;
-    clearAccountCredentials(getContext(this).filesDir).then((): void => {
-      this.formHint = serverLogoutConfirmed
-        ? '已注销：本机凭据已删除，管理端已删除本设备。'
-        : '已删除本机凭据。如需从管理端移除本设备，请在管理后台删除。';
-      this.refreshSetupState();
-    }).catch((_error: Error): void => {
-      this.formHint = '本机账户凭据未能全部清除，请重试注销。';
-      this.refreshSetupState();
-    });
+    // 2026-10-12: nothing token-shaped is stored locally any more (upstream
+    // stores no token), so the local half of the logout is exactly these file
+    // removals — there is no encrypted credential document to clear.
+    this.refreshSetupState();
+    this.formHint = serverLogoutConfirmed
+      ? '已注销：本机凭据已删除，管理端已删除本设备。'
+      : '已删除本机凭据。如需从管理端移除本设备，请在管理后台删除。';
   }
 
   private removeSetupFile(name: string): void {
