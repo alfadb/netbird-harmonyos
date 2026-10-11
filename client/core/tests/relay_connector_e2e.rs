@@ -447,7 +447,6 @@ fn spawn_connector(
         host.clone(),
         netbird_core::connector::ConnectorSecrets {
             setup_key: "SETUP-KEY-TEST-OK".into(),
-            jwt: String::new(),
         },
         PeerMeta {
             hostname: "ohos-connector-test".into(),
@@ -457,8 +456,6 @@ fn spawn_connector(
         },
         ExponentialBackoff::upstream_stream_default(),
         SyncPolicy::production(),
-        Duration::from_secs(600),
-        Duration::from_secs(3600), // renewal never fires in these tests
         false,                     // N3-7 default-route gate: no force opt-in
         None,                      // no protected management socket
         None,                      // production (idle) ICE orchestrator

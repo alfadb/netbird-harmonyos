@@ -1295,13 +1295,13 @@ fn config_parse_check() -> Result<String, String> {
     if secrets.setup_key != "selftest-not-a-real-key" {
         return Err("setup_key roundtrip mismatch".into());
     }
-    // 2026-10-11 A1: an all-empty credential document is the plain reconnect
+    // 2026-10-12: an all-empty credential document is the plain reconnect
     // of an already-registered peer (identified by its WireGuard public key,
     // upstream grpc.go:650-656) and MUST parse — the shell's account mode
-    // sends exactly that after the one-shot JWT was dropped.
+    // sends exactly that (it never has a token to send).
     let empty = crate::connector::ConnectorSecrets::from_json("{\"setup_key\":\"\",\"jwt\":\"\"}")
         .map_err(|e| format!("ConnectorSecrets rejected the no-credential reconnect: {e}"))?;
-    if !empty.setup_key.is_empty() || !empty.jwt.is_empty() {
+    if !empty.setup_key.is_empty() {
         return Err("no-credential document carried a credential".into());
     }
     if crate::connector::ConnectorSecrets::from_json("{\"setup_key\":7}").is_ok() {

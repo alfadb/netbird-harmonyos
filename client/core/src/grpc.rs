@@ -75,12 +75,15 @@
 //! Envelope crypto failures reuse the same classes — see `crate::envelope`
 //! module docs ("Error classification").
 //!
-//! 2026-10-11 A1/A2: this mapping is the RAW status→class translation and is
-//! unchanged. The account-mode login SEQUENCE on top of it
-//! (`crate::connector`) retries a JWT-less `Login` once with the stored JWT
-//! when [`is_login_needed`] holds, and turns a rejected one-shot JWT into
-//! `ManagementError::AccountLoginRequired` — see `crate::connector`'s
-//! "login sequence" docs.
+//! 2026-10-12: this mapping is the RAW status→class translation and is
+//! unchanged. On top of it, [`is_login_needed`] is the two-code predicate the
+//! login paths branch on (`InvalidArgument`/`PermissionDenied`, upstream
+//! `isLoginNeeded`, `client/internal/auth/auth.go:491-521`): the CONNECT
+//! sequence (`crate::connector`) parks account mode on
+//! [`crate::management::ManagementError::NeedsLogin`] and sends the setup key
+//! to [`ManagementGrpcClient::register`]; the interactive login ACTION
+//! (`crate::account_auth`, the UI process) sends the fresh JWT there. No token
+//! is ever a connect credential or persisted anywhere.
 //!
 //! ## N3-4 additions: Sync stream, Logout, ExtendAuthSession
 //!
@@ -310,6 +313,20 @@ pub const GRPC_UNAUTHENTICATED: u16 = tonic::Code::Unauthenticated as u16;
 pub fn is_login_needed(err: &ManagementError) -> bool {
     matches!(err.status_code(), GRPC_INVALID_ARGUMENT | GRPC_PERMISSION_DENIED)
 }
+
+/// 2026-10-12: the login action's SECOND step is upstream's `Register`
+/// (`shared/management/client/grpc.go:641-648`) — not a separate RPC but the
+/// same `Login` call with a body that carries the setup key and/or the JWT
+/// (`GrpcClient.Register` → `c.login(&proto.LoginRequest{SetupKey: …,
+/// JwtToken: …})`, grpc.go:641-648 → :585-637). It runs after the key-less
+/// `Login` was refused with a login-needed code
+/// (`client/internal/auth/auth.go:208-236`: `doMgmLogin` then
+/// `if isRegistrationNeeded(err) { registerPeer(setupKey, jwtToken, …) }`).
+/// Upstream's `registerPeer` also refuses to register with NEITHER a setup
+/// key nor a JWT — locally, with `InvalidArgument`
+/// (`auth.go:327-331`) — which [`ManagementGrpcClient::register`] mirrors.
+pub const REGISTER_NEEDS_A_CREDENTIAL: &str =
+    "invalid setup-key or no sso information provided";
 
 /// Map a tonic transport (connect/handshake/IO) failure onto the fixed
 /// classes. TLS verification failures surface here (handshake error).
@@ -584,6 +601,28 @@ impl ManagementGrpcClient {
             .map(|cfg| cfg.address.clone())
             .filter(|addr| !addr.is_empty());
         Ok(LoginOutcome { response, session_deadline_unix, peer_address })
+    }
+
+    /// `ManagementService/Register` — upstream `GrpcClient.Register`
+    /// (`shared/management/client/grpc.go:641-648`), the same `Login` RPC with
+    /// a body carrying `SetupKey` and/or `JwtToken`. Called with the setup key
+    /// once the key-less `Login` was refused (upstream `Auth.Login` →
+    /// `registerPeer`, `client/internal/auth/auth.go:208-236`, `:336-355`).
+    ///
+    /// A register with NEITHER credential is refused locally with
+    /// `InvalidArgument` before any I/O, exactly like upstream
+    /// (`auth.go:327-331`). Everything else is the shared login path.
+    pub async fn register(
+        &mut self,
+        params: LoginParams,
+    ) -> Result<LoginOutcome, ManagementError> {
+        if params.setup_key.is_empty() && params.jwt_token.is_empty() {
+            return Err(ManagementError::Request {
+                status: GRPC_INVALID_ARGUMENT,
+                message: REGISTER_NEEDS_A_CREDENTIAL.to_string(),
+            });
+        }
+        self.login(params).await
     }
 
     /// Assemble the wire `LoginRequest` (also used by tests to assert field

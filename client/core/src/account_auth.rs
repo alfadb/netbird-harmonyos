@@ -1,3 +1,30 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 NetBird HarmonyOS contributors
+//
+//! # account_auth — the UI process's management login action (2026-10-12)
+//!
+//! The official Android SSO flow runs in the same process as the VPN service:
+//! `client/android/client.go:194-215` (`Run` → `auth.login(urlOpener, …)`)
+//! checks `IsLoginRequired`, runs the interactive PKCE flow and then performs
+//! the management login/registration WITH the fresh JWT
+//! (`client/internal/auth/auth.go:184-236` → `doMgmLogin` → `registerPeer`),
+//! all BEFORE the engine starts — and keeps NO token on disk
+//! (`client/internal/profilemanager/config.go:62-135` has no token field).
+//!
+//! In this shell the PKCE flow runs in the UI (ArkWeb) process, so the same
+//! management step is exposed here as a NAPI job:
+//!
+//! * [`account_auth_discovery_start_json`] — the PKCE provider metadata
+//!   (`GetPKCEAuthorizationFlow`).
+//! * [`account_login_start_json`] — the login action's management step, run
+//!   with the freshly exchanged JWT and the SAME device identity / management
+//!   URL the extension dials (the caller passes the connector start config it
+//!   would hand to `connector_start_with_socket`). The JWT is an in-memory
+//!   local: it is never written anywhere, and it is gone when the job ends.
+//!
+//! Both are one-shot async jobs with the same start/poll/cancel shape; the
+//! poll reply carries a stable token only (never a server message).
+
 use crate::config::{self, Json};
 use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::{GrpcTransport, ManagementGrpcClient};
@@ -26,6 +53,7 @@ struct Slot {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
+static LOGIN_SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<Slot> {
     SLOT.get_or_init(|| {
@@ -35,6 +63,69 @@ fn slot() -> &'static Mutex<Slot> {
             result: None,
         })
     })
+}
+
+fn login_slot() -> &'static Mutex<Slot> {
+    LOGIN_SLOT.get_or_init(|| {
+        Mutex::new(Slot {
+            generation: 0,
+            task: None,
+            result: None,
+        })
+    })
+}
+
+/// Start `work` as a job in `slot` and return its request id, replacing (and
+/// aborting) any job already running there.
+fn start_job<F>(slot: &'static Mutex<Slot>, work: F) -> u64
+where
+    F: std::future::Future<Output = Result<String, &'static str>> + Send + 'static,
+{
+    let id = (NEXT_ID.fetch_add(1, Ordering::Relaxed) - 1) % i32::MAX as u64 + 1;
+    {
+        let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(task) = state.task.take() {
+            task.abort();
+        }
+        state.generation = id;
+        state.result = None;
+    }
+    let task = crate::connector::global_runtime().spawn(async move {
+        let result = work.await;
+        let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
+        finish_if_current(&mut state, id, result);
+    });
+    let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if state.generation == id {
+        state.task = Some(task);
+    } else {
+        task.abort();
+    }
+    id
+}
+
+/// Poll one job slot: `pending` / `done` (rendered by `done` from the job's own
+/// stable payload) / `failed` (the job's stable error token) / `unknown` (stale
+/// or never-seen id).
+fn poll_job<F>(slot: &'static Mutex<Slot>, id: u64, done: F) -> String
+where
+    F: FnOnce(&str) -> String,
+{
+    let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if id == 0 || state.generation != id || (state.result.is_none() && state.task.is_none()) {
+        return "{\"state\":\"unknown\"}".into();
+    }
+    match state.result.take() {
+        None => "{\"state\":\"pending\"}".into(),
+        Some(Ok(payload)) => {
+            state.task.take();
+            done(&payload)
+        }
+        Some(Err(error)) => {
+            state.task.take();
+            format!("{{\"state\":\"failed\",\"error\":\"{error}\"}}")
+        }
+    }
 }
 
 fn finish_if_current(state: &mut Slot, generation: u64, result: Result<String, &'static str>) {
@@ -218,49 +309,184 @@ pub fn account_auth_discovery_start_json(request: &str) -> String {
         Ok(input) => input,
         Err(error) => return format!("{{\"ok\":false,\"error\":\"{error}\"}}"),
     };
-    let id = (NEXT_ID.fetch_add(1, Ordering::Relaxed) - 1) % i32::MAX as u64 + 1;
-    {
-        let mut state = slot().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(task) = state.task.take() {
-            task.abort();
-        }
-        state.generation = id;
-        state.result = None;
-    }
-    let task = crate::connector::global_runtime().spawn(async move {
-        let result = discover(input).await;
-        let mut state = slot().lock().unwrap_or_else(|e| e.into_inner());
-        finish_if_current(&mut state, id, result);
-    });
-    let mut state = slot().lock().unwrap_or_else(|e| e.into_inner());
-    if state.generation == id {
-        state.task = Some(task);
-    } else {
-        task.abort();
-    }
+    let id = start_job(slot(), discover(input));
     format!("{{\"ok\":true,\"request_id\":{id}}}")
 }
 
 pub fn account_auth_discovery_poll_json(id: u64) -> String {
-    let mut state = slot().lock().unwrap_or_else(|e| e.into_inner());
-    if id == 0 || state.generation != id || (state.result.is_none() && state.task.is_none()) {
-        return "{\"state\":\"unknown\"}".into();
-    }
-    match state.result.take() {
-        None => "{\"state\":\"pending\"}".into(),
-        Some(Ok(config)) => {
-            state.task.take();
-            format!("{{\"state\":\"done\",\"config\":{config}}}")
-        }
-        Some(Err(error)) => {
-            state.task.take();
-            format!("{{\"state\":\"failed\",\"error\":\"{error}\"}}")
-        }
-    }
+    poll_job(slot(), id, |config| {
+        format!("{{\"state\":\"done\",\"config\":{config}}}")
+    })
 }
 
 pub fn account_auth_discovery_cancel_json(id: u64) -> String {
-    let mut state = slot().lock().unwrap_or_else(|e| e.into_inner());
+    cancel_json(slot(), id)
+}
+
+// ---------------------------------------------------------------------------
+// login action (the management step of the official Android SSO flow)
+// ---------------------------------------------------------------------------
+
+/// What the login action's management step means for the caller — upstream
+/// `Auth.Login`'s two outcomes (client/internal/auth/auth.go:208-236: the
+/// key-less `doMgmLogin`, then `registerPeer` with the JWT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginActionVerdict {
+    /// The peer is logged in / freshly registered: the JWT was consumed by the
+    /// registration. Nothing about the token is kept.
+    Registered,
+    /// The management server does not accept the peer even with the token
+    /// (registration refused again, or the token itself rejected): the account
+    /// still has to log in — upstream hands the error back to the app, whose
+    /// UI reports the failed login.
+    NeedsLogin,
+}
+
+/// Run the official login action's management step against an already
+/// connected client: a KEY-LESS, TOKEN-LESS `Login` first; only when the server
+/// answers with a login-needed code does the `Register` second step run,
+/// carrying the JWT (upstream `Auth.Login` → `doMgmLogin` → `registerPeer`,
+/// auth.go:208-236, `isLoginNeeded` = `InvalidArgument || PermissionDenied`,
+/// auth.go:491-521; the wire call is
+/// [`crate::grpc::ManagementGrpcClient::register`], grpc.go:641-648).
+///
+/// `jwt` is a local: the caller passes it in, nothing stores it.
+pub async fn login_action(
+    client: &mut ManagementGrpcClient,
+    meta: &crate::grpc::PeerMeta,
+    jwt: &str,
+) -> Result<LoginActionVerdict, crate::management::ManagementError> {
+    let params = |setup_key: &str, jwt_token: &str| crate::grpc::LoginParams {
+        setup_key: setup_key.to_string(),
+        jwt_token: jwt_token.to_string(),
+        meta: meta.clone(),
+        ..Default::default()
+    };
+    match client.login(params("", "")).await {
+        Ok(_) => Ok(LoginActionVerdict::Registered),
+        Err(err) if crate::grpc::is_login_needed(&err) => {
+            match client.register(params("", jwt)).await {
+                Ok(_) => Ok(LoginActionVerdict::Registered),
+                // the token was rejected (already used / expired / not
+                // permitted) or the registration was refused again: either way
+                // this account still needs a real login, which is exactly the
+                // verdict the UI shows. Transient classes stay errors so the
+                // caller can retry.
+                Err(err) if register_refusal(&err) => Ok(LoginActionVerdict::NeedsLogin),
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// A `Register` verdict that means "this account is not logged in" rather than
+/// "the request failed": `PermissionDenied` (refused again), `InvalidArgument`
+/// (nothing usable to register with) and `Unauthenticated` (the JWT itself was
+/// rejected).
+fn register_refusal(err: &crate::management::ManagementError) -> bool {
+    matches!(
+        err.status_code(),
+        crate::grpc::GRPC_PERMISSION_DENIED
+            | crate::grpc::GRPC_INVALID_ARGUMENT
+            | crate::grpc::GRPC_UNAUTHENTICATED
+    )
+}
+
+/// Stable token for one management error of the login action (never a server
+/// message): `network-error` / `timeout` / `management-error`.
+fn login_error_token(err: &crate::management::ManagementError) -> &'static str {
+    use crate::management::ManagementError;
+    match err {
+        ManagementError::Timeout => "timeout",
+        ManagementError::Network(_) | ManagementError::UnsupportedUrl(_) => "network-error",
+        _ => "management-error",
+    }
+}
+
+/// The login action's job: dial the management endpoint from the caller's OWN
+/// connector start config (same device identity / management URL / trust root
+/// the extension uses) and run [`login_action`] with the freshly exchanged JWT.
+/// The payload is the verdict's stable token (`success` / `needs-login`).
+async fn login_with_jwt(
+    config_json: String,
+    jwt: String,
+) -> Result<String, &'static str> {
+    let work = async {
+        let config = crate::connector::ConnectorConfig::from_json(&config_json)
+            .map_err(|_| "invalid-config")?;
+        let mut client = ManagementGrpcClient::connect(
+            &config.management_url,
+            config.transport,
+            config.connect_timeout,
+            config.request_timeout,
+            config.keys,
+        )
+        .await
+        .map_err(|_| "network-error")?;
+        let verdict = login_action(&mut client, &config.meta, &jwt)
+            .await
+            .map_err(|e| login_error_token(&e))?;
+        Ok(match verdict {
+            LoginActionVerdict::Registered => "success".to_string(),
+            LoginActionVerdict::NeedsLogin => "needs-login".to_string(),
+        })
+    };
+    match tokio::time::timeout(OVERALL_TIMEOUT, work).await {
+        Err(_) => Err("timeout"),
+        Ok(result) => result,
+    }
+}
+
+/// Parse the login-action request: the connector start config document the
+/// extension would dial with plus the JWT from the token exchange. Both are
+/// required; nothing else is read.
+fn parse_login_input(text: &str) -> Result<(String, String), &'static str> {
+    if text.len() > INPUT_MAX {
+        return Err("invalid-input");
+    }
+    let Json::Obj(fields) = config::parse_document(text).map_err(|_| "invalid-input")? else {
+        return Err("invalid-input");
+    };
+    let get_str = |key: &str| -> Option<&str> {
+        fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                Json::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+    };
+    let config = get_str("config").filter(|s| !s.is_empty()).ok_or("invalid-input")?;
+    // the token is the whole point of this call: an empty one would just be a
+    // wasted round trip, and upstream refuses it the same way (registerPeer,
+    // auth.go:327-331)
+    let jwt = get_str("jwt").filter(|s| !s.is_empty()).ok_or("jwt-required")?;
+    Ok((config.to_string(), jwt.to_string()))
+}
+
+pub fn account_login_start_json(request: &str) -> String {
+    let (config, jwt) = match parse_login_input(request) {
+        Ok(input) => input,
+        Err(error) => return format!("{{\"ok\":false,\"error\":\"{error}\"}}"),
+    };
+    let id = start_job(login_slot(), login_with_jwt(config, jwt));
+    format!("{{\"ok\":true,\"request_id\":{id}}}")
+}
+
+pub fn account_login_poll_json(id: u64) -> String {
+    poll_job(login_slot(), id, |outcome| {
+        format!("{{\"state\":\"done\",\"outcome\":\"{outcome}\"}}")
+    })
+}
+
+pub fn account_login_cancel_json(id: u64) -> String {
+    cancel_json(login_slot(), id)
+}
+
+/// Shared cancel reply for both job slots.
+fn cancel_json(slot: &'static Mutex<Slot>, id: u64) -> String {
+    let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
     if id == 0 || !cancel_slot(&mut state, id) {
         return "{\"ok\":false,\"error\":\"unknown\"}".into();
     }
@@ -374,5 +600,106 @@ mod tests {
     #[test]
     fn start_accepts_valid_ca_configuration() {
         assert!(parse_input(valid_input()).is_ok());
+    }
+
+    // ---- 2026-10-12: the login action's request validation -----------------
+
+    fn valid_login_input() -> String {
+        use base64::Engine as _;
+        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let config = format!(
+            "{{\"management_url\":\"https://mgmt.example\",\"ca_pem\":\"CA\",\
+             \"private_key\":\"{key}\"}}"
+        );
+        format!(
+            "{{\"config\":\"{}\",\"jwt\":\"header.payload.sig\"}}",
+            crate::util::json_escape(&config)
+        )
+    }
+
+    #[test]
+    fn login_input_requires_a_config_and_a_non_empty_token() {
+        // the happy shape: both fields, nothing else needed
+        let (config, jwt) = parse_login_input(&valid_login_input()).expect("valid login input");
+        assert!(config.contains("mgmt.example"));
+        assert_eq!(jwt, "header.payload.sig");
+
+        // a missing/empty token is refused BEFORE any I/O: the whole point of
+        // this entry is the JWT registration
+        for text in [
+            r#"{"config":"{}"}"#,
+            r#"{"config":"{}","jwt":""}"#,
+            r#"{"config":"","jwt":"t"}"#,
+            "{",
+            "[]",
+            r#"{"config":5,"jwt":"t"}"#,
+            r#"{"config":"{}","jwt":5}"#,
+        ] {
+            assert!(
+                parse_login_input(text).is_err(),
+                "must be refused: {text}"
+            );
+        }
+        assert_eq!(
+            parse_login_input(r#"{"config":"{}"}"#),
+            Err("jwt-required")
+        );
+        assert_eq!(parse_login_input("{"), Err("invalid-input"));
+        // the input cap is enforced before parsing
+        let huge = format!(
+            "{{\"config\":\"{}\",\"jwt\":\"t\"}}",
+            "x".repeat(INPUT_MAX)
+        );
+        assert_eq!(parse_login_input(&huge), Err("invalid-input"));
+    }
+
+    #[test]
+    fn login_start_rejects_bad_input_without_network_and_cold_poll_is_unknown() {
+        assert_eq!(
+            account_login_start_json(r#"{"config":"{}"}"#),
+            r#"{"ok":false,"error":"jwt-required"}"#
+        );
+        assert_eq!(
+            account_login_start_json("not json"),
+            r#"{"ok":false,"error":"invalid-input"}"#
+        );
+        assert_eq!(account_login_poll_json(0), r#"{"state":"unknown"}"#);
+        assert_eq!(
+            account_login_cancel_json(4242),
+            r#"{"ok":false,"error":"unknown"}"#
+        );
+    }
+
+    /// The login action's error vocabulary is the class-only token shape (no
+    /// server text), and a `Register` refusal is the login-required verdict
+    /// rather than an error.
+    #[test]
+    fn login_action_verdict_and_error_tokens() {
+        use crate::management::ManagementError;
+        assert_eq!(login_error_token(&ManagementError::Timeout), "timeout");
+        assert_eq!(
+            login_error_token(&ManagementError::Network("refused".into())),
+            "network-error"
+        );
+        assert_eq!(
+            login_error_token(&ManagementError::UnsupportedUrl("http://x".into())),
+            "network-error"
+        );
+        assert_eq!(
+            login_error_token(&ManagementError::Auth {
+                status: 16,
+                message: "JWT already used".into()
+            }),
+            "management-error"
+        );
+        // a refused registration (7 / 3 / 16) is a verdict; others are errors
+        for status in [7u16, 3, 16] {
+            assert!(register_refusal(&ManagementError::Auth {
+                status,
+                message: String::new()
+            }));
+        }
+        assert!(!register_refusal(&ManagementError::Timeout));
+        assert!(!register_refusal(&ManagementError::Server { status: 13 }));
     }
 }

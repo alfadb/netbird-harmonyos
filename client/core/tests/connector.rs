@@ -551,8 +551,6 @@ fn config_json_for(addr: std::net::SocketAddr) -> String {
 fn spawn_connector(
     addr: std::net::SocketAddr,
     secrets: ConnectorSecrets,
-    renew_lead: Duration,
-    renew_interval: Duration,
     max_elapsed: Option<Duration>,
     wg: Arc<dyn WgPeerApplier>,
     host: Arc<dyn ConfigApplier>,
@@ -582,8 +580,6 @@ fn spawn_connector(
             rng: Box::new(NoRng),
             clock: Box::new(RealClock),
         },
-        renew_lead,
-        renew_interval,
         false, // N3-7 default-route gate: no force opt-in
         None,  // N3-7: no protected-socket source in the generic helper
         None,  // N5c: build the production (idle, signal-less) ICE orchestrator
@@ -591,6 +587,34 @@ fn spawn_connector(
         None,  // N7: no shell-fed WG device seam in the generic helper
         netbird_core::connector::HostIceTuning::default(), // N12a HOST-ONLY: defaults
     )
+}
+
+/// A plaintext management client for the login-action tests (the login action
+/// itself dials from its own connector config; the mock speaks plaintext h2 on
+/// loopback, so the tests drive the SHARED `login_action` step over the same
+/// seam the connector uses).
+async fn plaintext_client(
+    addr: std::net::SocketAddr,
+    keys: EnvelopeKeyPair,
+) -> netbird_core::grpc::ManagementGrpcClient {
+    netbird_core::grpc::ManagementGrpcClient::connect(
+        &format!("http://{addr}"),
+        netbird_core::grpc::GrpcTransport::Plaintext,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        keys,
+    )
+    .await
+    .expect("plaintext connect")
+}
+
+fn login_action_meta() -> netbird_core::grpc::PeerMeta {
+    netbird_core::grpc::PeerMeta {
+        hostname: "ohos-connector".into(),
+        os_name: "harmonyos".into(),
+        os_version: "5.0.0".into(),
+        netbird_version: "0.1.0".into(),
+    }
 }
 
 fn login_response(deadline: Option<i64>) -> LoginResponse {
@@ -628,9 +652,7 @@ async fn lifecycle_login_updates_apply_to_data_plane() {
     let host = Arc::new(RecordingHost::default());
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into() },
         None,
         wg.clone(),
         host.clone(),
@@ -667,11 +689,14 @@ async fn lifecycle_login_updates_apply_to_data_plane() {
         vec![Route { addr: [10, 30, 30, 0], prefix_len: 32 }]
     );
 
-    // login captured once with the right identity meta
+    // login captured once (the key-less Login: this peer is already
+    // registered, so the setup key never needs to leave the device) with the
+    // right identity meta
     let logins = mock.login_calls.lock().expect("logins");
     assert_eq!(logins.len(), 1);
     assert_eq!(logins[0].meta_hostname, "ohos-connector");
-    assert_eq!(logins[0].setup_key, "SETUP-KEY-OK");
+    assert_eq!(logins[0].setup_key, "");
+    assert_eq!(logins[0].jwt_token, "");
     drop(logins);
     assert_eq!(mock.sync_connects.lock().expect("sync").len(), 1);
 
@@ -737,9 +762,7 @@ async fn stream_break_reconnects_and_continues() {
     let host = Arc::new(RecordingHost::default());
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into() },
         None,
         wg.clone(),
         host.clone(),
@@ -763,7 +786,9 @@ async fn stream_break_reconnects_and_continues() {
 
 /// PermissionDenied on login is TERMINAL (upstream backoff.Permanent):
 /// zero retries, the Sync RPC is never attempted, and the state machine
-/// parks in Failed with the sanitized Auth class.
+/// parks in Failed with the sanitized Auth class. 2026-10-12: setup-key mode
+/// runs upstream's TWO-STEP shape, so the key-less Login AND the setup-key
+/// `Register` are both refused here — two RPCs, one attempt each, no retry.
 #[tokio::test(flavor = "multi_thread")]
 async fn permission_denied_on_login_is_terminal() {
     let mock = MgmtMock::default();
@@ -773,9 +798,7 @@ async fn permission_denied_on_login_is_terminal() {
 
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
         Some(Duration::from_secs(60)), // a REAL budget: retries would be visible
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -798,16 +821,19 @@ async fn permission_denied_on_login_is_terminal() {
     );
     assert_eq!(status.reconnects, 0, "fatal: no retryable failures counted");
 
-    // bounded: exactly ONE login attempt, no retry, no sync at all
+    // bounded: exactly the two steps, no retry, no sync at all (the
+    // `login_fail` knob answers EVERY call, so this is the key-less Login and
+    // the setup-key Register both being refused — their wire shape is pinned by
+    // the dedicated setup-key tests below)
     wait_for("login attempt recorded", || {
-        *mock.login_attempts.lock().expect("attempts") == 1
+        *mock.login_attempts.lock().expect("attempts") == 2
     })
     .await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         *mock.login_attempts.lock().expect("attempts"),
-        1,
-        "no second login attempt after PermissionDenied"
+        2,
+        "no retry after the two-step was refused"
     );
     assert!(
         mock.sync_connects.lock().expect("sync").is_empty(),
@@ -818,23 +844,27 @@ async fn permission_denied_on_login_is_terminal() {
 }
 
 // ---------------------------------------------------------------------------
-// 2026-10-11 A1/A2: account-mode login sequencing
-// (upstream client/internal/auth/auth.go:184-236, :327-355, :491-521;
-//  client/internal/connect.go:373-377 — see connector.rs `login_sequence`)
+// 2026-10-12: connect login sequencing
+// (upstream client/internal/connect.go:774-796 `loginToManagement`;
+//  client/internal/auth/auth.go:208-236, :336-355, :491-521;
+//  client/internal/state.go:15 — see connector.rs `login_sequence`
+//  and account_auth.rs `login_action`)
 //
-// The management JWT is a ONE-SHOT identity proof, not a session credential:
-// these tests pin that a normal reconnect sends NO token at all, that the
-// stored JWT is used at most once and only when the server says the peer must
-// (re)register, and that a consumed/rejected token surfaces as
-// `account-login-required` (never as the generic permanent `auth`).
+// A connect carries the SETUP KEY at most: there is no JWT anywhere in the
+// connect path (the interactive token step happens in the UI process BEFORE
+// the VPN starts and keeps nothing on disk). These tests pin that a connect
+// sends no token, that setup-key mode uses upstream's two-step
+// `Login` → `Register(setup_key)` shape, that a refused account-mode login
+// surfaces as `needs-login` (never as the generic permanent `auth`), and that
+// the login action's own two-step `Login` → `Register(jwt)` never persists the
+// token.
 // ---------------------------------------------------------------------------
 
-/// The device failure itself: an already-registered peer reconnects with a
-/// JWT sitting in the store — and the JWT must NOT go on the wire. The
-/// JWT-less Login is accepted, the connector reaches Connected, exactly one
-/// Login is attempted.
+/// An already-registered peer reconnects with NO credential at all — the
+/// public-key-only shape of every upstream connect: one Login, no token on the
+/// wire, Connected.
 #[tokio::test(flavor = "multi_thread")]
-async fn account_mode_reconnect_never_sends_the_stored_jwt() {
+async fn account_mode_connect_is_always_token_less() {
     let mock = MgmtMock::default();
     mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
     mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
@@ -845,16 +875,14 @@ async fn account_mode_reconnect_never_sends_the_stored_jwt() {
 
     let handle = spawn_connector(
         addr,
-        // account mode: no setup key, a STALE stored one-shot JWT
-        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        // account mode: the shell has nothing to send — no setup key, no token
+        ConnectorSecrets::default(),
         None,
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
         None,
     );
-    wait_for("connected after the JWT-less login", || {
+    wait_for("connected after the token-less login", || {
         handle.status().state == ConnState::Connected
     })
     .await;
@@ -862,117 +890,33 @@ async fn account_mode_reconnect_never_sends_the_stored_jwt() {
     assert_eq!(
         *mock.login_attempts.lock().expect("attempts"),
         1,
-        "a registered peer needs exactly ONE JWT-less Login"
+        "a registered peer needs exactly ONE Login"
     );
     let logins = mock.login_calls.lock().expect("logins").clone();
     assert_eq!(logins.len(), 1);
-    assert_eq!(logins[0].jwt_token, "", "the stored one-shot JWT must never be replayed");
+    assert_eq!(logins[0].jwt_token, "", "a connect never carries a JWT");
     assert_eq!(logins[0].setup_key, "");
     assert_eq!(handle.status().last_error, None);
     assert!(handle.status().running);
     handle.stop();
 }
 
-/// JWT-less Login rejected with `PermissionDenied` (peer login expired /
-/// registration needed) AND a stored JWT available → exactly one JWT retry,
-/// which registers successfully. Two Login calls total: the first with no
-/// token, the second with the token.
+/// `PermissionDenied` on the account-mode connect is upstream's
+/// `StatusNeedsLogin` (connect.go:373-377): terminal for this attempt, ONE
+/// Login, no Sync, and the class-only JSON carries `needs-login` — never the
+/// generic `auth` and never a retry loop.
 #[tokio::test(flavor = "multi_thread")]
-async fn account_mode_permission_denied_then_jwt_registration_succeeds() {
+async fn account_mode_permission_denied_needs_login() {
     let mock = MgmtMock::default();
     mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
         "peer login has expired, please log in once more",
     )));
-    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
-    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
-        vec![snapshot(5, 2, 1, None)],
-        None,
-    ));
     let addr = spawn_mock(mock.clone()).await;
 
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
-        None,
-        Arc::new(WgPeerRegistry::new()),
-        Arc::new(RecordingHost::default()),
-        None,
-    );
-    wait_for("connected after the JWT registration", || {
-        handle.status().state == ConnState::Connected
-    })
-    .await;
-
-    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
-    let logins = mock.login_calls.lock().expect("logins").clone();
-    assert_eq!(logins.len(), 2, "both attempts are captured (the rejected one too)");
-    assert_eq!(logins[0].jwt_token, "", "attempt 1 must be JWT-less");
-    assert_eq!(logins[1].jwt_token, SENTINEL_JWT, "attempt 2 carries the one-shot JWT");
-    assert_eq!(logins[0].setup_key, "");
-    assert_eq!(logins[1].setup_key, "");
-    assert_eq!(handle.status().last_error, None, "a successful retry records no error");
-    handle.stop();
-}
-
-/// `InvalidArgument` is the other half of upstream's `isLoginNeeded`
-/// (`auth.go:491-521`) and must trigger the same single JWT retry.
-#[tokio::test(flavor = "multi_thread")]
-async fn account_mode_invalid_argument_then_jwt_registration_succeeds() {
-    let mock = MgmtMock::default();
-    mock.login_script.lock().expect("script").push_back(Err(Status::invalid_argument(
-        "peer is not registered",
-    )));
-    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
-    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
-        vec![snapshot(5, 1, 1, None)],
-        None,
-    ));
-    let addr = spawn_mock(mock.clone()).await;
-
-    let handle = spawn_connector(
-        addr,
-        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
-        None,
-        Arc::new(WgPeerRegistry::new()),
-        Arc::new(RecordingHost::default()),
-        None,
-    );
-    wait_for("connected after the InvalidArgument retry", || {
-        handle.status().state == ConnState::Connected
-    })
-    .await;
-
-    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
-    let logins = mock.login_calls.lock().expect("logins").clone();
-    assert_eq!(logins[0].jwt_token, "");
-    assert_eq!(logins[1].jwt_token, SENTINEL_JWT);
-    handle.stop();
-}
-
-/// The exact device symptom: the JWT-less Login needs a registration, the
-/// stored JWT is dead (`Unauthenticated: JWT already used`) → the connector
-/// parks in Failed with ITS OWN class `account-login-required` (status 16),
-/// terminal, no retry loop, and the Sync RPC is never attempted.
-#[tokio::test(flavor = "multi_thread")]
-async fn account_mode_one_shot_jwt_already_used_is_login_required() {
-    let mock = MgmtMock::default();
-    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
-        "peer login has expired, please log in once more",
-    )));
-    mock.login_script.lock().expect("script").push_back(Err(Status::unauthenticated(
-        "JWT already used",
-    )));
-    let addr = spawn_mock(mock.clone()).await;
-
-    let handle = spawn_connector(
-        addr,
-        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        // the pubkey-only reconnect shape: nothing to send
+        ConnectorSecrets::default(),
         Some(Duration::from_secs(60)), // a REAL budget: a retry loop would be visible
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -982,23 +926,23 @@ async fn account_mode_one_shot_jwt_already_used_is_login_required() {
 
     let status = handle.status();
     assert!(!status.running, "worker exited");
-    assert!(status.terminal, "account-login-required is terminal for this attempt");
+    assert!(status.terminal, "needs-login is terminal for this attempt");
     assert_eq!(
         status.last_error,
-        Some(ErrorClass::AccountLoginRequired { status: 16 }),
-        "a consumed one-shot JWT is account-login-required(16), NOT the generic auth class"
+        Some(ErrorClass::NeedsLogin { status: 7 }),
+        "a refused account-mode login is needs-login(7), NOT the generic auth class"
     );
     assert_eq!(status.reconnects, 0, "fatal: no retryable failures counted");
     let json = handle.status_json();
-    assert!(json.contains("\"class\":\"account-login-required\",\"status\":16"), "{json}");
+    assert!(json.contains("\"class\":\"needs-login\",\"status\":7"), "{json}");
     // the server's own words never reach the class-only JSON surface
-    assert!(!json.contains("JWT already used"), "{json}");
+    assert!(!json.contains("peer login has expired"), "{json}");
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
         *mock.login_attempts.lock().expect("attempts"),
-        2,
-        "no third Login after the JWT was rejected"
+        1,
+        "no retry and no Register on the connect path"
     );
     assert!(
         mock.sync_connects.lock().expect("sync").is_empty(),
@@ -1007,24 +951,22 @@ async fn account_mode_one_shot_jwt_already_used_is_login_required() {
     handle.stop();
 }
 
-/// After the shell drops the stored JWT, a reconnect whose server-side peer
-/// session expired has NO token to (re)register with: the JWT-less
-/// `PermissionDenied` IS "log in again" — one attempt, the
-/// account-login-required class with the server's status preserved.
+/// `InvalidArgument` is the other half of upstream's `isLoginNeeded`
+/// (auth.go:491-521) and means the same thing for the connect: the peer record
+/// is not usable, so the user must log in (the server answers this for a peer
+/// whose registration is gone; upstream's connect loop treats the pair as
+/// "the peer must re-register").
 #[tokio::test(flavor = "multi_thread")]
-async fn account_mode_peer_login_expired_without_a_jwt_is_login_required() {
+async fn account_mode_invalid_argument_needs_login() {
     let mock = MgmtMock::default();
-    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
-        "peer login has expired, please log in once more",
+    mock.login_script.lock().expect("script").push_back(Err(Status::invalid_argument(
+        "peer is not registered",
     )));
     let addr = spawn_mock(mock.clone()).await;
 
     let handle = spawn_connector(
         addr,
-        // the shell already dropped the one-shot JWT: the pubkey-only shape
-        ConnectorSecrets { setup_key: String::new(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets::default(),
         Some(Duration::from_secs(60)),
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1034,25 +976,18 @@ async fn account_mode_peer_login_expired_without_a_jwt_is_login_required() {
 
     assert_eq!(
         handle.status().last_error,
-        Some(ErrorClass::AccountLoginRequired { status: 7 }),
-        "PermissionDenied on a JWT-less account login means re-login, not a setup-key problem"
+        Some(ErrorClass::NeedsLogin { status: 3 }),
+        "InvalidArgument is the second login-needed code"
     );
     assert!(handle.status().terminal);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        *mock.login_attempts.lock().expect("attempts"),
-        1,
-        "with no JWT at hand there is no retry to make"
-    );
-    let logins = mock.login_calls.lock().expect("logins").clone();
-    assert_eq!(logins.len(), 1);
-    assert_eq!(logins[0].jwt_token, "");
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1);
     handle.stop();
 }
 
 /// Transient failures keep the OLD behaviour: retried with backoff until the
-/// next attempt succeeds. `Unauthenticated` on a JWT-less attempt is NOT
-/// re-classified (upstream only re-classifies the one-shot JWT verdicts).
+/// next attempt succeeds. `Unauthenticated` on a token-less attempt is NOT
+/// re-classified (a connect carries no token for it to be a verdict about).
 #[tokio::test(flavor = "multi_thread")]
 async fn account_mode_transient_login_failure_is_retried() {
     let mock = MgmtMock::default();
@@ -1068,9 +1003,7 @@ async fn account_mode_transient_login_failure_is_retried() {
 
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: String::new(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        ConnectorSecrets::default(),
         None,
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1093,10 +1026,50 @@ async fn account_mode_transient_login_failure_is_retried() {
     handle.stop();
 }
 
-/// Setup-key mode is UNCHANGED: one Login, carrying the setup key and no JWT
-/// even when an account token happens to be stored.
+/// Setup-key mode: upstream's TWO-STEP shape (auth.go:208-236). The key-less
+/// `Login` runs first; only its login-needed verdict sends the setup key, and
+/// it goes to the `Register` step (grpc.go:641-648) — never inside `Login`.
 #[tokio::test(flavor = "multi_thread")]
-async fn setup_key_mode_is_unchanged_and_never_sends_a_stored_jwt() {
+async fn setup_key_mode_registers_with_the_setup_key_after_a_keyless_login() {
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "no peer auth method provided, please use a setup key or interactive SSO login",
+    )));
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+        vec![snapshot(5, 1, 1, None)],
+        None,
+    ));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let handle = spawn_connector(
+        addr,
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
+        None,
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(RecordingHost::default()),
+        None,
+    );
+    wait_for("connected after the setup-key registration", || {
+        handle.status().state == ConnState::Connected
+    })
+    .await;
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 2, "both steps are captured (the refused one too)");
+    assert_eq!(logins[0].setup_key, "", "step 1 is the key-less Login");
+    assert_eq!(logins[1].setup_key, SENTINEL_SETUP_KEY, "step 2 is Register with the key");
+    assert_eq!(logins[0].jwt_token, "");
+    assert_eq!(logins[1].jwt_token, "");
+    assert_eq!(handle.status().last_error, None, "a successful register records no error");
+    handle.stop();
+}
+
+/// A setup-key profile whose peer is ALREADY registered needs no Register:
+/// the key-less Login succeeds and the setup key never reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_key_mode_skips_register_when_the_keyless_login_succeeds() {
     let mock = MgmtMock::default();
     mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
     mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
@@ -1107,9 +1080,7 @@ async fn setup_key_mode_is_unchanged_and_never_sends_a_stored_jwt() {
 
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
         None,
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1117,12 +1088,140 @@ async fn setup_key_mode_is_unchanged_and_never_sends_a_stored_jwt() {
     );
     wait_for("connected", || handle.status().state == ConnState::Connected).await;
 
-    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1, "no two-step in setup-key mode");
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1, "no second step needed");
     let logins = mock.login_calls.lock().expect("logins").clone();
     assert_eq!(logins.len(), 1);
-    assert_eq!(logins[0].setup_key, SENTINEL_SETUP_KEY);
+    assert_eq!(logins[0].setup_key, "", "the key rides only the Register step");
     assert_eq!(logins[0].jwt_token, "");
     handle.stop();
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-12: the SSO login action's management step (account_auth.rs
+// `login_action` — the core entry the UI-process `account_login_*` NAPI job
+// runs right after the PKCE token exchange, BEFORE the VPN starts)
+//
+// Upstream: client/android/client.go:194-215 (`Run` → `auth.login(urlOpener)`)
+// → client/internal/auth/auth.go:184-236 (key-less `doMgmLogin`, then
+// `registerPeer` with the fresh JWT). The token is a local: these tests pin
+// the wire shape (key-less Login first, JWT only on the Register step) and that
+// nothing about it survives the call.
+// ---------------------------------------------------------------------------
+
+/// The login action registers the peer with the JWT: a key-less, token-less
+/// `Login` first, then `Register` with the token. Two RPCs, nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn login_action_registers_with_the_jwt_after_a_keyless_login() {
+    use netbird_core::account_auth::{login_action, LoginActionVerdict};
+
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "no peer auth method provided, please use a setup key or interactive SSO login",
+    )));
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let mut client = plaintext_client(addr, EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes())).await;
+    let verdict = login_action(&mut client, &login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect("login action");
+    assert_eq!(verdict, LoginActionVerdict::Registered);
+
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 2);
+    assert_eq!(logins[0].jwt_token, "", "step 1 is token-less");
+    assert_eq!(logins[0].setup_key, "");
+    assert_eq!(logins[1].jwt_token, SENTINEL_JWT, "step 2 is Register with the JWT");
+    assert_eq!(logins[1].setup_key, "");
+    assert!(
+        mock.sync_connects.lock().expect("sync").is_empty(),
+        "the login action never opens the Sync stream"
+    );
+    assert!(
+        mock.extend_calls.lock().expect("extend").is_empty(),
+        "the login action never extends a session"
+    );
+
+    // Nothing about the token survives the call: a SECOND action on the same
+    // client starts from the same key-less Login again (there is no cached
+    // credential, no file, no second use of the spent token).
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    let again = login_action(&mut client, &login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect("second login action");
+    assert_eq!(again, LoginActionVerdict::Registered);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 3, "the second action re-runs only the key-less Login");
+    assert_eq!(logins[2].jwt_token, "", "the spent token is never replayed");
+}
+
+/// A registration the server refuses AGAIN (peer login still expired / the
+/// token not permitted) is the login-required verdict, not an error: the UI
+/// reports the failed login. Two RPCs, no retry loop of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn login_action_refused_registration_needs_login() {
+    use netbird_core::account_auth::{login_action, LoginActionVerdict};
+
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let mut client = plaintext_client(addr, EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes())).await;
+    let verdict = login_action(&mut client, &login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect("a refusal is a verdict, not a transport error");
+    assert_eq!(verdict, LoginActionVerdict::NeedsLogin);
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
+}
+
+/// A one-shot JWT the server itself rejects (`Unauthenticated: JWT already
+/// used` / expired) is the same verdict: this account is not logged in.
+#[tokio::test(flavor = "multi_thread")]
+async fn login_action_rejected_token_needs_login() {
+    use netbird_core::account_auth::{login_action, LoginActionVerdict};
+
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Err(Status::permission_denied(
+        "peer login has expired, please log in once more",
+    )));
+    mock.login_script.lock().expect("script").push_back(Err(Status::unauthenticated(
+        "JWT already used",
+    )));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let mut client = plaintext_client(addr, EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes())).await;
+    let verdict = login_action(&mut client, &login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect("a rejected token is a verdict");
+    assert_eq!(verdict, LoginActionVerdict::NeedsLogin);
+}
+
+/// An already-registered peer whose session is fine: the key-less Login
+/// succeeds, the JWT never goes on the wire, and no Register step runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn login_action_never_sends_the_jwt_when_the_login_succeeds() {
+    use netbird_core::account_auth::{login_action, LoginActionVerdict};
+
+    let mock = MgmtMock::default();
+    mock.login_script.lock().expect("script").push_back(Ok(login_response(None)));
+    let addr = spawn_mock(mock.clone()).await;
+
+    let mut client = plaintext_client(addr, EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes())).await;
+    let verdict = login_action(&mut client, &login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect("login action");
+    assert_eq!(verdict, LoginActionVerdict::Registered);
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1);
+    let logins = mock.login_calls.lock().expect("logins").clone();
+    assert_eq!(logins.len(), 1);
+    assert_eq!(logins[0].jwt_token, "", "the token is only for the Register step");
+    assert_eq!(logins[0].setup_key, "");
 }
 
 /// Retry-budget exhaustion through an INJECTED failing management factory
@@ -1133,9 +1232,7 @@ async fn setup_key_mode_is_unchanged_and_never_sends_a_stored_jwt() {
 async fn retry_budget_exhaustion_is_bounded_and_sanitized() {
     let handle = spawn_connector(
         std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
-        ConnectorSecrets { setup_key: "SETUP-KEY-X".into(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets { setup_key: "SETUP-KEY-X".into() },
         Some(Duration::ZERO), // spent immediately → exactly one attempt
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1187,9 +1284,7 @@ async fn stop_is_idempotent_cleans_up_and_never_logs_out() {
         let host = Arc::new(RecordingHost::default());
         let handle = spawn_connector(
             addr,
-            ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
-            Duration::from_secs(600),
-            Duration::from_secs(30),
+            ConnectorSecrets { setup_key: "SETUP-KEY-OK".into() },
             None,
             wg.clone(),
             host.clone(),
@@ -1260,9 +1355,7 @@ async fn explicit_logout_fires_once_and_stop_after_it_stays_silent() {
 
         let handle = spawn_connector(
             addr,
-            ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
-            Duration::from_secs(600),
-            Duration::from_secs(30),
+            ConnectorSecrets { setup_key: "SETUP-KEY-OK".into() },
             None,
             Arc::new(WgPeerRegistry::new()),
             Arc::new(RecordingHost::default()),
@@ -1319,9 +1412,7 @@ async fn failing_wg_applier_is_reported_not_fatal() {
     let host = Arc::new(RecordingHost::default());
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
-        Duration::from_secs(600),
-        Duration::from_secs(30),
+        ConnectorSecrets { setup_key: "SETUP-KEY-OK".into() },
         None,
         Arc::new(FailingWgApplier),
         host.clone(),
@@ -1362,9 +1453,7 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
     let addr = spawn_mock(mock.clone()).await;
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
         Some(Duration::ZERO),
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1374,36 +1463,51 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
 
     // the sentinel setup key really reached the server (the scan below is
     // therefore meaningful — the secret was in play). The login FAILED
-    // (PermissionDenied), so the capture comes from the attempts counter
-    // side: assert the request was seen, then flip the mock and log in
-    // successfully to prove the sentinels cross the real path.
-    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 1);
+    // (PermissionDenied on BOTH steps of the setup-key two-step), so the
+    // capture comes from the attempts counter side: assert the requests were
+    // seen, then flip the mock and log in successfully to prove the sentinels
+    // cross the real path.
+    assert_eq!(*mock.login_attempts.lock().expect("attempts"), 2);
 
     // capture the sentinel values through a SUCCESSFUL login: reuse the
-    // same mock, clear the failure, restart a connector on it
+    // same mock, clear the failure, restart a connector on it. The setup key
+    // only reaches the wire on the `Register` step, so the scripted first step
+    // is refused (upstream's two-step) and the second one registers.
     *mock.login_fail.lock().expect("fail") = None;
-    *mock.login_response.lock().expect("lr") = Some(login_response(Some(1_700_000_000)));
+    mock.login_script
+        .lock()
+        .expect("script")
+        .push_back(Err(Status::permission_denied("no peer auth method provided")));
+    mock.login_script
+        .lock()
+        .expect("script")
+        .push_back(Ok(login_response(Some(1_700_000_000))));
     let handle2 = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
         None,
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
         None,
     );
-    wait_for("successful login captured", || {
-        !mock.login_calls.lock().expect("logins").is_empty()
+    // wait for the REGISTER step specifically: the key-less step is captured
+    // first and would satisfy a mere "any call captured" condition (the flaky
+    // shape this replaced).
+    wait_for("the setup-key Register reached the server", || {
+        mock.login_calls
+            .lock()
+            .expect("logins")
+            .iter()
+            .any(|l| l.setup_key == SENTINEL_SETUP_KEY)
     })
     .await;
     {
         let logins = mock.login_calls.lock().expect("logins");
         assert_eq!(logins[logins.len() - 1].setup_key, SENTINEL_SETUP_KEY);
-        // 2026-10-11 A1: setup-key mode sends the setup key and NOTHING else —
-        // a stored account JWT is not this mode's credential and must never
-        // ride along on the wire (it stays a local secret, which is exactly why
-        // the leak scan above/below keeps covering it).
+        // 2026-10-12: the setup key rides ONLY the Register step — a JWT is not
+        // a connect credential at all any more, so it can never ride along (it
+        // stays a local secret, which is exactly why the leak scan above/below
+        // keeps covering it).
         assert_eq!(logins[logins.len() - 1].jwt_token, "");
         assert_eq!(logins[logins.len() - 1].meta_hostname, "ohos-connector");
     }
@@ -1436,9 +1540,7 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
     let wg = Arc::new(WgPeerRegistry::new());
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
+        ConnectorSecrets { setup_key: SENTINEL_SETUP_KEY.into() },
         None,
         wg.clone(),
         Arc::new(RecordingHost::default()),
@@ -1472,13 +1574,16 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
     }
 }
 
-/// Session renewal: with a JWT present and the anchored deadline inside the
-/// injected lead window, the connector calls ExtendAuthSession and applies
-/// the new (3-state) deadline; with a setup-key-only session it never
-/// extends (upstream empty-JWT guard, engine_authsession.go:84-86).
+/// 2026-10-12: NO silent session renewal. The connector holds no JWT, so it
+/// cannot and must not call `ExtendAuthSession` on its own — upstream's
+/// extension is an INTERACTIVE app-process flow that fetches a fresh token
+/// first (`client/android/session.go:127-155`, `login.go:191-204`) and the
+/// Android engine arms no expiry timers (`client/android/session.go:20-24`).
+/// The anchored 3-state deadline is still published for the UI, whatever the
+/// credential mode.
 #[tokio::test(flavor = "multi_thread")]
-async fn session_renewal_fires_only_when_jwt_and_near_expiry() {
-    let soon = unix_now() + 2; // expires in 2s — inside the 60s lead
+async fn no_silent_session_renewal_and_the_deadline_is_published() {
+    let soon = unix_now() + 2; // expires in 2s: a silent renewal would fire now
     let mock = MgmtMock::default();
     *mock.login_response.lock().expect("lr") = Some(login_response(Some(soon)));
     mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
@@ -1488,9 +1593,7 @@ async fn session_renewal_fires_only_when_jwt_and_near_expiry() {
     let addr = spawn_mock(mock.clone()).await;
     let handle = spawn_connector(
         addr,
-        ConnectorSecrets { setup_key: String::new(), jwt: SENTINEL_JWT.into() },
-        Duration::from_secs(60),  // lead: renewal triggers immediately
-        Duration::from_millis(10), // check every 10ms
+        ConnectorSecrets::default(), // account mode: the token-less connect shape
         None,
         Arc::new(WgPeerRegistry::new()),
         Arc::new(RecordingHost::default()),
@@ -1498,52 +1601,21 @@ async fn session_renewal_fires_only_when_jwt_and_near_expiry() {
     );
     wait_for("snapshot applied", || handle.status().peer_count == 1).await;
 
-    wait_for("renewal fired with the injected jwt", || {
-        mock.extend_calls.lock().expect("extend").len() == 1
-    })
-    .await;
-    assert_eq!(mock.extend_calls.lock().expect("extend")[0], SENTINEL_JWT);
-
-    // the new absolute deadline is applied and reported
-    wait_for("renewed deadline reported", || {
-        handle
-            .status_json()
-            .contains("\"session_expires_at_unix\":1893456000")
-    })
-    .await;
-
-    // the renewed deadline is far outside the lead → no further extensions
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        mock.extend_calls.lock().expect("extend").len(),
-        1,
-        "renewal must not loop once the deadline moved out"
-    );
-    handle.stop();
-
-    // ---- negative: setup-key-only → no JWT → never extends ----
-    let mock = MgmtMock::default();
-    *mock.login_response.lock().expect("lr") = Some(login_response(Some(soon)));
-    mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
-        vec![snapshot(5, 1, 0, None)],
-        None,
-    ));
-    let addr = spawn_mock(mock.clone()).await;
-    let handle = spawn_connector(
-        addr,
-        ConnectorSecrets { setup_key: "SETUP-KEY-ONLY".into(), jwt: String::new() },
-        Duration::from_secs(3600),
-        Duration::from_millis(10),
-        None,
-        Arc::new(WgPeerRegistry::new()),
-        Arc::new(RecordingHost::default()),
-        None,
-    );
-    wait_for("snapshot applied", || handle.status().peer_count == 1).await;
+    // long enough that the old 10 ms renewal tick would have fired many times
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         mock.extend_calls.lock().expect("extend").is_empty(),
-        "a setup-key session has no JWT to extend (engine_authsession.go:84-86)"
+        "the connector must never extend a session by itself (no token exists)"
+    );
+    let json = handle.status_json();
+    assert!(json.contains("\"session_expiry\":\"set\""), "{json}");
+    assert!(
+        json.contains(&format!("\"session_expires_at_unix\":{soon}")),
+        "the anchored deadline is published for the UI: {json}"
+    );
+    assert!(
+        !json.contains("session_renew_attempts"),
+        "the silent-renewal counter is gone with the path: {json}"
     );
     handle.stop();
 }

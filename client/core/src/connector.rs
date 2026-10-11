@@ -14,23 +14,31 @@
 //!   `handleSyncStream`（grpc.go:427-476）：连接 → 登录 → 持有 Sync 流，
 //!   断流按 backoff 重连，`PermissionDenied`/`Unauthenticated` 是
 //!   Permanent（grpc.go:436-438/L468-470，本仓 [`crate::sync`] 已按此二分）。
-//! - **登录顺序（2026-10-11 账号修复）**：`Login` 先**不带 JWT**试一次——
-//!   已注册 peer 由持久 WireGuard 公钥识别（upstream `GrpcClient::Login`
-//!   grpc.go:650-656 不带任何 token）；只有 `PermissionDenied`/
-//!   `InvalidArgument`（upstream `isLoginNeeded`，auth.go:491-521）才用一次
-//!   性 JWT 重试**一次**。一次性 JWT 被拒（`Unauthenticated` "JWT already
-//!   used" / `PermissionDenied`）→ `account-login-required` 类（不是通用
-//!   `auth`），壳层据此要求重新登录而不再重试。setup-key 模式保持原样。
-//!   见 [`login_sequence`]。
-//! - 会话续期时机：上游把 Login/Sync 上的 3 态 `sessionExpiresAt` 锚定到
-//!   watcher（`client/internal/engine_authsession.go:17-62`
+//! - **登录顺序（2026-10-12 账号修复）**：`Login` 只带**持久 WireGuard 公钥**
+//!   （upstream `GrpcClient::Login` grpc.go:650-656，不带任何 token），
+//!   没有 JWT、没有 setup key——这正是上游 connect 循环的形状
+//!   （`client/internal/connect.go:774-796` `loginToManagement`）。登录/
+//!   注册的**交互步骤**（一次性 JWT 或 setup key 走 `Register`）在上游是
+//!   引擎启动**之前**的 login action（`client/android/client.go:205`
+//!   `auth.login(...)` → `auth.go:208-236`）；账号模式下本仓由 UI 进程的
+//!   [`crate::account_auth`] login-action NAPI 完成（一次性 JWT 不落盘），
+//!   setup-key 模式仍由本序列的两步 `Login` → `Register(setup_key)` 完成
+//!   （触发码 = upstream `isLoginNeeded`，`InvalidArgument`/
+//!   `PermissionDenied`，auth.go:491-521）。`PermissionDenied` 的账号模式
+//!   判定为 `needs-login` 类（upstream `StatusNeedsLogin`，connect.go:373-377
+//!   / state.go:15），壳层据此显示官方文案（`Login required`/「需要登录」）
+//!   而不是无限重试。见 [`login_sequence`]。
+//! - 会话期限（2026-10-12）：上游把 Login/Sync 上的 3 态 `sessionExpiresAt`
+//!   锚定到 watcher（`client/internal/engine_authsession.go:17-62`
 //!   `ApplySessionDeadline`；nil=保持、显式零=禁用、有效值=新期限），临期
 //!   警告提前量在 `client/internal/auth/sessionwatch/watcher.go:34-43`
-//!   （T-10min 交互警告 / T-2min 兜底）。本模块在剩余寿命小于
-//!   `session_renew_lead_ms`（默认 10 分钟，同 WarningLead）时主动调用
-//!   `ExtendAuthSession`；上游续期入口语义见
-//!   `engine_authsession.go:83-107`（空 JWT 直接拒绝 L84-86；成功后把新
-//!   期限写回 L102；隧道不动、不重同步 L71-73 注释）。
+//!   （T-10min 交互警告 / T-2min 兜底）。**续期本身是官方 App 进程的交互
+//!   流程**：`client/android/session.go:127-155` `ExtendAuthSession` 先跑一次
+//!   SSO 拿新 JWT（`login.go:191-204`），再调引擎的
+//!   `engine_authsession.go:83-107`（空 JWT 直接拒绝 L84-86；成功后把新期限
+//!   写回 L102；隧道不动、不重同步 L71-73 注释）。本模块**没有** JWT，因此只
+//!   把期限发布到状态文档（`session_expiry`）供壳层显示，绝不自行静默续期；
+//!   该交互入口（UI 进程 SSO → 核心 extend）尚未实现，见报告 caveat。
 //! - 快照顺序：`client/internal/engine.go:1572-1576` — serial 严格小于
 //!   已应用值的 NetworkMap 直接丢弃（相等仍应用）。
 //!
@@ -269,14 +277,14 @@ pub enum ErrorClass {
     Network,
     Timeout,
     Auth { status: u16 },
-    /// 2026-10-11 A2: account mode needs a fresh interactive login (the
-    /// JWT-less `Login` was rejected as "peer not registered / peer login
-    /// expired" and no usable JWT was at hand, or the stored one-shot JWT was
-    /// rejected as already used/expired). Token: `account-login-required` —
-    /// the SAME stable token the shell's connect-failure channel already
-    /// renders as "账户登录已过期，请重新点“账户登录”" (Index.ets). It is NOT the
+    /// 2026-10-12: this peer needs a fresh interactive login — upstream
+    /// `StatusNeedsLogin` (`client/internal/state.go:15`), set when the
+    /// JWT-less/setup-key-less `Login` is refused with a login-needed code
+    /// (`client/internal/connect.go:373-377`). Token: `needs-login` — the SAME
+    /// stable token the shell's connect-failure channel renders as the
+    /// official UI label (`Login required` /「需要登录」). It is NOT the
     /// generic `Auth` class: no retry of the same credential can fix it.
-    AccountLoginRequired { status: u16 },
+    NeedsLogin { status: u16 },
     Request { status: u16 },
     Server { status: u16 },
     Parse,
@@ -290,8 +298,8 @@ impl ErrorClass {
             ManagementError::Network(_) => ErrorClass::Network,
             ManagementError::Timeout => ErrorClass::Timeout,
             ManagementError::Auth { status, .. } => ErrorClass::Auth { status: *status },
-            ManagementError::AccountLoginRequired { status, .. } => {
-                ErrorClass::AccountLoginRequired { status: *status }
+            ManagementError::NeedsLogin { status, .. } => {
+                ErrorClass::NeedsLogin { status: *status }
             }
             ManagementError::Request { status, .. } => ErrorClass::Request { status: *status },
             ManagementError::Server { status } => ErrorClass::Server { status: *status },
@@ -305,7 +313,7 @@ impl ErrorClass {
             ErrorClass::Network => "network",
             ErrorClass::Timeout => "timeout",
             ErrorClass::Auth { .. } => "auth",
-            ErrorClass::AccountLoginRequired { .. } => "account-login-required",
+            ErrorClass::NeedsLogin { .. } => "needs-login",
             ErrorClass::Request { .. } => "request",
             ErrorClass::Server { .. } => "server",
             ErrorClass::Parse => "parse",
@@ -317,7 +325,7 @@ impl ErrorClass {
     pub fn status_code(&self) -> u16 {
         match self {
             ErrorClass::Auth { status }
-            | ErrorClass::AccountLoginRequired { status }
+            | ErrorClass::NeedsLogin { status }
             | ErrorClass::Request { status }
             | ErrorClass::Server { status } => *status,
             _ => 0,
@@ -333,26 +341,24 @@ impl ErrorClass {
 /// Redacted management error detail for the DEVICE LOG only (2026-10-06,
 /// login-failure visibility): the numeric gRPC/HTTP status plus the
 /// server-sent message with secret material scrubbed — any occurrence of
-/// the setup key or JWT becomes `[redacted]`, control characters collapse
+/// the setup key becomes `[redacted]`, control characters collapse
 /// to spaces (single-line log discipline) and the text is capped so a
 /// chatty server cannot flood the log. The STATUS/ERROR JSON surfaces stay
 /// class-only (credential discipline is unchanged); this is the diagnostic
 /// log channel, where the message is the thing the operator actually needs
-/// ("invalid setup key" vs "permission denied" ...). Empty for classes
+/// ("invalid setup key" vs "peer login has expired" ...). Empty for classes
 /// that carry no server message (network/timeout/parse/...).
 fn redacted_login_detail(err: &ManagementError, secrets: &ConnectorSecrets) -> String {
     let (status, message) = match err {
         ManagementError::Auth { status, message }
-        | ManagementError::AccountLoginRequired { status, message }
+        | ManagementError::NeedsLogin { status, message }
         | ManagementError::Request { status, message } => (*status, message.as_str()),
         ManagementError::Server { status } => (*status, ""),
         _ => return String::new(),
     };
     let mut text = message.to_string();
-    for secret in [&secrets.setup_key, &secrets.jwt] {
-        if secret.len() >= 8 && text.contains(secret.as_str()) {
-            text = text.replace(secret.as_str(), "[redacted]");
-        }
+    if secrets.setup_key.len() >= 8 && text.contains(secrets.setup_key.as_str()) {
+        text = text.replace(secrets.setup_key.as_str(), "[redacted]");
     }
     let flat = text.replace(['\n', '\r', '\t'], " ");
     const CAP: usize = 160;
@@ -830,10 +836,6 @@ impl ManagementFactory for GrpcManagementFactory {
 // configuration + credentials (parsed from the NAPI JSON args)
 // ---------------------------------------------------------------------------
 
-/// Session-renewal defaults: lead = upstream interactive warning lead
-/// (sessionwatch/watcher.go:34-37); check interval bounds renewal latency.
-pub const DEFAULT_RENEW_LEAD: Duration = Duration::from_secs(10 * 60);
-pub const DEFAULT_RENEW_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -849,10 +851,6 @@ pub struct ConnectorConfig {
     pub meta: PeerMeta,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
-    /// Extend the SSO session when remaining lifetime drops below this.
-    pub renew_lead: Duration,
-    /// How often the renewal task re-checks the deadline.
-    pub renew_check_interval: Duration,
     /// N3-7: dev opt-in — export the managed default route even when the
     /// data plane cannot carry traffic (traffic-black-hole risk acknowledged
     /// by the caller). Default FALSE; honored state is logged loudly.
@@ -917,7 +915,6 @@ impl ConnectorConfig {
     ///   "os_name": "harmonyos", "os_version": "5.0.0",
     ///   "netbird_version": "0.1.0",
     ///   "connect_timeout_ms": 5000, "request_timeout_ms": 10000,
-    ///   "session_renew_lead_ms": 600000, "renew_check_interval_ms": 30000,
     ///   "force_default_route": false,
     ///   "allow_unprotected_management": false,
     ///   "relay_enabled": false,
@@ -994,8 +991,6 @@ impl ConnectorConfig {
         let mut netbird_version = "0.1.0".to_string();
         let mut connect_timeout = DEFAULT_CONNECT_TIMEOUT;
         let mut request_timeout = DEFAULT_REQUEST_TIMEOUT;
-        let mut renew_lead = DEFAULT_RENEW_LEAD;
-        let mut renew_check_interval = DEFAULT_RENEW_CHECK_INTERVAL;
         let mut force_default_route = false;
         let mut allow_unprotected_management = false;
         let mut ice_fixed_port: u16 = 0;
@@ -1052,13 +1047,6 @@ impl ConnectorConfig {
                 }
                 "request_timeout_ms" => {
                     request_timeout = Duration::from_millis(field_u64(val, "request_timeout_ms")?)
-                }
-                "session_renew_lead_ms" => {
-                    renew_lead = Duration::from_millis(field_u64(val, "session_renew_lead_ms")?)
-                }
-                "renew_check_interval_ms" => {
-                    renew_check_interval =
-                        Duration::from_millis(field_u64(val, "renew_check_interval_ms")?)
                 }
                 "force_default_route" => {
                     force_default_route = field_bool(val, "force_default_route")?
@@ -1163,8 +1151,6 @@ impl ConnectorConfig {
             meta: PeerMeta { hostname, os_name, os_version, netbird_version },
             connect_timeout,
             request_timeout,
-            renew_lead,
-            renew_check_interval,
             force_default_route,
             allow_unprotected_management,
             ice_fixed_port,
@@ -1278,26 +1264,26 @@ pub struct RelayAttach {
     pub materials: Arc<RelayMaterials>,
 }
 
-/// Login credentials parsed from the optional `setupKeyJson` argument.
-/// Manual `Debug`: both fields are secrets and must never format through.
+/// 2026-10-12: what a connect may still carry is the SETUP KEY only. The
+/// management JWT is deliberately NOT a connect credential any more: upstream
+/// keeps no token on disk (`client/internal/profilemanager/config.go:62-135`
+/// has no token field) and uses it only inside the interactive login action
+/// that runs before the engine starts (`client/android/client.go:194-215`).
+/// In this shell that action is the UI-process [`crate::account_auth`] NAPI,
+/// so every connect is token-less — account mode sends `{}`.
+/// Manual `Debug`: the field is a secret and must never format through.
 #[derive(Clone, Default)]
 pub struct ConnectorSecrets {
-    /// Pre-authorized setup key (empty when absent — setup-key mode).
+    /// Pre-authorized setup key (empty when absent — account mode).
     pub setup_key: String,
-    /// SSO JWT token (empty when absent). In account mode this is the
-    /// ONE-SHOT registration proof: the login sequence tries a JWT-less
-    /// `Login` first and only falls back to this token (see
-    /// [`login_sequence`]).
-    pub jwt: String,
 }
 
 impl ConnectorSecrets {
-    /// Parse `{"setup_key": "...", "jwt": "..."}`. 2026-10-11 A1: BOTH may be
-    /// empty — the shell's account mode sends `{}` once the stored one-shot
-    /// JWT has been dropped, because a normal reconnect identifies the peer by
-    /// its persistent WireGuard public key alone (upstream
-    /// `GrpcClient::Login`, grpc.go:650-656). The old "at least one of
-    /// setup_key / jwt is required" rejection is gone.
+    /// Parse `{"setup_key": "..."}`. 2026-10-12: the setup key may be absent
+    /// (account mode) and the JWT key is GONE — a normal connect identifies the
+    /// peer by its persistent WireGuard public key alone (upstream
+    /// `GrpcClient::Login`, grpc.go:650-656). An unknown `jwt`/`jwt_token` key
+    /// is ignored like every other unknown field.
     pub fn from_json(text: &str) -> Result<ConnectorSecrets, ConfigError> {
         let doc = config::parse_document(text)?;
         let entries = match doc {
@@ -1313,7 +1299,6 @@ impl ConnectorSecrets {
         for (key, val) in &entries {
             match key.as_str() {
                 "setup_key" => secrets.setup_key = field_str(val, "setup_key")?.to_string(),
-                "jwt" | "jwt_token" => secrets.jwt = field_str(val, "jwt")?.to_string(),
                 _ => {}
             }
         }
@@ -1326,7 +1311,6 @@ impl core::fmt::Debug for ConnectorSecrets {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ConnectorSecrets")
             .field("setup_key", &"REDACTED")
-            .field("jwt", &"REDACTED")
             .finish()
     }
 }
@@ -1411,7 +1395,6 @@ struct StateInner {
     route_count: usize,
     deadline: SessionDeadline,
     reconnects: u64,
-    renew_attempts: u64,
     wg_apply_failed: bool,
     wg_apply_errors: u64,
     logout_ok: Option<bool>,
@@ -1657,7 +1640,6 @@ impl ConnectorShared {
                 route_count: 0,
                 deadline: SessionDeadline::Unknown,
                 reconnects: 0,
-                renew_attempts: 0,
                 wg_apply_failed: false,
                 wg_apply_errors: 0,
                 logout_ok: None,
@@ -4233,7 +4215,6 @@ pub struct ConnectorStatus {
     pub reconnects: u64,
     pub last_error: Option<ErrorClass>,
     pub deadline: SessionDeadline,
-    pub renew_attempts: u64,
     pub wg_apply_failed: bool,
     pub wg_apply_errors: u64,
     pub logout_ok: Option<bool>,
@@ -4341,7 +4322,6 @@ impl ConnectorStatus {
             reconnects: g.reconnects,
             last_error: g.last_error,
             deadline: g.deadline,
-            renew_attempts: g.renew_attempts,
             wg_apply_failed: g.wg_apply_failed,
             wg_apply_errors: g.wg_apply_errors,
             logout_ok: g.logout_ok,
@@ -4360,7 +4340,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -4380,7 +4360,6 @@ impl ConnectorStatus {
                 SessionDeadline::At(t) => jinum("session_expires_at_unix", t),
                 _ => "\"session_expires_at_unix\":null".to_string(),
             },
-            jnum("session_renew_attempts", self.renew_attempts),
             jbool("wg_apply_failed", self.wg_apply_failed),
             jnum("wg_apply_errors", self.wg_apply_errors),
             format!(
@@ -5433,7 +5412,7 @@ fn route_signal_message(
 // the connector handle
 // ---------------------------------------------------------------------------
 
-/// Everything the worker/renewal tasks need (owned `Arc`s and clones; no
+/// Everything the connection worker needs (owned `Arc`s and clones; no
 /// borrowing of the handle).
 struct WorkerDeps {
     shared: Arc<ConnectorShared>,
@@ -5455,7 +5434,7 @@ pub struct StopOutcome {
     pub state: ConnState,
 }
 
-/// A started connector: owns the worker/renewal tasks and exposes
+/// A started connector: owns the connection worker task and exposes
 /// `status()` / `stop()`. `stop()` is idempotent; a stopped (or
 /// fatal-failed) slot is replaced by the next `connector_start`.
 pub struct ConnectorHandle {
@@ -5505,7 +5484,6 @@ pub struct ConnectorHandle {
     /// frozen shape (§5.2).
     management_dial: Option<SocketAddr>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -5520,7 +5498,7 @@ impl core::fmt::Debug for ConnectorHandle {
 }
 
 impl ConnectorHandle {
-    /// Build deps + spawn the worker and session-renewal tasks on
+    /// Build deps + spawn the connection worker on
     /// `runtime`. Returns immediately; progress is observed via `status()`.
     /// N3-7: `force_default_route` arms the default-route gate override;
     /// `socket_source` (when set) is the resupply handle for
@@ -5547,8 +5525,6 @@ impl ConnectorHandle {
         meta: PeerMeta,
         policy_backoff: ExponentialBackoff,
         sync_policy: SyncPolicy,
-        renew_lead: Duration,
-        renew_check_interval: Duration,
         force_default_route: bool,
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
@@ -5569,8 +5545,6 @@ impl ConnectorHandle {
             meta,
             policy_backoff,
             sync_policy,
-            renew_lead,
-            renew_check_interval,
             force_default_route,
             socket_source,
             ice,
@@ -5604,8 +5578,6 @@ impl ConnectorHandle {
         meta: PeerMeta,
         policy_backoff: ExponentialBackoff,
         sync_policy: SyncPolicy,
-        renew_lead: Duration,
-        renew_check_interval: Duration,
         force_default_route: bool,
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
@@ -5624,8 +5596,6 @@ impl ConnectorHandle {
             meta,
             policy_backoff,
             sync_policy,
-            renew_lead,
-            renew_check_interval,
             force_default_route,
             socket_source,
             ice,
@@ -5656,8 +5626,6 @@ impl ConnectorHandle {
         meta: PeerMeta,
         policy_backoff: ExponentialBackoff,
         sync_policy: SyncPolicy,
-        renew_lead: Duration,
-        renew_check_interval: Duration,
         force_default_route: bool,
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
@@ -5672,7 +5640,7 @@ impl ConnectorHandle {
         // dropped (the device default keeps EVERY relay seam detached).
         let relay_attach = relay_enabled.then_some(relay_attach).flatten();
         // N2-H: the session's INTERNAL management dial address, read BEFORE
-        // the factory is moved into the worker/renewal tasks.
+        // the factory is moved into the worker task.
         let management_dial = factory.dial_address();
         // 006: successful-start identity + cumulative start counter. Taken
         // BEFORE anything can fail so a spawn that reaches this line is one
@@ -5693,7 +5661,7 @@ impl ConnectorHandle {
         // N5c: per-peer ICE orchestrator + pump thread (injected clock:
         // the thread only supplies monotonic ms; the orchestrator itself
         // never reads a wall clock or sleeps). The pump exits on the same
-        // stop flag as worker/renewal. N5d: the production build swaps the
+        // stop flag as the worker. N5d: the production build swaps the
         // send seam to the real exchange and attaches the signal runtime
         // (the link itself starts lazily — see apply_update / signal feed).
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -5809,15 +5777,6 @@ impl ConnectorHandle {
         let worker = runtime.spawn(worker_supervisor(worker_deps, logout_slot.clone(), network_rx));
 
         let worker_factory = factory.clone();
-        let renewal = runtime.spawn(renewal_main(
-            shared.clone(),
-            factory,
-            secrets,
-            meta,
-            renew_lead,
-            renew_check_interval,
-            stop_flag.clone(),
-        ));
 
         Arc::new(ConnectorHandle {
             management_factory: worker_factory,
@@ -5835,7 +5794,6 @@ impl ConnectorHandle {
             ice,
             management_dial,
             worker: Mutex::new(Some(worker)),
-            renewal: Mutex::new(Some(renewal)),
             runtime,
         })
     }
@@ -6041,13 +5999,9 @@ impl ConnectorHandle {
         // 006: a REAL stop transition is counted once (an idempotent repeat
         // above returns before this). Cumulative, not a live-resource count.
         STOPS_TOTAL.fetch_add(1, Ordering::AcqRel);
-        let renewal = self.renewal.lock_poison().take();
         self.stop_flag.store(true, Ordering::Release);
         self.shared.set_running(false);
         if let Some(h) = worker {
-            h.abort();
-        }
-        if let Some(h) = renewal {
             h.abort();
         }
         self.shared.transition(ConnEvent::Disconnect);
@@ -6251,137 +6205,99 @@ async fn worker_supervisor(
     }
 }
 
-/// 2026-10-11 A1 (account-mode login sequencing): one management `Login`
-/// attempt per call plus, in account mode, the ONE allowed JWT retry.
+/// 2026-10-12 (account login sequencing): ONE management `Login` per call,
+/// carrying the peer's persistent WireGuard public key and — in setup-key
+/// mode — the setup key's `Register` second step.
 ///
-/// The official model (upstream `client/internal/auth/auth.go:184-236`,
-/// `:327-355`, `:491-521`; `client/internal/connect.go:373-377`):
+/// The official model (upstream `client/internal/connect.go:774-796`
+/// `loginToManagement`; `client/internal/auth/auth.go:208-236`, `:327-355`,
+/// `:491-521`; `client/internal/state.go:15`; `client/android/client.go:205`):
 ///
-/// * a normal (re)connect sends `Login` with **no JWT and no setup key** —
-///   the peer is identified by its persistent WireGuard public key
-///   (`shared/management/client/grpc.go:650-656`); the management server
-///   accepts that forever for a registered peer;
+/// * a connect sends `Login` with **no JWT and no setup key** — the peer is
+///   identified by its persistent WireGuard public key
+///   (`shared/management/client/grpc.go:650-656`), which the management server
+///   accepts forever for a registered peer;
 /// * a management JWT is a **one-shot identity proof** consumed at
-///   (re)registration (`management/server/auth/session.go`: `RegisterToken`
-///   rejects a second use with `JWT already used`). Sending it on every
-///   connect is what produced the device failure
-///   (`connector: login fatal (auth), status 16: JWT already used`);
-/// * the JWT is therefore used ONLY when the JWT-less login is rejected with
-///   `PermissionDenied` or `InvalidArgument` — upstream's `isLoginNeeded`,
-///   the only two codes that mean "this peer must (re)register / the peer
-///   session expired" — and it is sent AT MOST ONCE per connect.
+///   (re)registration: it belongs to the interactive login action that runs
+///   BEFORE the engine starts (`client/android/client.go:194-215`
+///   `auth.login(urlOpener, …)` → `auth.go:184-236`), which in this shell is
+///   the UI-process [`crate::account_auth`] login-action NAPI. A connect never
+///   sees a token, so there is nothing to persist and nothing to replay
+///   (the old shape persisted it and died on the second connect with
+///   `status 16: JWT already used`);
+/// * account mode (empty `setup_key`): a login-needed verdict
+///   (`PermissionDenied`/`InvalidArgument` = upstream `isLoginNeeded`,
+///   auth.go:491-521 — the codes the server uses for "peer login has expired"
+///   and "no peer auth method provided") means the peer needs the interactive
+///   login again: [`ManagementError::NeedsLogin`], upstream `StatusNeedsLogin`
+///   (`connect.go:373-377`), never the generic permanent `Auth`;
+/// * setup-key mode: the key-less `Login` runs FIRST and the setup key goes to
+///   the second step only, exactly like upstream `Auth.Login` →
+///   `doMgmLogin` → `registerPeer` on a login-needed verdict
+///   (auth.go:208-236, :336-355; the wire call is
+///   [`ManagementGrpcClient::register`], grpc.go:641-648). The old shape put
+///   the key inside `Login` — the server tolerates it, but it is not the
+///   official client's wire shape.
 ///
-/// Account mode (empty `setup_key`): JWT-less attempt first, then at most one
-/// JWT attempt. A `PermissionDenied`/`InvalidArgument` verdict with NO JWT to
-/// retry with is itself "login required" (that is the very code upstream
-/// parks `StatusNeedsLogin` on), and a JWT attempt rejected with
-/// `Unauthenticated` ("JWT already used" / "JWT expired") or `PermissionDenied`
-/// becomes [`ManagementError::AccountLoginRequired`] — never the generic
-/// permanent `Auth`.
-///
-/// Setup-key mode is UNCHANGED: one `Login` carrying the setup key, exactly as
-/// before. Upstream's setup-key path is the same two-step shape (JWT-less
-/// login, then `Register` with the setup key on `PermissionDenied`), but the
-/// setup-key peer never expires server-side and the single-call form is what
-/// this shell's start gate has always driven — keeping it byte-for-byte
-/// avoids an extra round trip and an extra failure mode for zero behavioural
-/// gain.
-///
-/// Returns the login verdict. Whether the stored JWT went on the wire is
-/// deliberately NOT reported: the shell drops it once the connector reports a
-/// completed login (a network map is only published after a successful login)
-/// and on the `account-login-required` class — and a token that was sent but
-/// whose connect failed later is harmless anyway, because every connect starts
-/// JWT-less.
+/// Returns the login verdict.
 async fn login_sequence(
     client: &mut ManagementGrpcClient,
     secrets: &ConnectorSecrets,
     meta: &PeerMeta,
 ) -> Result<LoginOutcome, ManagementError> {
-    if !secrets.setup_key.is_empty() {
-        let params = LoginParams {
-            setup_key: secrets.setup_key.clone(),
-            jwt_token: String::new(),
-            meta: meta.clone(),
-            ..Default::default()
-        };
-        // 2026-10-11: the JWT never rides along in setup-key mode; a stored
-        // account token is not this mode's credential.
-        let result = client.login(params).await;
-        emit_login_attempt("setup-key", result.as_ref(), secrets);
-        return result;
-    }
-    let params = |jwt: &str| LoginParams {
-        setup_key: String::new(),
-        jwt_token: jwt.to_string(),
+    let params = |setup_key: &str| LoginParams {
+        setup_key: setup_key.to_string(),
+        jwt_token: String::new(),
         meta: meta.clone(),
         ..Default::default()
     };
+    let setup_key: &str = &secrets.setup_key;
+    // the device-log attempt token: a setup-key profile's FIRST step is the
+    // key-less login, an account connect's only step is the token-less login
+    let keyless_attempt: &str = if setup_key.is_empty() { "login" } else { "login-keyless" };
     match client.login(params("")).await {
         Ok(outcome) => {
-            emit_login_attempt("no-jwt", Ok(&outcome), secrets);
+            emit_login_attempt(keyless_attempt, Ok(&outcome), secrets);
             Ok(outcome)
         }
         Err(err) if is_login_needed(&err) => {
-            // The server says this peer must (re)register: that IS the
-            // "account login required" state — the JWT retry below only
-            // changes whether this attempt can still finish it.
-            let needed = account_login_required(&err);
-            emit_login_attempt("no-jwt", Err(&needed), secrets);
-            if secrets.jwt.is_empty() {
-                // No one-shot JWT at hand: nothing left to register with.
+            if setup_key.is_empty() {
+                // Account mode: the interactive login (with the JWT) is the
+                // ONLY thing that can register this peer. Park on the
+                // needs-login state, exactly like upstream's connect loop.
+                let needed = needs_login(&err);
+                emit_login_attempt("login", Err(&needed), secrets);
                 Err(needed)
             } else {
-                let verdict = one_shot_jwt_verdict(client.login(params(&secrets.jwt)).await);
-                emit_login_attempt("jwt", verdict.as_ref(), secrets);
+                let verdict = client.register(params(setup_key)).await;
+                emit_login_attempt("register-setup-key", verdict.as_ref(), secrets);
                 verdict
             }
         }
         Err(err) => {
-            emit_login_attempt("no-jwt", Err(&err), secrets);
+            emit_login_attempt(keyless_attempt, Err(&err), secrets);
             Err(err)
         }
     }
 }
 
-/// A one-shot JWT that the server rejected as already used / expired
-/// (`Unauthenticated`) or as not permitted (`PermissionDenied`) is not a
-/// retryable credential problem — it is "the account must log in again".
-/// Every other class keeps its meaning (transient classes stay retryable).
-fn one_shot_jwt_verdict(
-    outcome: Result<LoginOutcome, ManagementError>,
-) -> Result<LoginOutcome, ManagementError> {
-    match outcome {
-        Err(err)
-            if matches!(
-                err.status_code(),
-                crate::grpc::GRPC_UNAUTHENTICATED | crate::grpc::GRPC_PERMISSION_DENIED
-            ) =>
-        {
-            Err(account_login_required(&err))
-        }
-        other => other,
-    }
-}
-
-/// Re-class one management error as "account login required", keeping the
-/// numeric status and the server message (the message never leaves the
-/// redacted device-log channel — the status/error JSON surfaces stay
-/// class-only).
-fn account_login_required(err: &ManagementError) -> ManagementError {
+/// Re-class one management error as the needs-login state, keeping the numeric
+/// status and the server message (the message never leaves the redacted
+/// device-log channel — the status/error JSON surfaces stay class-only).
+fn needs_login(err: &ManagementError) -> ManagementError {
     let message = match err {
         ManagementError::Auth { message, .. }
         | ManagementError::Request { message, .. }
-        | ManagementError::AccountLoginRequired { message, .. } => message.clone(),
+        | ManagementError::NeedsLogin { message, .. } => message.clone(),
         _ => String::new(),
     };
-    ManagementError::AccountLoginRequired { status: err.status_code(), message }
+    ManagementError::NeedsLogin { status: err.status_code(), message }
 }
 
 /// ONE device-log line per login attempt outcome (2026-10-11 A3). `attempt` is
-/// a fixed token (`no-jwt` / `jwt` / `setup-key`) and `result` the sanitized
-/// class token (`ok`, `account-login-required`, `auth`, ...); the parenthesized
-/// detail is the redacted server verdict — the JWT and the setup key are never
+/// a fixed token (`login` / `login-keyless` / `register-setup-key`) and `result`
+/// the sanitized class token (`ok`, `needs-login`, `auth`, ...); the
+/// parenthesized detail is the redacted server verdict — the setup key is never
 /// printed (see [`redacted_login_detail`]), and neither is the peer's private
 /// key. Logging must never change the login verdict, so this is observational
 /// only.
@@ -6404,7 +6320,7 @@ fn emit_login_attempt(
 }
 
 /// The connection worker: connect → login → Sync session (internal
-/// reconnect loop). Fatal (Auth / account-login-required) and backoff
+/// reconnect loop). Fatal (Auth / needs-login) and backoff
 /// exhaustion both end the worker with the state machine parked in `Failed`;
 /// `stop()` aborts the task for a clean `Disconnected`.
 async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>>) {
@@ -6426,9 +6342,10 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
     // ---- phase 1: dial + login (retry with backoff; Auth = Permanent) ----
     // Upstream shape: the retry loop wraps the dial AND the login; only
     // PermissionDenied is Permanent (grpc.go:322-324 for the login path,
-    // L436-438/L468-470 for the stream). 2026-10-11 A1: the login itself is
-    // the account-mode sequence in [`login_sequence`] (JWT-less first, one
-    // JWT retry at most).
+    // L436-438/L468-470 for the stream). 2026-10-12: the login itself is the
+    // sequence in [`login_sequence`] (key-less Login; setup-key mode adds the
+    // upstream `Register` second step; the interactive JWT step lives in the
+    // UI-process login action, [`crate::account_auth`]).
     let mut login_backoff = policy_backoff;
     let mut login_rng = OsRandom;
     let login_clock = MonotonicClock;
@@ -6453,18 +6370,18 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 break client;
             }
             Err(e) => {
-                if matches!(e, ManagementError::AccountLoginRequired { .. }) {
-                    // 2026-10-11 A2: account mode needs a FRESH interactive
-                    // login (peer not registered / peer login expired, or the
-                    // stored one-shot JWT was already used or expired).
+                if matches!(e, ManagementError::NeedsLogin { .. }) {
+                    // 2026-10-12: the peer needs a FRESH interactive login
+                    // (upstream `StatusNeedsLogin`, connect.go:373-377).
                     // Permanent for THIS attempt — but its own class, so the
-                    // shell shows 「账户登录已过期，请重新点“账户登录”」 instead of
-                    // hammering a retry that cannot succeed.
+                    // shell shows the official label (`Login required` /
+                    // 「需要登录」) instead of hammering a retry that cannot
+                    // succeed.
                     shared.record_error(&e);
                     shared.transition(ConnEvent::FatalError);
                     shared.set_running(false);
                     hilog::emit(&format!(
-                        "connector: login fatal (account-login-required), giving up ({})",
+                        "connector: login needs-login, giving up ({})",
                         redacted_login_detail(&e, &secrets)
                     ));
                     return;
@@ -6545,70 +6462,6 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
     // keeping an unattended relay session alive past its management owner).
     shared.stop_relay();
     shared.set_running(false);
-}
-
-/// The session-renewal task: while running, wake on `renew_check_interval`
-/// and extend the SSO session when the anchored deadline is within
-/// `renew_lead`. Upstream semantics mirrored (file:line only):
-/// - the empty-JWT guard (engine_authsession.go:84-86 — a setup-key peer
-///   has nothing to extend);
-/// - only the deadline is refreshed, no resync / no tunnel churn
-///   (engine_authsession.go:71-73 comment, write-back at L102);
-/// - the 3-state reply application (engine_authsession.go:34-45 /
-///   management.proto L306-310).
-/// A failed extension is recorded (sanitized class) and retried on the next
-/// tick — upstream surfaces the error to its caller and lets the warning
-/// flow re-trigger (engine_authsession.go:98-100); the equivalent daemon
-/// warning flow has no HarmonyOS counterpart yet, so the tick retry is the
-/// closest safe behavior.
-async fn renewal_main(
-    shared: Arc<ConnectorShared>,
-    factory: Arc<dyn ManagementFactory>,
-    secrets: ConnectorSecrets,
-    meta: PeerMeta,
-    renew_lead: Duration,
-    renew_check_interval: Duration,
-    stop_flag: Arc<AtomicBool>,
-) {
-    loop {
-        tokio::time::sleep(renew_check_interval).await;
-        if stop_flag.load(Ordering::Acquire) || !shared.is_running() {
-            return;
-        }
-        if secrets.jwt.is_empty() {
-            continue; // engine_authsession.go:84-86 (local guard, no I/O)
-        }
-        let deadline = shared.lock().deadline;
-        let SessionDeadline::At(t) = deadline else {
-            continue; // nothing anchored: nothing to extend
-        };
-        if unix_now() + (renew_lead.as_secs() as i64) < t {
-            continue; // not close to expiry yet
-        }
-        shared.lock().renew_attempts += 1;
-        match factory.connect().await {
-            Ok(mut client) => match client.extend_auth_session(&meta, &secrets.jwt).await {
-                Ok(outcome) => {
-                    shared.lock().deadline.apply_wire(outcome.session_deadline_unix);
-                    hilog::emit("connector: session renewed");
-                }
-                Err(e) => {
-                    shared.record_error(&e);
-                    hilog::emit(&format!(
-                        "connector: session renewal failed ({})",
-                        ErrorClass::from_management(&e).as_str()
-                    ));
-                }
-            },
-            Err(e) => {
-                shared.record_error(&e);
-                hilog::emit(&format!(
-                    "connector: session renewal could not reach management ({})",
-                    ErrorClass::from_management(&e).as_str()
-                ));
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6753,8 +6606,6 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         config.meta.clone(),
         ExponentialBackoff::upstream_stream_default(),
         SyncPolicy::production(),
-        config.renew_lead,
-        config.renew_check_interval,
         config.force_default_route,
         None, // N3-7: no protected management socket source
         None, // N5c: build the production ICE orchestrator
@@ -6914,8 +6765,6 @@ pub fn connector_start_with_socket_json(
         config.meta.clone(),
         ExponentialBackoff::upstream_stream_default(),
         SyncPolicy::production(),
-        config.renew_lead,
-        config.renew_check_interval,
         config.force_default_route,
         Some(source),
         None, // N5c: build the production ICE orchestrator
@@ -7452,7 +7301,6 @@ pub fn connector_status_json() -> String {
             reconnects: 0,
             last_error: None,
             deadline: SessionDeadline::Unknown,
-            renew_attempts: 0,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
@@ -8808,8 +8656,6 @@ mod tests {
             cfg.meta.clone(),
             ExponentialBackoff::upstream_stream_default(),
             SyncPolicy::production(),
-            cfg.renew_lead,
-            cfg.renew_check_interval,
             false,
             None,
             None,
@@ -8929,8 +8775,6 @@ mod tests {
             cfg.meta.clone(),
             ExponentialBackoff::upstream_stream_default(),
             SyncPolicy::production(),
-            cfg.renew_lead,
-            cfg.renew_check_interval,
             false,
             None,
             None,
@@ -8980,7 +8824,6 @@ mod tests {
     }
 
     const SENTINEL_KEY: &str = "SENTINEL-SETUP-KEY-n3-5-DO-NOT-LOG";
-    const SENTINEL_JWT: &str = "SENTINEL-JWT-header.payload.sig";
 
     /// 006: the renderer's EXACT null semantics — `None` (unknown/unmeasured)
     /// renders `null` and never a fabricated 0, and the field order is the
@@ -9039,8 +8882,6 @@ mod tests {
         assert_eq!(cfg.transport, GrpcTransport::Plaintext);
         assert_eq!(cfg.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
         assert_eq!(cfg.request_timeout, DEFAULT_REQUEST_TIMEOUT);
-        assert_eq!(cfg.renew_lead, DEFAULT_RENEW_LEAD);
-        assert_eq!(cfg.renew_check_interval, DEFAULT_RENEW_CHECK_INTERVAL);
         assert_eq!(cfg.meta.os_name, "harmonyos");
         assert_eq!(cfg.meta.hostname, "netbird-ohos");
 
@@ -9112,7 +8953,6 @@ mod tests {
             reconnects: 0,
             last_error: Some(ErrorClass::Network),
             deadline: SessionDeadline::Unknown,
-            renew_attempts: 0,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
@@ -9161,17 +9001,13 @@ mod tests {
     }
 
     /// Credential discipline: the parsed config must not retain raw private
-    /// key bytes in any Debug-visible form, and the secrets struct redacts
-    /// both fields.
+    /// key bytes in any Debug-visible form, and the secrets struct redacts its
+    /// field.
     #[test]
     fn debug_output_never_contains_secrets() {
-        let secrets = ConnectorSecrets {
-            setup_key: SENTINEL_KEY.into(),
-            jwt: SENTINEL_JWT.into(),
-        };
+        let secrets = ConnectorSecrets { setup_key: SENTINEL_KEY.into() };
         let debug = format!("{secrets:?}");
         assert!(!debug.contains(SENTINEL_KEY), "setup key leaked via Debug: {debug}");
-        assert!(!debug.contains(SENTINEL_JWT), "jwt leaked via Debug: {debug}");
         assert!(debug.contains("REDACTED"));
 
         // the config's private key flows through EnvelopeKeyPair whose
@@ -9180,36 +9016,31 @@ mod tests {
         let debug = format!("{cfg:?}");
         assert!(!debug.contains(&test_private_key_b64(1)), "private key leaked: {debug}");
 
-        // and a handle's Debug stays secret-free too (built with sentinels)
-        let handle_debug = format!(
-            "{:?}",
-            ConnectorSecrets { setup_key: SENTINEL_KEY.into(), jwt: SENTINEL_JWT.into() }
-        );
+        // and a handle's Debug stays secret-free too (built with a sentinel)
+        let handle_debug =
+            format!("{:?}", ConnectorSecrets { setup_key: SENTINEL_KEY.into() });
         assert!(!handle_debug.contains(SENTINEL_KEY));
     }
 
+    /// 2026-10-12: a connect carries the SETUP KEY at most. The JWT is not a
+    /// connect credential any more — an unknown `jwt`/`jwt_token` key is
+    /// ignored like any other unknown field (so a stale shell cannot smuggle a
+    /// token into the connect path), and every document without a setup key is
+    /// the plain public-key-only reconnect (upstream grpc.go:650-656).
     #[test]
     fn secrets_parse_and_validate() {
         let ok = ConnectorSecrets::from_json(&format!("{{\"setup_key\":\"{SENTINEL_KEY}\"}}"))
             .expect("setup key only");
         assert_eq!(ok.setup_key, SENTINEL_KEY);
-        assert!(ok.jwt.is_empty());
 
-        let ok = ConnectorSecrets::from_json("{\"jwt\":\"tok\"}").expect("jwt only");
-        assert_eq!(ok.jwt, "tok");
-
-        let ok = ConnectorSecrets::from_json("{\"jwt_token\":\"tok2\"}").expect("jwt alias");
-        assert_eq!(ok.jwt, "tok2");
-
-        // 2026-10-11 A1: both-empty is the plain reconnect of an
-        // already-registered peer (public key only) — it parses, it is not a
-        // config error. The shell's account mode sends exactly this once the
-        // stored one-shot JWT has been dropped.
         let ok = ConnectorSecrets::from_json("{}").expect("no credentials is a valid mode");
-        assert!(ok.setup_key.is_empty() && ok.jwt.is_empty());
-        let ok = ConnectorSecrets::from_json("{\"setup_key\":\"\",\"jwt\":\"\"}")
-            .expect("both empty");
-        assert!(ok.setup_key.is_empty() && ok.jwt.is_empty());
+        assert!(ok.setup_key.is_empty());
+        let ok = ConnectorSecrets::from_json("{\"setup_key\":\"\"}").expect("empty setup key");
+        assert!(ok.setup_key.is_empty());
+        // a JWT is NOT a connector credential: the key is ignored, never parsed
+        let ok = ConnectorSecrets::from_json("{\"jwt\":\"tok\",\"jwt_token\":\"tok2\"}")
+            .expect("a token-shaped key is not a connector credential");
+        assert!(ok.setup_key.is_empty());
         // a NON-empty malformed document is still rejected (type/shape errors)
         let err = ConnectorSecrets::from_json("{\"setup_key\":5}").unwrap_err();
         assert!(matches!(err, ConfigError::Field { field: "setup_key", .. }), "{err}");
@@ -9217,59 +9048,44 @@ mod tests {
         assert!(matches!(err, ConfigError::Json { .. }), "{err}");
     }
 
-    /// 2026-10-11 A2: the account-login-required class keeps its numeric
-    /// status, carries no message across the boundary, and is NOT the generic
-    /// auth class (that is the whole point — the shell must show 重新登录, not
-    /// a retry).
+    /// 2026-10-12: the needs-login class keeps its numeric status, carries no
+    /// message across the boundary, and is NOT the generic auth class (that is
+    /// the whole point — the shell shows the official `Login required` /
+    ///「需要登录」 label, not a retry).
     #[test]
-    fn account_login_required_is_its_own_class() {
-        let err = ManagementError::AccountLoginRequired {
-            status: 16,
-            message: "JWT already used".into(),
+    fn needs_login_is_its_own_class() {
+        let err = ManagementError::NeedsLogin {
+            status: 7,
+            message: "peer login has expired, please log in once more".into(),
         };
         let class = ErrorClass::from_management(&err);
-        assert_eq!(class, ErrorClass::AccountLoginRequired { status: 16 });
-        assert_eq!(class.as_str(), "account-login-required");
-        assert_eq!(class.status_code(), 16);
-        assert_eq!(class.to_json(), "{\"class\":\"account-login-required\",\"status\":16}");
-        assert!(!class.to_json().contains("JWT already used"));
-        assert_ne!(class, ErrorClass::Auth { status: 16 });
+        assert_eq!(class, ErrorClass::NeedsLogin { status: 7 });
+        assert_eq!(class.as_str(), "needs-login");
+        assert_eq!(class.status_code(), 7);
+        assert_eq!(class.to_json(), "{\"class\":\"needs-login\",\"status\":7}");
+        assert!(!class.to_json().contains("peer login has expired"));
+        assert_ne!(class, ErrorClass::Auth { status: 7 });
 
         // the re-classing keeps the server's status as the class status
-        let needed = account_login_required(&ManagementError::Auth {
+        let needed = needs_login(&ManagementError::Auth {
             status: 7,
             message: "peer login has expired, please log in once more".into(),
         });
         assert_eq!(
             needed,
-            ManagementError::AccountLoginRequired {
+            ManagementError::NeedsLogin {
                 status: 7,
                 message: "peer login has expired, please log in once more".into(),
             }
         );
-        // a one-shot JWT rejected as used/expired (16) or denied (7) is
-        // login-required; a transient class keeps its own meaning
-        assert!(matches!(
-            one_shot_jwt_verdict(Err(ManagementError::Auth { status: 16, message: "used".into() })),
-            Err(ManagementError::AccountLoginRequired { status: 16, .. })
-        ));
-        assert!(matches!(
-            one_shot_jwt_verdict(Err(ManagementError::Auth { status: 7, message: "no".into() })),
-            Err(ManagementError::AccountLoginRequired { status: 7, .. })
-        ));
-        assert!(matches!(
-            one_shot_jwt_verdict(Err(ManagementError::Network("refused".into()))),
-            Err(ManagementError::Network(_))
-        ));
-        assert!(matches!(
-            one_shot_jwt_verdict(Err(ManagementError::Timeout)),
-            Err(ManagementError::Timeout)
-        ));
+        assert_eq!(needs_login(&ManagementError::NeedsLogin { status: 3, message: "x".into() }).status_code(), 3);
+        assert_eq!(needs_login(&ManagementError::Timeout).status_code(), 0);
     }
 
-    /// 2026-10-11 A2: the login-needed predicate is upstream's
+    /// 2026-10-12: the login-needed predicate is upstream's
     /// `InvalidArgument || PermissionDenied` and nothing else — in particular
-    /// NOT `Unauthenticated`, which is the one-shot-JWT verdict.
+    /// NOT `Unauthenticated` (a verdict about a TOKEN, which a connect never
+    /// carries).
     #[test]
     fn login_needed_is_upstreams_two_codes_only() {
         assert!(is_login_needed(&ManagementError::Auth { status: 7, message: String::new() }));
@@ -9322,13 +9138,11 @@ mod tests {
     /// 2026-10-06 login-failure visibility: the redacted device-log detail
     /// carries the numeric status + the server message with secrets
     /// scrubbed, flattened and capped — and stays empty for classes
-    /// without a server message.
+    /// without a server message. 2026-10-12: the setup key is the only
+    /// secret a connect still carries (there is no JWT in this path).
     #[test]
     fn redacted_login_detail_scrubs_and_caps() {
-        let secrets = ConnectorSecrets {
-            setup_key: SENTINEL_KEY.into(),
-            jwt: SENTINEL_JWT.into(),
-        };
+        let secrets = ConnectorSecrets { setup_key: SENTINEL_KEY.into() };
         // plain server message: status + text verbatim
         let d = redacted_login_detail(
             &ManagementError::Auth { status: 401, message: "invalid setup key".into() },
@@ -9345,12 +9159,15 @@ mod tests {
         );
         assert_eq!(d, "status 400: bad key [redacted] rejected");
         assert!(!d.contains(SENTINEL_KEY));
-        // jwt likewise
+        // the needs-login class keeps its server verdict in the log detail
         let d = redacted_login_detail(
-            &ManagementError::Auth { status: 403, message: format!("token {SENTINEL_JWT} expired") },
+            &ManagementError::NeedsLogin {
+                status: 7,
+                message: "peer login has expired, please log in once more".into(),
+            },
             &secrets,
         );
-        assert_eq!(d, "status 403: token [redacted] expired");
+        assert_eq!(d, "status 7: peer login has expired, please log in once more");
         // newlines collapse (single-line log discipline)
         let d = redacted_login_detail(
             &ManagementError::Auth { status: 401, message: "line1\nline2".into() },
@@ -9374,8 +9191,8 @@ mod tests {
         assert!(redacted_login_detail(&ManagementError::Timeout, &secrets).is_empty());
         assert!(redacted_login_detail(&ManagementError::Network("refused".into()), &secrets).is_empty());
         // short secrets (under the scrub floor) are not loop-replaced, but
-        // real setup keys/jwts are far longer than the floor
-        let tiny = ConnectorSecrets { setup_key: "abc".into(), jwt: String::new() };
+        // real setup keys are far longer than the floor
+        let tiny = ConnectorSecrets { setup_key: "abc".into() };
         let d = redacted_login_detail(
             &ManagementError::Auth { status: 401, message: "abcd".into() },
             &tiny,
@@ -9553,7 +9370,6 @@ mod tests {
                 ice,
                 management_dial: None,
                 worker: Mutex::new(None),
-                renewal: Mutex::new(None),
                 runtime: tokio::runtime::Handle::current(),
             })
         }
@@ -9673,7 +9489,6 @@ mod tests {
             reconnects: 1,
             last_error: Some(ErrorClass::Auth { status: 7 }),
             deadline: SessionDeadline::At(1_700_000_000),
-            renew_attempts: 1,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
@@ -9882,7 +9697,6 @@ mod tests {
             reconnects: 0,
             last_error: None,
             deadline: SessionDeadline::Unknown,
-            renew_attempts: 0,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
@@ -12493,7 +12307,6 @@ mod tests {
             reconnects: 0,
             last_error: None,
             deadline: SessionDeadline::Unknown,
-            renew_attempts: 0,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
@@ -13104,7 +12917,6 @@ mod tests {
             reconnects: 0,
             last_error: None,
             deadline: SessionDeadline::Unknown,
-            renew_attempts: 0,
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,

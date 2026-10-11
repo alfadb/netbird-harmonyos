@@ -1029,7 +1029,7 @@ fn spawn_connector(
         )),
         wg,
         host.clone(),
-        ConnectorSecrets { setup_key: "SETUP-KEY-TEST-OK".into(), jwt: String::new() },
+        ConnectorSecrets { setup_key: "SETUP-KEY-TEST-OK".into() },
         PeerMeta {
             hostname: "ohos-n13-test".into(),
             os_name: "harmonyos".into(),
@@ -1038,8 +1038,6 @@ fn spawn_connector(
         },
         ExponentialBackoff::upstream_stream_default(),
         SyncPolicy::production(),
-        Duration::from_secs(600),
-        Duration::from_secs(3600),
         false, // default-route gate: no force opt-in
         None,  // no protected management socket
         None,  // production ICE orchestrator

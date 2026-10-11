@@ -103,20 +103,22 @@ pub enum ManagementError {
     Timeout,
     /// 401/403 from the server (bad/expired JWT or PAT).
     Auth { status: u16, message: String },
-    /// 2026-10-11 A2 (account-login-required): account mode needs a FRESH
-    /// interactive login. Raised by the account-mode login sequence
-    /// ([`crate::connector`]) when the JWT-less `Login` was rejected with
-    /// `PermissionDenied` (peer login expired / registration needed) or
-    /// `InvalidArgument` and no usable JWT was available, or when the stored
-    /// one-shot JWT itself was rejected (`Unauthenticated` "JWT already
-    /// used" / `PermissionDenied`). Upstream's `isLoginNeeded` is exactly
-    /// `InvalidArgument || PermissionDenied`
-    /// (`client/internal/auth/auth.go:491-521`) and it parks on
-    /// `StatusNeedsLogin` (`client/internal/connect.go:373-377`).
+    /// 2026-10-12: this peer needs a FRESH interactive login — upstream
+    /// `StatusNeedsLogin` (`client/internal/state.go:15`), set by the connect
+    /// loop when the management `Login` is refused with `PermissionDenied`
+    /// (`client/internal/connect.go:373-377`; the server's codes are
+    /// `peer login has expired, please log in once more` /
+    /// `no peer auth method provided, please use a setup key or interactive
+    /// SSO login`, `management/server/peer.go:746`, `:1477`). Raised by
+    /// [`crate::connector`]'s account-mode connect sequence; the login-action
+    /// path ([`crate::account_auth`]) reports the same verdict when the
+    /// interactive login's JWT registration is refused. `isLoginNeeded` is
+    /// upstream's `InvalidArgument || PermissionDenied`
+    /// (`client/internal/auth/auth.go:491-521`).
     /// Deliberately distinct from [`ManagementError::Auth`]: the shell renders
-    /// "log in again with 账户登录" instead of retrying a credential that cannot
-    /// heal by itself.
-    AccountLoginRequired { status: u16, message: String },
+    /// the label the official UI shows (`Login required` / 「需要登录」)
+    /// instead of retrying a credential that cannot heal by itself.
+    NeedsLogin { status: u16, message: String },
     /// Any other 4xx (bad request, not found, ...). Includes 404/405 — the
     /// register mock-contract will land here against a real server.
     /// Local (pre-flight) validation failures reuse this variant with
@@ -141,8 +143,8 @@ impl core::fmt::Display for ManagementError {
             ManagementError::Auth { status, message } => {
                 write!(f, "authentication failed ({status}): {message}")
             }
-            ManagementError::AccountLoginRequired { status, message } => {
-                write!(f, "account login required ({status}): {message}")
+            ManagementError::NeedsLogin { status, message } => {
+                write!(f, "login required ({status}): {message}")
             }
             ManagementError::Request { status, message } => {
                 write!(f, "request rejected ({status}): {message}")
@@ -165,7 +167,7 @@ impl ManagementError {
     pub fn status_code(&self) -> u16 {
         match self {
             ManagementError::Auth { status, .. }
-            | ManagementError::AccountLoginRequired { status, .. }
+            | ManagementError::NeedsLogin { status, .. }
             | ManagementError::Request { status, .. }
             | ManagementError::Server { status } => *status,
             _ => 0,
