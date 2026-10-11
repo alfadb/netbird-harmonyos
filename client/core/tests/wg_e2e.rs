@@ -144,7 +144,9 @@ use netbird_core::config;
 use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::network_map::{ManagedRoute, NetworkMap, PeerInfo};
-use netbird_core::peer_conn::{PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
+use netbird_core::peer_conn::{
+    InlineGatherExec, PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange,
+};
 use netbird_core::sys;
 use netbird_core::tun::TunFd;
 use netbird_core::wg_device::{WgDevice, WgDeviceApplier, WgDeviceConfig, WgDeviceStats};
@@ -1101,6 +1103,10 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
     });
     orch_a.set_peers(&[key_b().to_string()]);
     orch_b.set_peers(&[key_a().to_string()]);
+    // STAGE 1（官方对齐审计 §2.7）：注入时钟 harness —— 本地候选收集走确定性
+    // 内联执行者（异步模型由 `src/peer_conn.rs` 的线程执行者用例覆盖）。
+    orch_a.set_gather_exec(Arc::new(InlineGatherExec));
+    orch_b.set_gather_exec(Arc::new(InlineGatherExec));
     orch_a.set_signal_ready(true);
     orch_b.set_signal_ready(true);
     orch_b.set_initiator(key_a(), false); // A offers, B answers

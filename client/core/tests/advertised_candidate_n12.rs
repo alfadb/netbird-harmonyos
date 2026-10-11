@@ -126,7 +126,7 @@ use std::sync::{Arc, Mutex};
 
 use netbird_core::ice::{parse_advertised_candidate, Candidate, CandidateType, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::management::ManagementError;
-use netbird_core::peer_conn::{PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
+use netbird_core::peer_conn::{InlineGatherExec, PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
 use netbird_core::sys;
 
 extern "C" {
@@ -287,6 +287,9 @@ impl Node {
             fixed_local_port: fixed_port,
             advertised_candidates: advertised_cands,
         });
+        // STAGE 1（官方对齐审计 §2.7）：注入时钟 harness —— 本地候选收集走
+        // 确定性内联执行者（异步模型由 `src/peer_conn.rs` 的线程执行者用例覆盖）。
+        orch.set_gather_exec(Arc::new(InlineGatherExec));
         orch.set_peers(&[peer_key.to_string()]);
         orch.set_signal_ready(true);
         Node { me: me.to_string(), orch, socks, wg }

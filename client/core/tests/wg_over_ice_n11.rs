@@ -126,7 +126,7 @@ use netbird_core::config;
 use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::ice_session::is_wg_datagram;
-use netbird_core::peer_conn::{ice_ready_for_default_route, PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
+use netbird_core::peer_conn::{ice_ready_for_default_route, InlineGatherExec, PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
 use netbird_core::wg_device::{WgDeviceConfig, WgDeviceFeed};
 use netbird_core::sys;
 
@@ -303,6 +303,9 @@ impl Node {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        // STAGE 1（官方对齐审计 §2.7）：注入时钟 harness —— 本地候选收集走
+        // 确定性内联执行者（异步模型由 `src/peer_conn.rs` 的线程执行者用例覆盖）。
+        orch.set_gather_exec(Arc::new(InlineGatherExec));
         orch.set_peers(&[peer_key.to_string()]);
         orch.set_signal_ready(true);
         set_nonblock(sv[1]); // test-side TUN end: never blocks the harness

@@ -660,7 +660,7 @@ pub trait UdpSocketSource: Send + Sync {
     /// consuming anything — one gather round takes exactly ONE socket per
     /// interface and KEEPS it (the bound socket is handed to the session via
     /// [`GatheredSocket`], not re-acquired), and a half-fed attempt burns the
-    /// batch it was given (see `PeerIceOrchestrator::ensure_locals`).
+    /// batch it was given (see `PeerIceOrchestrator::start_locals`).
     fn available(&self) -> Option<usize> {
         None
     }
@@ -827,9 +827,25 @@ pub(crate) fn set_nonblock(fd: sys::c_int) -> Result<(), SocketSeamError> {
 // gather orchestration
 // ---------------------------------------------------------------------------
 
-/// Per-STUN-exchange deadline (the only timer in N5a; pion's agent-level
-/// keepalive/disconnected/failed timers — agent.go:22-24 — are N5b).
-pub const DEFAULT_STUN_TIMEOUT_MS: u64 = 3000;
+/// Per-STUN-exchange deadline — upstream's value, not ours (official-alignment
+/// audit §2.2/§2.7 + §3 U8).
+///
+/// pion's default is `defaultSTUNGatherTimeout = 5 * time.Second`
+/// (netbirdio/ice@6202be846b51 `agent_config.go:41-42`, applied at `:245` and
+/// consumed by the srflx gather at `gather.go:526`). NetBird overrides the
+/// OTHER pion agent timers — keepalive 4 s, disconnected 6 s, failed 6 s,
+/// relay-acceptance 2 s (`client/internal/peer/ice/agent.go:22-28`, applied
+/// `:37-61`) — and deliberately leaves this one alone. The old 3000 ms was
+/// ours, invented when the exchange ran inline in the pump and every
+/// millisecond was a tick of the shared schedule; with the gather off the pump
+/// (stage 1) the upstream value costs nothing else and is the number a silent
+/// STUN server is actually allowed to cost.
+///
+/// NB: the audit's §2.7 "explicit non-changes" list says *do not retune*
+/// `DEFAULT_STUN_TIMEOUT_MS`; that instruction predates the stage-1 directive
+/// ("use upstream's value"), which this constant follows. Reverting is one
+/// line if the owner prefers the old value.
+pub const DEFAULT_STUN_TIMEOUT_MS: u64 = 5000;
 
 /// Gather parameters. `blacklist` defaults to [`DEFAULT_INTERFACE_BLACKLIST`]
 /// at the call site; `servers` is the parsed `netbird_config.stuns`.
@@ -846,8 +862,9 @@ pub struct GatherConfig<'a> {
 /// Ownership contract (the 0052 defect this type exists for): a successful
 /// interface round keeps its bound socket alive, so the advertised host
 /// candidate and every srflx mapping derived from it refer to the SAME
-/// socket. The pre-fix gather closed this fd before returning and
-/// `ensure_locals` then bound a SECOND socket on a fresh ephemeral port —
+/// socket. The pre-fix gather closed this fd before returning and the caller
+/// (`PeerIceOrchestrator::start_locals`) then bound a SECOND socket on a fresh
+/// ephemeral port —
 /// the signaled host port belonged to a socket the STUN exchange never used,
 /// and the srflx `raddr/rport` base pointed at a dead mapping.
 ///
@@ -922,6 +939,72 @@ pub fn allowed_ifaces(
     Ok(out)
 }
 
+/// One interface round, self-contained: this is what a stage-1 gather WORKER
+/// runs (one per interface, off the pump), and what [`gather_candidates`] runs
+/// per interface in its serial loop. Upstream's equivalent unit is one
+/// goroutine per (network type, STUN URL, mux listen address) — pion fork
+/// `gather.go:491-513`, spawned per negotiation from `worker_ice.go:255-266`.
+#[derive(Debug)]
+pub struct IfaceGather {
+    /// The interface's live bound socket + its host candidate, when the round
+    /// got as far as binding (see [`GatheredSocket`]). `None` = the round
+    /// failed before a candidate existed (the reason is in `errors`).
+    pub socket: Option<GatheredSocket>,
+    /// srflx candidates gathered on that socket.
+    pub srflx: Vec<Candidate>,
+    /// `(context, error)` per failed attempt — `"<iface>"` for the round
+    /// itself, `"<iface>/<host>:<port>"` per STUN exchange. Same shape as
+    /// [`GatherResult::errors`].
+    pub errors: Vec<(String, ManagementError)>,
+}
+
+/// Run ONE interface round end to end: resolve the STUN servers, take a
+/// protected socket, bind it on `iface`, and exchange STUN on it (all servers
+/// in parallel on that one socket, bounded by `timeout_ms`).
+///
+/// Never returns `Err`: a round that cannot even take a socket records the
+/// reason in [`IfaceGather::errors`] and returns an empty round, so a caller
+/// running one worker per interface can never turn one bad interface into a
+/// failed negotiation (upstream: per-candidate failures are logged and the
+/// gather continues, `gather.go:526-531`).
+pub fn gather_interface_round(
+    iface: &InterfaceAddr,
+    servers: &[StunServer],
+    socks: &dyn UdpSocketSource,
+    timeout_ms: u64,
+) -> IfaceGather {
+    let mut resolved: Vec<([u8; 4], u16, &StunServer)> = Vec::new();
+    let mut errors: Vec<(String, ManagementError)> = Vec::new();
+    for server in servers {
+        match socks.resolve_ipv4(&server.host) {
+            Ok(ip) => resolved.push((ip, server.port, server)),
+            Err(e) => errors.push((format!("-/{}", server.host), e)),
+        }
+    }
+    let mut host: Vec<Candidate> = Vec::new();
+    let mut srflx: Vec<Candidate> = Vec::new();
+    let socket = match gather_interface(
+        iface,
+        &resolved,
+        socks,
+        timeout_ms,
+        &mut host,
+        &mut srflx,
+        &mut errors,
+    ) {
+        Ok(sock) => sock,
+        // Only a failed socket acquisition reaches here; already recorded.
+        Err(e) => {
+            errors.push((iface.name.clone(), e));
+            None
+        }
+    };
+    // `gather_interface` pushes the host candidate exactly when it returns the
+    // socket that backs it; `host` is a local staging vec here, so drop it.
+    debug_assert!(host.is_empty() || socket.is_some());
+    IfaceGather { socket, srflx, errors }
+}
+
 /// Gather host + srflx candidates.
 ///
 /// Fail-closed points, in order: interface enumeration unavailable → hard
@@ -931,6 +1014,10 @@ pub fn allowed_ifaces(
 /// "no interfaces". An allowed interface with no usable addresses simply
 /// yields nothing (an empty result with no errors is a legitimate outcome —
 /// e.g. no IPv4 up-interfaces).
+///
+/// Serial driver over the interfaces — the host-side/test entry point for the
+/// gather. The per-peer negotiation does NOT call this (audit §2.7 stage 1):
+/// it runs [`gather_interface_round`] once per interface on worker threads.
 pub fn gather_candidates(
     cfg: &GatherConfig,
     ifaces: &dyn InterfaceSource,
@@ -994,10 +1081,57 @@ fn gather_interface(
     srflx_out: &mut Vec<Candidate>,
     errors_out: &mut Vec<(String, ManagementError)>,
 ) -> Result<Option<GatheredSocket>, ManagementError> {
+    // STAGE 0 (official-alignment audit §2.7) — make the round measurable.
+    // Every later stage's claim ("the tick is no longer bounded by STUN",
+    // "one silent interface costs the schedule nothing") is a statement about
+    // these two numbers, and they did not exist: a device gather produced one
+    // `locals-gathered` line with no timing and no per-interface outcome. Both
+    // lines are emitted here, where the round actually ends, in the existing
+    // `N5c_ICE|<kind>|k=v|...` marker format. Observability only: nothing in
+    // this function's decisions reads them.
+    let round_start = sys::mono_ms();
+    let srflx_before = srflx_out.len();
+    // `gather-iface` = one interface round: how long it took, what it produced
+    // and HOW it ended (`outcome=`), so a silent/blocked interface is a fact
+    // instead of an inference (audit U1: "chba0's STUN silence is inferred,
+    // not instrumented").
+    macro_rules! iface_outcome {
+        ($port:expr, $host:expr, $outcome:expr) => {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-iface|iface={}|addr={}|port={}|ms={}|host={}|srflx={}|errors={}|outcome={}",
+                iface.name,
+                std::net::Ipv4Addr::from(iface.addr),
+                $port,
+                sys::mono_ms().saturating_sub(round_start),
+                $host,
+                srflx_out.len().saturating_sub(srflx_before),
+                errors_out.len(),
+                $outcome,
+            ))
+        };
+    }
+    // `gather-stun` = one (interface, STUN server) exchange — upstream's own
+    // unit of concurrency (fork `gather.go:491-513`) and of failure
+    // (`gather.go:526-531` logs exactly one line per failed exchange).
+    macro_rules! stun_outcome {
+        ($server:expr, $ms:expr, $outcome:expr) => {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-stun|iface={}|server={}|ms={}|outcome={}",
+                iface.name, $server, $ms, $outcome
+            ))
+        };
+    }
+
     // The ONE owned copy for this round: syscalls go through its raw number,
     // and ownership either leaves via the returned `GatheredSocket` or is
     // dropped here (exactly one close).
-    let owned = socks.take_owned().map_err(seam_to_management)?;
+    let owned = match socks.take_owned() {
+        Ok(o) => o,
+        Err(e) => {
+            iface_outcome!(0, 0, "no-socket");
+            return Err(seam_to_management(e));
+        }
+    };
     let dup = owned.as_raw_fd();
     let close_and_record = |owned: OwnedFd,
                             e: ManagementError,
@@ -1009,6 +1143,7 @@ fn gather_interface(
 
     if let Err(e) = set_nonblock(dup) {
         close_and_record(owned, seam_to_management(e), errors_out);
+        iface_outcome!(0, 0, "nonblock-failed");
         return Ok(None);
     }
     // Bind to THE interface address (host candidate binding) with an
@@ -1021,6 +1156,7 @@ fn gather_interface(
             ManagementError::Network(format!("stun-bind-failed (errno={})", sys::errno())),
             errors_out,
         );
+        iface_outcome!(0, 0, "bind-failed");
         return Ok(None);
     }
     let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
@@ -1031,6 +1167,7 @@ fn gather_interface(
             ManagementError::Network(format!("stun-getsockname-failed (errno={})", sys::errno())),
             errors_out,
         );
+        iface_outcome!(0, 0, "getsockname-failed");
         return Ok(None);
     }
     let bound_port = u16::from_be(name_addr.sin_port);
@@ -1041,6 +1178,7 @@ fn gather_interface(
         // No STUN server: the socket is STILL the live base of the host
         // candidate, so it must survive the gather (pre-fix it was closed
         // here, which is what made the signaled port dead).
+        iface_outcome!(bound_port, 1, "no-stun-server");
         return Ok(Some(GatheredSocket { cand: base, fd: owned }));
     }
 
@@ -1050,10 +1188,14 @@ fn gather_interface(
     // socket would drop the other server's reply).
     let mut outstanding: Vec<(usize, TransactionId)> = Vec::new();
     let mut targets: Vec<(usize, sys::sockaddr_in, TransactionId)> = Vec::new();
+    // STAGE 0: per-server send wall clock, so `gather-stun|ms=` reports the
+    // exchange (send → reply/timeout) of THIS (interface, server) pair.
+    let mut sent_at: Vec<u64> = vec![0; servers.len()];
     for (idx, (ip, port, server)) in servers.iter().enumerate() {
         let txn = match stun::random_transaction_id() {
             Ok(t) => t,
             Err(e) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), 0, "txn-failed");
                 errors_out.push((format!("{}/{}:{}", iface.name, server.host, server.port), e));
                 continue;
             }
@@ -1095,6 +1237,7 @@ fn gather_interface(
                 break;
             }
         }
+        sent_at[*idx] = sys::mono_ms(); // STAGE 0: exchange clock starts at the send
         if !sent {
             if crate::n2_socket_trace::armed() {
                 let remote = std::net::SocketAddrV4::new(std::net::Ipv4Addr::from(addr.sin_addr),
@@ -1103,6 +1246,7 @@ fn gather_interface(
             }
             let errno = sys::errno();
             outstanding.retain(|(i, _)| i != idx);
+            stun_outcome!(format!("{}:{}", servers[*idx].2.host, servers[*idx].2.port), 0, "send-failed");
             errors_out.push((
                 format!("{}/{}:{}", iface.name, servers[*idx].2.host, servers[*idx].2.port),
                 ManagementError::Network(format!("stun-send-failed (errno={errno})")),
@@ -1124,6 +1268,11 @@ fn gather_interface(
                 continue;
             }
             for (idx, _) in outstanding.drain(..) {
+                stun_outcome!(
+                    format!("{}:{}", servers[idx].2.host, servers[idx].2.port),
+                    sys::mono_ms().saturating_sub(sent_at[idx]),
+                    "poll-failed"
+                );
                 errors_out.push((
                     format!("{}/{}:{}", iface.name, servers[idx].2.host, servers[idx].2.port),
                     ManagementError::Network(format!("stun-poll-failed (errno={poll_errno})")),
@@ -1172,6 +1321,7 @@ fn gather_interface(
         let (idx, txn) = outstanding.remove(pos);
         let server = servers[idx].2;
         let ctx = format!("{}/{}:{}", iface.name, server.host, server.port);
+        let ms = sys::mono_ms().saturating_sub(sent_at[idx]);
         match stun::parse_binding_response(datagram, &txn) {
             Ok(StunReply::Mapped { addr, port }) => {
                 if crate::n2_socket_trace::armed() {
@@ -1181,16 +1331,34 @@ fn gather_interface(
                         std::net::Ipv4Addr::from(servers[idx].0), servers[idx].1,
                         std::net::Ipv4Addr::from(addr), port, sys::mono_ms()));
                 }
+                // STAGE 0: the srflx exchange's own timing + mapping.
+                crate::hilog::emit(&format!(
+                    "N5c_ICE|gather-stun|iface={}|server={}:{}|ms={ms}|outcome=mapped|mapped={}:{}",
+                    iface.name,
+                    server.host,
+                    server.port,
+                    std::net::Ipv4Addr::from(addr),
+                    port
+                ));
                 srflx_out.push(Candidate::srflx_candidate(&base, addr, port));
             }
             Ok(StunReply::Error(code)) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), ms, format!("error-code={code}"));
                 errors_out.push((ctx, ManagementError::Server { status: code }));
             }
-            Err(e) => errors_out.push((ctx, e)),
+            Err(e) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), ms, "unparsable");
+                errors_out.push((ctx, e));
+            }
         }
     }
     for (idx, _) in outstanding.drain(..) {
         let server = servers[idx].2;
+        stun_outcome!(
+            format!("{}:{}", server.host, server.port),
+            sys::mono_ms().saturating_sub(sent_at[idx]),
+            "timeout"
+        );
         errors_out.push((
             format!("{}/{}:{}", iface.name, server.host, server.port),
             ManagementError::Timeout,
@@ -1198,6 +1366,7 @@ fn gather_interface(
     }
     // STUN done (answers and/or recorded timeouts): the socket stays live
     // and leaves with the host candidate it backs.
+    iface_outcome!(bound_port, 1, "ok");
     Ok(Some(GatheredSocket { cand: base, fd: owned }))
 }
 

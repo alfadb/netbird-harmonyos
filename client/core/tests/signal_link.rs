@@ -38,8 +38,9 @@ use netbird_core::envelope::EnvelopeKeyPair;
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::mgmtsock::ProtectedSocketFdSource;
 use netbird_core::peer_conn::{
-    parse_ufrag_pwd, spawn_signal_link, PeerIceDeps, PeerIceOrchestrator, PeerIceState,
-    PeerSignalKind, RealSignalExchange, SignalExchange, SignalLinkConfig, SignalLinkEvent,
+    parse_ufrag_pwd, spawn_signal_link, InlineGatherExec, PeerIceDeps, PeerIceOrchestrator,
+    PeerIceState, PeerSignalKind, RealSignalExchange, SignalExchange, SignalLinkConfig,
+    SignalLinkEvent,
 };
 use netbird_core::signal::proto::body::Type;
 
@@ -194,6 +195,10 @@ fn spawn_node(
         fixed_local_port: None,
         advertised_candidates: Vec::new(),
     })));
+    // STAGE 1（官方对齐审计 §2.7）：本 harness 用注入时钟驱动 pump，本地候选
+    // 收集必须确定性完成 —— 内联执行者（异步模型由 `src/peer_conn.rs` 的线程
+    // 执行者用例覆盖）。
+    orch.lock().expect("orch").set_gather_exec(Arc::new(InlineGatherExec));
     orch.lock().expect("orch").set_peers(&[remote_key.to_string()]);
     if answerer {
         orch.lock().expect("orch").set_initiator(remote_key, false);
