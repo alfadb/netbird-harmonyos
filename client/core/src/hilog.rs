@@ -36,6 +36,24 @@ extern "C" {
 /// into it: a failed `OH_LOG_Print` (or a platform throttle) never changes what
 /// the ring records.
 pub fn emit(line: &str) {
+    emit_inner(line, false);
+}
+
+/// Emit one LIFECYCLE/SELECTION EVIDENCE marker (`N5_ICE|selected-pair`,
+/// `N6_WG_DEVICE|session-established`/`session-expired`, the `N13_WG` carrier
+/// transitions, the connector state/login lines).
+///
+/// Identical to [`emit`] on HiLog and on the evidence ring; the ONLY difference
+/// is the phone-log tee, which offers it the small priority budget
+/// (`phone_log::append_evidence`) so the marker survives a startup burst that
+/// spends the ordinary admission budget — the 0.0.27 fix for the 0.0.26 gap
+/// where e.g. one peer's `N5_ICE|selected-pair` was refused at startup. The
+/// caller knows it is evidence, so nothing is scanned on this path.
+pub fn emit_evidence(line: &str) {
+    emit_inner(line, true);
+}
+
+fn emit_inner(line: &str, evidence: bool) {
     // Device (aarch64-unknown-linux-ohos): the frozen HiLog channel.
     // Everything else (host CLI, harness, tests): the SAME marker text on
     // stderr — without it the host side of a device investigation is blind:
@@ -61,7 +79,7 @@ pub fn emit(line: &str) {
             );
         }
     }
-    tee_append(line);
+    tee_append(line, evidence);
 }
 
 /// The file tees (see [`emit`]): the armed-only evidence ring and the
@@ -70,17 +88,30 @@ pub fn emit(line: &str) {
 /// recurse. Host tests wrap the ring tee in the re-entrant [`tee_lock`] so a
 /// test that deliberately breaks the ring's destination sees ONLY its own
 /// records; the device build appends directly.
+///
+/// `evidence` selects the phone-log entrance ([`crate::phone_log::append`] vs
+/// [`crate::phone_log::append_evidence`]) and NOTHING else: the ring, the line
+/// text and the HiLog output are the same for both.
 #[cfg(test)]
-fn tee_append(line: &str) {
+fn tee_append(line: &str, evidence: bool) {
     let _held = tee_lock::lock();
     crate::n2_ring::append(line);
-    crate::phone_log::append(line);
+    tee_phone_log(line, evidence);
 }
 
 #[cfg(not(test))]
-fn tee_append(line: &str) {
+fn tee_append(line: &str, evidence: bool) {
     crate::n2_ring::append(line);
-    crate::phone_log::append(line);
+    tee_phone_log(line, evidence);
+}
+
+#[inline]
+fn tee_phone_log(line: &str, evidence: bool) {
+    if evidence {
+        crate::phone_log::append_evidence(line);
+    } else {
+        crate::phone_log::append(line);
+    }
 }
 
 /// Host-test mutual exclusion of the ring tee.

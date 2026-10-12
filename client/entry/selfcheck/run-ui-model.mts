@@ -232,7 +232,10 @@ try {
     relay: { enabled: true, state: 'ready', current_url: 'rels://live.relay:443',
       urls: ['rels://cfg.relay:443', 'rel://cfg2.relay:80'], reconnects: 2,
       transport_bytes: 4096, token_valid: true, last_error_class: null },
-    session_expiry: 'set', session_expires_at_unix: 1800003600
+    session_expiry: 'set', session_expires_at_unix: 1800003600,
+    ice_mux: { reads: 2327, xor_hits: 2327, xor_misses: 460, xor_expired: 3,
+      xor_filled: 91, overlay_dropped: 4, stun_unknown: 6, data_unknown: 7,
+      queue_dropped: 8 }
   };
   const detail = m.buildUiStatusDocument(detailStatus, detailNet, 'ui-8', 1,
     true, 'https://user:pw@mgmt.example:443/?token=SECRET',
@@ -271,6 +274,40 @@ try {
     detailNet, 'ui-8', 1, true, null, { host: '', port: 0, ip: '' });
   check('detail: a legacy wg section still publishes unknown_peer_drops as 0',
     legacyWg.wg_traffic.unknown_peer_drops === 0);
+  // 0.0.26 gap 1 (device reports §B.1b): the core HAS emitted `ice_mux` since
+  // 0.0.26 but the published document type never carried it. It does now.
+  check('detail: ice_mux counters published verbatim',
+    detail.ice_mux !== null && detail.ice_mux !== undefined &&
+    detail.ice_mux.reads === 2327 && detail.ice_mux.xor_hits === 2327 &&
+    detail.ice_mux.xor_misses === 460 && detail.ice_mux.xor_expired === 3 &&
+    detail.ice_mux.xor_filled === 91 && detail.ice_mux.overlay_dropped === 4 &&
+    detail.ice_mux.stun_unknown === 6 && detail.ice_mux.data_unknown === 7 &&
+    detail.ice_mux.queue_dropped === 8);
+  // The core's own `null` (no mux at all / its lock was busy) is passed
+  // through as an explicit null — NEVER a set of zero counters — and it
+  // survives the JSON round trip the extension really writes.
+  const nullMux = m.buildUiStatusDocument(
+    { ...detailStatus, ice_mux: null }, detailNet, 'ui-8b', 1);
+  check('detail: a core null ice_mux stays null, never zeros',
+    nullMux.ice_mux === null &&
+    JSON.parse(JSON.stringify(nullMux)).ice_mux === null &&
+    JSON.stringify(nullMux).indexOf('"reads":0') < 0);
+  // A partial / type-anomalous section is unknown too (null): a counter set
+  // with a hole in it would read as real zero activity on disk.
+  const partialMux = m.buildUiStatusDocument(
+    { ...detailStatus,
+      ice_mux: { reads: 1, xor_hits: 2, xor_misses: 3, xor_expired: 4, xor_filled: 5,
+        overlay_dropped: 6, stun_unknown: 7, data_unknown: null, queue_dropped: 8 } },
+    detailNet, 'ui-8c', 1);
+  check('detail: a partial ice_mux section is null, never a zero set',
+    partialMux.ice_mux === null);
+  // An older core that never emitted the key leaves the published key ABSENT
+  // (not null: null is the core's own "no mux / lock busy" statement).
+  const absentMux = m.buildUiStatusDocument(
+    { ...detailStatus, ice_mux: undefined }, detailNet, 'ui-8d', 1);
+  check('detail: an absent ice_mux key stays absent in the document',
+    absentMux.ice_mux === undefined &&
+    !('ice_mux' in JSON.parse(JSON.stringify(absentMux))));
   check('detail: relay view carries urls/current/counters/error',
     detail.relay.enabled === true && detail.relay.state === 'ready' &&
     detail.relay.current_url === 'rels://live.relay:443' &&
