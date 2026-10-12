@@ -16,7 +16,10 @@
 #     to the offline dependency set for zero contract-legal capability.
 #   - Handwritten raw NAPI extern "C" declarations (src/napi.rs) resolved from
 #     the host process (libace_napi.z.so); no napi-rs dependency, zero
-#     napi_create_threadsafe_function / napi_create_async_work.
+#     napi_create_async_work. The ONE threadsafe function is the socket-supply
+#     wake (`socket_supply_subscribe`), the pushed form of the official
+#     client's platform `ProtectSocket` callback; every import is asserted at
+#     the ELF symbol level by build.sh.
 #
 # panic=abort: panics must not unwind across the NAPI/extern "C" boundary.
 [package]

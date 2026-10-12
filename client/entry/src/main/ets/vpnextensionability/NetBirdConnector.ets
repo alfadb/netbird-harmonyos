@@ -683,6 +683,24 @@ export function socketSupplyPoll(): SocketSupplyRequest {
   return JSON.parse(core.socket_supply_poll()) as SocketSupplyRequest;
 }
 
+// Event-driven supply: the core invokes `wake` ON the ArkTS thread the moment a
+// request enters its queue, so the shell services the queue when it changed
+// instead of asking 10x/s. This is the pushed form of the official client's
+// platform callback (upstream `client/android/client.go` registers
+// `tunAdapter.ProtectSocket`, `client/net/protectsocket_android.go` calls it
+// synchronously from the dial path — there is no host-side poll there). The
+// wake carries no payload: the callback drains the queue through
+// `socketSupplyPoll()` until it is empty. It must return, not block (it runs on
+// the ArkTS main thread). The answer is parsed so a wiring failure is visible.
+export function socketSupplySubscribe(wake: () => void): SocketFeedResult {
+  return JSON.parse(core.socket_supply_subscribe(wake)) as SocketFeedResult;
+}
+
+// Teardown: stop waking and release the registered callback. Idempotent.
+export function socketSupplyUnsubscribe(): SocketFeedResult {
+  return JSON.parse(core.socket_supply_unsubscribe()) as SocketFeedResult;
+}
+
 export function socketSupplyReply(id: string, fd: number, result: string): SocketFeedResult {
   return JSON.parse(core.socket_supply_reply(id, fd, result)) as SocketFeedResult;
 }

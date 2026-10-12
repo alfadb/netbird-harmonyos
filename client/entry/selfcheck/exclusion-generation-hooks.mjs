@@ -571,17 +571,36 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_SUPPLY_MGMT_ADDR = (g().__NB_SUPPLY_MGMT_ADDR || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +
   '  },\n' +
-  // The on-demand supply channel (the 100 ms timer): the request is whatever
-  // the fixture queued (`__NB_SOCKET_SUPPLY_REQUEST`, default = nothing
-  // pending), the reply is recorded so "refused with which reason" is
-  // observable at the core seam too.
+  // The on-demand supply channel. Since 0.0.27 it is EVENT-DRIVEN: the shell
+  // registers `socket_supply_subscribe(cb)` and this stub captures that callback
+  // in `g().__NB_SUPPLY_WAKE`, so a fixture can fire the core's enqueue wake by
+  // hand (the only path that services a request before the 5 s safety net).
+  // `socket_supply_poll` answers `__NB_SOCKET_SUPPLY_QUEUE` element by element
+  // first (a queue a fixture fills to prove that ONE wake drains MANY requests)
+  // and then the single `__NB_SOCKET_SUPPLY_REQUEST` (the pre-0.0.27 shape, kept
+  // so every pre-existing fixture is unchanged); default = nothing pending. The
+  // reply is recorded so "refused with which reason" is observable at the core
+  // seam too.
   '  socket_supply_poll: () => {\n' +
   '    g().__NB_SUPPLY_POLL = (g().__NB_SUPPLY_POLL || 0) + 1;\n' +
+  '    const queue = g().__NB_SOCKET_SUPPLY_QUEUE;\n' +
+  '    if (Array.isArray(queue) && queue.length > 0) { return JSON.stringify(queue.shift()); }\n' +
   '    return JSON.stringify(g().__NB_SOCKET_SUPPLY_REQUEST ||\n' +
   '      { id: "", kind: "", purpose: "" });\n' +
   '  },\n' +
+  '  socket_supply_subscribe: (wake) => {\n' +
+  '    g().__NB_SUPPLY_WAKE = wake;\n' +
+  '    g().__NB_SUPPLY_SUBSCRIBE = (g().__NB_SUPPLY_SUBSCRIBE || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  '  socket_supply_unsubscribe: () => {\n' +
+  '    g().__NB_SUPPLY_WAKE = undefined;\n' +
+  '    g().__NB_SUPPLY_UNSUBSCRIBE = (g().__NB_SUPPLY_UNSUBSCRIBE || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
   '  socket_supply_reply: (id, fd, result) => {\n' +
   '    g().__NB_SUPPLY_REPLY = (g().__NB_SUPPLY_REPLY || 0) + 1;\n' +
+  '    g().__NB_SUPPLY_REPLY_IDS = (g().__NB_SUPPLY_REPLY_IDS || []).concat([id]);\n' +
   '    g().__NB_SUPPLY_REPLY_LAST = { id: id, fd: fd, result: result };\n' +
   '    return JSON.stringify({ ok: result === "protected" });\n' +
   '  },\n' +

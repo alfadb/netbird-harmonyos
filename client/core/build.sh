@@ -111,10 +111,21 @@ for sym in napi_module_register napi_create_function napi_get_cb_info \
     OH_LOG_Print OH_LOG_IsLoggable; do
     grep -q " U ${sym}$" "$ROOT/target/symbols.dyn" || die "expected imported symbol $sym not found"
 done
-if grep -qE ' U (napi_create_threadsafe_function|napi_create_async_work)$' "$ROOT/target/symbols.dyn"; then
-    die "A1 violation: threadsafe-function / async-work import found"
+# The socket-supply wake (the ArkTS-facing event that replaced the shell's 100 ms
+# poll) is the ONE sanctioned threadsafe function: the pushed form of the
+# official Android client's platform callback (client/android/client.go hands the
+# core `tunAdapter.ProtectSocket`; client/net/protectsocket_android.go calls it
+# from the dial path, so the host never polls). Its three symbols must be REAL
+# imports — the wake may not degrade to a no-op — while `napi_create_async_work`
+# stays forbidden (A1: no async work; this export surface is synchronous).
+for sym in napi_create_threadsafe_function napi_call_threadsafe_function \
+    napi_release_threadsafe_function napi_get_undefined napi_call_function; do
+    grep -q " U ${sym}$" "$ROOT/target/symbols.dyn" || die "expected imported symbol $sym not found"
+done
+if grep -qE ' U napi_create_async_work$' "$ROOT/target/symbols.dyn"; then
+    die "A1 violation: napi_create_async_work import found"
 fi
-log "import surface OK (napi/hilog from host process)"
+log "import surface OK (napi/hilog from host process, socket-supply wake threadsafe fn present)"
 
 # NAPI module registration constructor must be wired into .init_array
 "$LLVM_BIN/llvm-readelf" -r "$OUT" > "$ROOT/target/rel.dyn" || die "llvm-readelf -r failed"

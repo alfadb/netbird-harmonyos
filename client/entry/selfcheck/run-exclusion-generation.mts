@@ -1562,6 +1562,7 @@ try {
     G['__NB_CD_CORE'] = undefined;
     G['__NB_CD_CORE_NOW'] = undefined;
     G['__NB_SOCKET_SUPPLY_REQUEST'] = undefined;
+    G['__NB_SOCKET_SUPPLY_QUEUE'] = undefined;
     G['__NB_WG_FD'] = undefined;
     G['__NB_ICE_FD'] = undefined;
     G['__NB_ORDER'] = undefined;
@@ -1601,12 +1602,18 @@ try {
   const sleepMs = async (ms: number): Promise<void> => {
     await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, ms); });
   };
-  // Cancel the ability's own real timers, so a later supply tick can never land
-  // inside another scenario's supply counts.
+  // Cancel the ability's own real timers, so a later supply/mailbox tick can
+  // never land inside another scenario's supply counts. Since 0.0.27 there are
+  // two: the socket-supply safety net and the route-apply mailbox poll.
   const stopAbilityTimers = (ability: Record<string, unknown>): void => {
-    const supply: unknown = ability['socketSupplyTimer'];
-    if (typeof supply === 'number' && supply !== -1) { clearInterval(supply); }
-    ability['socketSupplyTimer'] = -1;
+    for (const field of ['socketSupplyTimer', 'routeApplyMailboxTimer'] as const) {
+      const handle: unknown = ability[field];
+      if (typeof handle === 'number' && handle !== -1) { clearInterval(handle); }
+      ability[field] = -1;
+    }
+    // The wake subscription is process-global (one stub callback in
+    // `__NB_SUPPLY_WAKE`), so a stopped ability must not look subscribed.
+    ability['socketSupplyWaked'] = false;
   };
   const controlCalls = (): number => Number(G['__NB_CONTROL_CALLS'] ?? 0);
   const armedAbility = (): Record<string, unknown> => {

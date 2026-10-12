@@ -2,13 +2,21 @@
 //! spikes/n1b-disc-phys-hap/probe/src/napi.rs with the export surface trimmed
 //! to the product skeleton: version / abi_probe / fd_status / wg_* / tun_* /
 //! phone_log_*).
-//! A1-clean: this file contains ZERO napi_create_threadsafe_function /
-//! napi_create_async_work — all exports are synchronous. Symbols resolve at
+//! Every EXPORT is synchronous JSON->JSON except `socket_supply_subscribe` /
+//! `socket_supply_unsubscribe`, which own the crate's ONE threadsafe function:
+//! the socket-supply wake — the pushed form of the official client's platform
+//! callback (upstream `client/android/client.go` hands the Go core
+//! `tunAdapter.ProtectSocket`, `client/net/protectsocket_android.go` calls it
+//! synchronously from the dial path; the host never polls for "do you need a
+//! socket?"). The wake carries no payload: the shell drains the request queue
+//! on it. There is still ZERO `napi_create_async_work`, and both facts are
+//! gated by `client/core/build.sh` at the ELF symbol level. Symbols resolve at
 //! load time from the host process's libace_napi.z.so (DT_NEEDED via
 //! .cargo/config.toml link args).
 
 use core::ffi::c_void;
 use core::time::Duration;
+use std::sync::{Arc, Mutex};
 
 pub type NapiEnv = *mut c_void;
 pub type NapiValue = *mut c_void;
@@ -49,6 +57,112 @@ extern "C" {
     ) -> i32;
     fn napi_get_value_int32(env: NapiEnv, value: NapiValue, result: *mut i32) -> i32;
     fn napi_get_value_bool(env: NapiEnv, value: NapiValue, result: *mut bool) -> i32;
+    // The socket-supply wake (see the module docs): the crate's only
+    // threadsafe-function surface. `napi_threadsafe_function` is an opaque
+    // handle, so it crosses as `*mut c_void` and NAPI owns its lifetime.
+    fn napi_get_undefined(env: NapiEnv, result: *mut NapiValue) -> i32;
+    fn napi_call_function(
+        env: NapiEnv,
+        recv: NapiValue,
+        func: NapiValue,
+        argc: usize,
+        argv: *const NapiValue,
+        result: *mut NapiValue,
+    ) -> i32;
+    fn napi_create_threadsafe_function(
+        env: NapiEnv,
+        func: NapiValue,
+        async_resource: NapiValue,
+        async_resource_name: NapiValue,
+        max_queue_size: usize,
+        initial_thread_count: usize,
+        thread_finalize_data: *mut c_void,
+        thread_finalize_cb: NapiFinalize,
+        context: *mut c_void,
+        call_js_cb: Option<unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void)>,
+        result: *mut *mut c_void,
+    ) -> i32;
+    fn napi_call_threadsafe_function(
+        func: *mut c_void,
+        data: *mut c_void,
+        is_blocking: i32,
+    ) -> i32;
+    fn napi_release_threadsafe_function(func: *mut c_void, mode: i32) -> i32;
+}
+
+/// `napi_threadsafe_function_call_mode` (`node_api_types.h`): never block the
+/// calling core thread on a wake.
+const NAPI_TSFN_NONBLOCKING: i32 = 0;
+/// `napi_threadsafe_function_release_mode`: drop wakes still queued at teardown
+/// instead of delivering them into a shell that is already tearing down.
+const NAPI_TSFN_ABORT: i32 = 1;
+
+// ---------------------------------------------------------------------------
+// Host-only fallbacks for the wake's five runtime functions.
+//
+// On the OHOS target these resolve from the host process's libace_napi.z.so at
+// load time, and `client/core/build.sh` asserts them as REAL imports of the
+// shipped artifact (`target_env = "ohos"`, the cfg the OHOS targets carry — note
+// `target_os` is still "linux" there). A host build has no NAPI runtime: the
+// crate's own unit tests drive the wake through `host_stubs` below, and every
+// integration-test binary carries its own block of host stubs for the
+// pre-existing surface. These INERT fallbacks (always an error status, never a
+// fake success: a subscription attempted on the host answers `ok:false`) make
+// that surface complete for the ONE threadsafe function without copying five
+// more stubs into 40+ test binaries. They are never compiled into the shipped
+// .so.
+// ---------------------------------------------------------------------------
+#[cfg(all(not(test), not(target_env = "ohos")))]
+mod host_napi_fallbacks {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn napi_create_threadsafe_function(
+        _env: NapiEnv,
+        _func: NapiValue,
+        _async_resource: NapiValue,
+        _async_resource_name: NapiValue,
+        _max_queue_size: usize,
+        _initial_thread_count: usize,
+        _thread_finalize_data: *mut c_void,
+        _thread_finalize_cb: NapiFinalize,
+        _context: *mut c_void,
+        _call_js_cb: Option<unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void)>,
+        _result: *mut *mut c_void,
+    ) -> i32 {
+        1 // napi_invalid_arg
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_call_threadsafe_function(
+        _func: *mut c_void,
+        _data: *mut c_void,
+        _is_blocking: i32,
+    ) -> i32 {
+        1
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_release_threadsafe_function(_func: *mut c_void, _mode: i32) -> i32 {
+        1
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_get_undefined(_env: NapiEnv, _result: *mut NapiValue) -> i32 {
+        1
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_call_function(
+        _env: NapiEnv,
+        _recv: NapiValue,
+        _func: NapiValue,
+        _argc: usize,
+        _argv: *const NapiValue,
+        _result: *mut NapiValue,
+    ) -> i32 {
+        1
+    }
 }
 
 #[repr(C)]
@@ -117,6 +231,8 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_ice_mux_arm", napi_connector_ice_mux_arm);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
     reg!("socket_supply_poll", napi_socket_supply_poll);
+    reg!("socket_supply_subscribe", napi_socket_supply_subscribe);
+    reg!("socket_supply_unsubscribe", napi_socket_supply_unsubscribe);
     reg!("socket_supply_reply", napi_socket_supply_reply);
     reg!("socket_supply_close_fd", napi_socket_supply_close_fd);
     reg!("socket_supply_shutdown", napi_socket_supply_shutdown);
@@ -355,6 +471,11 @@ mod host_stubs {
         BOOLS.with(|m| m.borrow_mut().clear());
         CREATED_STRINGS.with(|m| m.borrow_mut().clear());
         NEXT_STRING_HANDLE.with(|c| *c.borrow_mut() = 0);
+        TSFS.with(|m| m.borrow_mut().clear());
+        NEXT_TSFN.with(|c| *c.borrow_mut() = 0);
+        TSFN_CALLS.with(|c| c.borrow_mut().clear());
+        TSFN_RELEASES.with(|c| c.borrow_mut().clear());
+        JS_CALLS.with(|c| c.borrow_mut().clear());
     }
 
     /// Register a fake string argument for the `napi_get_value_string_utf8`
@@ -526,6 +647,120 @@ mod host_stubs {
             return 1;
         };
         unsafe { *result = v };
+        0
+    }
+
+    // ---- the socket-supply wake's threadsafe-function surface ----------------
+    // The host has no ArkTS runtime, so these stubs model the runtime's OBSERVABLE
+    // contract: `napi_call_threadsafe_function` dispatches the stored `call_js`
+    // inline (that is the path under test) and `napi_call_function` records the
+    // JS invocation. Everything else (queueing, threads) is the runtime's, not
+    // ours to fake.
+
+    type CallJs = unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void);
+
+    struct FakeTsfn {
+        env: NapiEnv,
+        func: NapiValue,
+        call_js: Option<CallJs>,
+    }
+
+    thread_local! {
+        static TSFS: RefCell<HashMap<usize, FakeTsfn>> = RefCell::new(HashMap::new());
+        static NEXT_TSFN: RefCell<usize> = RefCell::new(0);
+        // (handle, data) per napi_call_threadsafe_function
+        static TSFN_CALLS: RefCell<Vec<(usize, usize)>> = RefCell::new(Vec::new());
+        // (handle, release mode) per napi_release_threadsafe_function
+        static TSFN_RELEASES: RefCell<Vec<(usize, i32)>> = RefCell::new(Vec::new());
+        // (recv, func, argc) per napi_call_function
+        static JS_CALLS: RefCell<Vec<(usize, usize, usize)>> = RefCell::new(Vec::new());
+    }
+
+    pub fn tsfn_calls() -> Vec<(usize, usize)> {
+        TSFN_CALLS.with(|c| c.borrow().clone())
+    }
+
+    pub fn tsfn_releases() -> Vec<(usize, i32)> {
+        TSFN_RELEASES.with(|c| c.borrow().clone())
+    }
+
+    pub fn js_calls() -> Vec<(usize, usize, usize)> {
+        JS_CALLS.with(|c| c.borrow().clone())
+    }
+
+    pub fn live_tsfns() -> usize {
+        TSFS.with(|m| m.borrow().len())
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_create_threadsafe_function(
+        env: NapiEnv,
+        func: NapiValue,
+        _async_resource: NapiValue,
+        _async_resource_name: NapiValue,
+        _max_queue_size: usize,
+        _initial_thread_count: usize,
+        _thread_finalize_data: *mut c_void,
+        _thread_finalize_cb: NapiFinalize,
+        _context: *mut c_void,
+        call_js_cb: Option<CallJs>,
+        result: *mut *mut c_void,
+    ) -> i32 {
+        let handle = NEXT_TSFN.with(|c| {
+            let mut n = c.borrow_mut();
+            *n += 1;
+            0x4000usize + *n
+        });
+        TSFS.with(|m| m.borrow_mut().insert(handle, FakeTsfn { env, func, call_js: call_js_cb }));
+        unsafe { *result = handle as *mut c_void };
+        0
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_call_threadsafe_function(
+        func: *mut c_void,
+        data: *mut c_void,
+        _is_blocking: i32,
+    ) -> i32 {
+        let handle = func as usize;
+        TSFN_CALLS.with(|c| c.borrow_mut().push((handle, data as usize)));
+        // An unknown handle is `napi_invalid_arg` (1) — this is what a wake from
+        // a thread that never saw the handle gets, and it must not panic.
+        let entry = TSFS.with(|m| m.borrow().get(&handle).map(|e| (e.env, e.func, e.call_js)));
+        match entry {
+            Some((env, func, Some(call_js))) => {
+                unsafe { call_js(env, func, core::ptr::null_mut(), data) };
+                0
+            }
+            Some(_) => 0,
+            None => 1,
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_release_threadsafe_function(func: *mut c_void, mode: i32) -> i32 {
+        let handle = func as usize;
+        TSFN_RELEASES.with(|c| c.borrow_mut().push((handle, mode)));
+        if TSFS.with(|m| m.borrow_mut().remove(&handle)).is_some() { 0 } else { 1 }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_get_undefined(_env: NapiEnv, result: *mut NapiValue) -> i32 {
+        unsafe { *result = 0x7000usize as NapiValue };
+        0
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_call_function(
+        _env: NapiEnv,
+        recv: NapiValue,
+        func: NapiValue,
+        argc: usize,
+        _argv: *const NapiValue,
+        result: *mut NapiValue,
+    ) -> i32 {
+        JS_CALLS.with(|c| c.borrow_mut().push((recv as usize, func as usize, argc)));
+        unsafe { *result = 0x7001usize as NapiValue };
         0
     }
 }
@@ -996,6 +1231,86 @@ mod tests {
         assert_eq!(doc.matches(':').count(), 4, "{doc}");
         assert_eq!(doc.matches(',').count(), 3, "{doc}");
     }
+
+    // -----------------------------------------------------------------------
+    // the socket-supply wake (the shell's event-driven supply path)
+    //
+    // Driven end to end through the host stubs, which model the runtime's
+    // observable contract: subscribe creates ONE threadsafe function from the
+    // ArkTS callback and installs the enqueue hook; an enqueue reaches the JS
+    // callback with ZERO arguments (the shell drains the queue itself);
+    // unsubscribe detaches the hook and releases the handle; a second subscribe
+    // replaces and releases the first. Serialized against the other test that
+    // installs the process-wide hook (crate::socket_supply::notify_test_lock).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn supply_subscribe_wakes_on_enqueue_and_unsubscribe_releases_the_hook() {
+        use crate::socket_supply::{Purpose, SocketSupply};
+        use super::host_stubs::{js_calls, live_tsfns, tsfn_calls, tsfn_releases};
+
+        let _serial = crate::socket_supply::notify_test_lock();
+        reset();
+        let env = 0x1 as NapiEnv;
+
+        // (a) no ArkTS callback: an ANSWERED refusal, never a throw and never a
+        // half-installed subscription.
+        let refused = unsafe { napi_socket_supply_subscribe(env, 0xB1 as NapiCallbackInfo) };
+        assert!(created_string(refused as usize).expect("refusal reply")
+            .contains("callback-required"));
+        assert_eq!(live_tsfns(), 0);
+
+        // (b) the ArkTS callback: exactly one threadsafe function, hook installed.
+        set_call_args(0xB2, &[0x1234]);
+        let ok = unsafe { napi_socket_supply_subscribe(env, 0xB2 as NapiCallbackInfo) };
+        assert_eq!(created_string(ok as usize).expect("subscribe reply"), "{\"ok\":true}");
+        assert_eq!(live_tsfns(), 1);
+
+        // One real request: enqueue -> wake -> the JS callback runs with no args.
+        async fn serve_one(supply: std::sync::Arc<SocketSupply>) -> u64 {
+            loop {
+                if let Some((id, _purpose)) = supply.poll_request() {
+                    let raw = unsafe {
+                        crate::sys::socket(crate::sys::AF_INET, crate::sys::SOCK_DGRAM, 0)
+                    };
+                    assert!(raw >= 0, "socket(2) for a protected fd");
+                    assert!(supply.reply(id, raw, "protected").contains("true"));
+                    unsafe { crate::sys::close(raw) };
+                    return id;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let supply = std::sync::Arc::new(SocketSupply::new());
+        let poller = tokio::spawn(serve_one(supply.clone()));
+        let (dialed, fd) = supply.request_with_id(Purpose::Management).await.expect("protected reply");
+        drop(fd);
+        assert_eq!(poller.await.expect("poller task"), dialed);
+        let calls = tsfn_calls();
+        assert_eq!(calls.len(), 1, "exactly one wake for one enqueue");
+        assert_eq!(calls[0].1, 0, "the wake carries no data");
+        assert_eq!(js_calls(), vec![(0x7000, 0x1234, 0)],
+            "the ArkTS callback is called with ZERO arguments");
+
+        // (c) unsubscribe: hook detached, handle released in abort mode (wakes
+        // still queued at teardown are dropped, not delivered).
+        let gone = unsafe { napi_socket_supply_unsubscribe(env, 0xB3 as NapiCallbackInfo) };
+        assert_eq!(created_string(gone as usize).expect("unsubscribe reply"), "{\"ok\":true}");
+        assert_eq!(live_tsfns(), 0, "the handle was released");
+        assert_eq!(tsfn_releases(), vec![(calls[0].0, 1)]);
+        let again = unsafe { napi_socket_supply_unsubscribe(env, 0xB4 as NapiCallbackInfo) };
+        assert!(created_string(again as usize).expect("second unsubscribe reply")
+            .contains("\"subscribed\":false"), "idempotent, and it says so");
+
+        // A cleared subscription means NO wake for a later request — it is still
+        // served by the poller, which is what the shell's safety net does.
+        let poller = tokio::spawn(serve_one(supply.clone()));
+        let (dialed, fd) = supply.request_with_id(Purpose::Dns).await.expect("protected reply");
+        drop(fd);
+        assert_eq!(poller.await.expect("poller task"), dialed);
+        assert_eq!(tsfn_calls().len(), 1, "no wake after unsubscribe");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1473,145 @@ unsafe extern "C" fn napi_connector_signal_socket_feed(
 
 unsafe extern "C" fn napi_socket_supply_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::socket_supply::poll_json())
+}
+
+// ---------------------------------------------------------------------------
+// The socket-supply wake — the event-driven replacement of the shell's 100 ms
+// poll, and this crate's ONLY threadsafe function.
+//
+// The mechanism is the one already measured in-tree for exactly this runtime:
+// `spikes/r1-api24-hap/entry/src/main/cpp/e1_c_probe.cpp` created a threadsafe
+// function from an ArkTS callback, called it from producer pthreads and saw the
+// consumer run on the ArkTS main thread with no fd/thread growth
+// (`docs/evidence/e1-c-bridge-api24-emulator-2026-07-17.md`, reviewed-pass:
+// 3000 ordered callbacks). The ArkTS/N-API contract is identical here.
+//
+// Ownership: the threadsafe function keeps the ArkTS callback alive, so only its
+// handle is stored. `SUPPLY_WAKE` is held ACROSS `napi_call_threadsafe_function`
+// and `napi_release_threadsafe_function`, which is what makes teardown safe: a
+// release can only run once no wake is inside the runtime's call.
+// ---------------------------------------------------------------------------
+
+struct SupplyWake(*mut c_void);
+// The handle belongs to the ArkTS runtime; `SUPPLY_WAKE`'s mutex serializes
+// every use of it.
+unsafe impl Send for SupplyWake {}
+static SUPPLY_WAKE: Mutex<Option<SupplyWake>> = Mutex::new(None);
+
+/// Runs ON the ArkTS thread. Invokes the shell's registered callback with NO
+/// arguments: the wake is a "the queue changed, service it" edge, so no JS
+/// string/array is allocated per request (the shell reads the queue itself).
+unsafe extern "C" fn supply_wake_call_js(
+    env: NapiEnv,
+    js_callback: NapiValue,
+    _context: *mut c_void,
+    _data: *mut c_void,
+) {
+    if env.is_null() || js_callback.is_null() {
+        return;
+    }
+    let mut undefined: NapiValue = core::ptr::null_mut();
+    if napi_get_undefined(env, &mut undefined) != 0 {
+        return;
+    }
+    let mut ignored: NapiValue = core::ptr::null_mut();
+    // A throw inside the shell's callback can only fail this call; it must never
+    // abort the wake machinery — the shell's slow safety-net poll still services
+    // the queue, so it is reported and dropped.
+    let rc = napi_call_function(env, undefined, js_callback, 0, core::ptr::null_mut(), &mut ignored);
+    if rc != 0 {
+        crate::hilog::emit(&format!("socket-supply: wake callback rc={rc}"));
+    }
+}
+
+/// The notify hook installed into `crate::socket_supply`: called from whichever
+/// (tokio) thread enqueued the request, never from the ArkTS thread.
+/// Non-blocking on purpose — the shell drains the queue on every wake, so a wake
+/// that could not be queued is covered by the next request and by the shell's
+/// slow safety-net poll; the DIAL must never wait for the ArkTS loop.
+fn supply_wake(_id: u64) {
+    let guard = SUPPLY_WAKE.lock().expect("supply wake");
+    let Some(wake) = guard.as_ref() else { return };
+    let rc = unsafe {
+        napi_call_threadsafe_function(wake.0, core::ptr::null_mut(), NAPI_TSFN_NONBLOCKING)
+    };
+    if rc != 0 {
+        crate::hilog::emit(&format!("socket-supply: wake rejected rc={rc}"));
+    }
+}
+
+fn release_wake(wake: SupplyWake) {
+    let rc = unsafe { napi_release_threadsafe_function(wake.0, NAPI_TSFN_ABORT) };
+    if rc != 0 {
+        crate::hilog::emit(&format!("socket-supply: wake release rc={rc}"));
+    }
+}
+
+/// `socket_supply_subscribe(callback) => '{"ok":true}'` — install the ArkTS wake
+/// (the shell calls this once per live connector). An existing subscription is
+/// replaced and released, so a restarted shell can subscribe again without
+/// leaking the previous callback. Failures are answered, never thrown: this is a
+/// latency optimization, and the caller keeps a safety-net poll.
+unsafe extern "C" fn napi_socket_supply_subscribe(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    if a.argc == 0 || a.argv[0].is_null() {
+        return ret_json(env, "{\"ok\":false,\"error\":\"callback-required\"}".into());
+    }
+    let label = b"socket-supply-wake\0";
+    let mut name: NapiValue = core::ptr::null_mut();
+    if napi_create_string_utf8(env, label.as_ptr(), label.len() - 1, &mut name) != 0 {
+        return ret_json(env, "{\"ok\":false,\"error\":\"resource-name-failed\"}".into());
+    }
+    let mut handle: *mut c_void = core::ptr::null_mut();
+    let rc = napi_create_threadsafe_function(
+        env,
+        a.argv[0],
+        core::ptr::null_mut(),
+        name,
+        // unbounded queue: a wake is a few bytes and the shell coalesces them by
+        // draining; bounding it would turn a busy JS thread into a dropped wake.
+        0,
+        // initial_thread_count = 1 ("the native side may wake at any time"). The
+        // counted thread is the ArkTS thread that created it, exactly like the
+        // reviewed E1 probe; the many core threads are callers, not owners.
+        1,
+        core::ptr::null_mut(),
+        None,
+        core::ptr::null_mut(),
+        Some(supply_wake_call_js),
+        &mut handle,
+    );
+    if rc != 0 || handle.is_null() {
+        return ret_json(env, "{\"ok\":false,\"error\":\"threadsafe-function-failed\"}".into());
+    }
+    let previous = SUPPLY_WAKE.lock().expect("supply wake").replace(SupplyWake(handle));
+    if let Some(previous) = previous {
+        release_wake(previous);
+    }
+    crate::socket_supply::set_notify(Some(Arc::new(supply_wake)));
+    ret_json(env, "{\"ok\":true}".into())
+}
+
+/// `socket_supply_unsubscribe() => '{"ok":true[,"subscribed":false]}'` — shell
+/// teardown: stop waking, then release the callback. The hook is detached
+/// BEFORE the handle is taken (and holding the same mutex), so no wake can enter
+/// a released handle.
+unsafe extern "C" fn napi_socket_supply_unsubscribe(
+    env: NapiEnv,
+    _info: NapiCallbackInfo,
+) -> NapiValue {
+    crate::socket_supply::set_notify(None);
+    let taken = SUPPLY_WAKE.lock().expect("supply wake").take();
+    match taken {
+        Some(wake) => {
+            release_wake(wake);
+            ret_json(env, "{\"ok\":true}".into())
+        }
+        None => ret_json(env, "{\"ok\":true,\"subscribed\":false}".into()),
+    }
 }
 
 unsafe extern "C" fn napi_socket_supply_reply(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

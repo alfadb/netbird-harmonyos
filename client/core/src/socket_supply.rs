@@ -3,6 +3,20 @@
 
 //! Per-dial request/response bridge. Only a successful shell protect reply
 //! transfers a dup into the dial; the shell always closes its original fd.
+//!
+//! Two ways the shell learns about a request:
+//!
+//! - `poll_request()` / `poll_json()` — the shell asks (the historical path).
+//! - `set_notify()` — the official DIRECTION, pushed: upstream the Go core calls
+//!   the platform when it needs a socket (`client/android/client.go` hands it a
+//!   `ProtectSocket` callback, `client/net/protectsocket_android.go` calls it
+//!   from the dial path) and the host never polls for it. Here the core instead
+//!   wakes the shell with the request id the moment the request is enqueued, so
+//!   the shell services the queue when it changed rather than at a fixed
+//!   cadence. The hook is called with NO lock held, so a hook that immediately
+//!   drains the queue (the shell's service loop) cannot deadlock; it is a wake,
+//!   not a delivery — the queue stays the single source of truth and is drained
+//!   until empty.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
@@ -18,6 +32,32 @@ use crate::mgmtsock::{dup_socket_fd, SocketSeamError};
 
 const WAIT: Duration = Duration::from_secs(8);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The process-wide enqueue notification (the shell's wake). `None` = nobody is
+/// listening, which is the honest state of every host test and of the window
+/// before/after the shell subscribes. Guarded, and only ever *called* with the
+/// guard dropped — see `notify_enqueued`.
+type NotifyHook = Arc<dyn Fn(u64) + Send + Sync>;
+static NOTIFY: Mutex<Option<NotifyHook>> = Mutex::new(None);
+
+/// Install, replace or clear the enqueue notification. Replacing is what makes
+/// a shell restart (or a fresh `socket_supply_subscribe`) safe: the previous
+/// hook is dropped here, never left firing.
+pub fn set_notify(hook: Option<NotifyHook>) {
+    *NOTIFY.lock().expect("socket supply notify") = hook;
+}
+
+/// Wake the shell for request `id`. The hook is cloned out and the lock is
+/// RELEASED before the call: the shell's hook drains the queue (`poll_request`)
+/// and replies (`reply`) synchronously, both of which take the state lock — so
+/// notifying under this lock would deadlock the dial thread. A hook that panics
+/// would poison this slot; the shell's hook only schedules ArkTS work.
+fn notify_enqueued(id: u64) {
+    let hook = NOTIFY.lock().expect("socket supply notify").clone();
+    if let Some(hook) = hook {
+        hook(id);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
@@ -102,6 +142,11 @@ impl SocketSupply {
             state.pending.insert(id, Pending { purpose, started: Instant::now(), sender });
             state.queue.push_back(id);
         }
+        // Wake the shell with the state lock DROPPED (a serving hook re-enters
+        // this module). Every enqueue notifies, unconditionally: a concurrent
+        // drain may already have emptied the queue, so a wake suppressed on
+        // "the queue is not empty" is exactly the lost notification.
+        notify_enqueued(id);
         let _cleanup = RequestCleanup { supply: self, id };
         hilog::emit(&format!("socket-supply: request id={id} purpose={} kind={}", purpose.name(), purpose.kind()));
         match tokio::time::timeout(WAIT, receiver).await {
@@ -317,5 +362,166 @@ mod resource_tests {
 
         shutdown();
         assert!(!installed_counts_try().expect("uncontended").installed);
+    }
+}
+
+/// Serializes the tests that (re)install the process-wide wake hook. The hook is
+/// process-global by design (one shell, one subscription), so two such tests
+/// running in parallel would clobber each other's hook and make the
+/// exactly-once assertions lie. Poison-tolerant: a failed test must not wedge
+/// the rest of the suite.
+#[cfg(test)]
+pub(crate) fn notify_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    match LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// The pushed half of the shell contract: a request entering the queue wakes the
+/// installed hook, and the hook's own drain loop (the ArkTS servicing loop) is
+/// what empties it.
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    /// Records every id the installed hook was woken for. Ids are process-wide
+    /// monotonic, so a test asserts only about the ids IT enqueued — the other
+    /// tests of this binary enqueue into their own supplies concurrently, the
+    /// same way one process-wide subscription sees every supply of one shell.
+    #[derive(Default)]
+    struct WakeLog {
+        ids: Mutex<Vec<u64>>,
+    }
+
+    impl WakeLog {
+        fn hook(self: &Arc<Self>) -> NotifyHook {
+            let log = Arc::clone(self);
+            Arc::new(move |id: u64| log.ids.lock().expect("wake log").push(id))
+        }
+
+        fn woken(&self, id: u64) -> usize {
+            self.ids.lock().expect("wake log").iter().filter(|seen| **seen == id).count()
+        }
+    }
+
+    /// A real (dup-able) fd, the shape a protected socket has.
+    fn datagram_fd() -> OwnedFd {
+        let raw = unsafe { crate::sys::socket(crate::sys::AF_INET, crate::sys::SOCK_DGRAM, 0) };
+        assert!(raw >= 0, "socket(2) for a protected fd");
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+
+    /// ONE shell service pass: drain the queue until it is EMPTY, answering every
+    /// request with a protected fd. `poll_request() == None` is the termination
+    /// condition the ArkTS servicing loop uses.
+    fn serve_until_empty(supply: &Arc<SocketSupply>) -> Vec<u64> {
+        let mut served = Vec::new();
+        while let Some((id, _purpose)) = supply.poll_request() {
+            let fd = datagram_fd();
+            assert!(supply.reply(id, fd.as_raw_fd(), "protected").contains("true"));
+            served.push(id);
+        }
+        served
+    }
+
+    /// One test, three scenarios, because the hook is process-wide: installing it
+    /// from two parallel tests would make them clobber each other's subscription
+    /// (which is itself the replace path asserted below).
+    #[tokio::test]
+    async fn wake_fires_per_enqueue_survives_the_enqueue_drain_race_and_is_replaceable() {
+        let _serial = notify_test_lock();
+        set_notify(None);
+        let log = Arc::new(WakeLog::default());
+        set_notify(Some(log.hook()));
+
+        // (a) BURST + RACE: 32 dials enqueue concurrently while the shell drains
+        // with `serve_until_empty`. Every enqueue must wake exactly once — even
+        // the ones whose request a concurrent pass already drained (a wake
+        // suppressed on "the queue is not empty" is the lost notification).
+        let supply = Arc::new(SocketSupply::new());
+        let burst: usize = 32;
+        let mut dials = Vec::new();
+        for index in 0..burst {
+            let supply = Arc::clone(&supply);
+            let purpose = if index % 2 == 0 { Purpose::Management } else { Purpose::Dns };
+            dials.push(tokio::spawn(async move { supply.request_with_id(purpose).await }));
+        }
+        let mut drained = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while drained.len() < burst && tokio::time::Instant::now() < deadline {
+            drained.extend(serve_until_empty(&supply));
+            if drained.len() < burst { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }
+        assert_eq!(drained.len(), burst, "the drain loop must see every burst request");
+        let mut dialed = Vec::new();
+        for dial in dials {
+            let (id, fd) = dial.await.expect("dial task").expect("protected reply");
+            drop(fd);
+            dialed.push(id);
+        }
+        dialed.sort_unstable();
+        drained.sort_unstable();
+        assert_eq!(drained, dialed, "drain loop and dials must agree, id for id");
+        for id in &dialed {
+            assert_eq!(log.woken(*id), 1, "request {id}: wake exactly once");
+        }
+        assert!(supply.poll_request().is_none(), "the burst left nothing queued");
+        assert!(dialed.iter().all(|id| log.woken(*id) == 1), "no duplicate wakes");
+
+        // (b) The hook may SERVE the request itself (the ArkTS callback drains the
+        // queue). That re-enters this module from inside the enqueue call, so the
+        // wake must happen with the state lock dropped — under the lock this
+        // would deadlock and only the timeout below would report it.
+        let serving = Arc::new(SocketSupply::new());
+        let served = Arc::new(Mutex::new(Vec::<u64>::new()));
+        {
+            let supply = Arc::clone(&serving);
+            let served = Arc::clone(&served);
+            set_notify(Some(Arc::new(move |_id: u64| {
+                let mut log = served.lock().expect("served log");
+                while let Some((queued, _purpose)) = supply.poll_request() {
+                    let fd = datagram_fd();
+                    assert!(supply.reply(queued, fd.as_raw_fd(), "protected").contains("true"));
+                    log.push(queued);
+                }
+            })));
+        }
+        let (served_id, served_fd) =
+            tokio::time::timeout(Duration::from_secs(5), serving.request_with_id(Purpose::Relay))
+                .await
+                .expect("a hook that serves inside the wake must not deadlock")
+                .expect("protected reply");
+        drop(served_fd);
+        assert_eq!(*served.lock().expect("served log"), vec![served_id]);
+        assert!(serving.poll_request().is_none(), "serving inside the wake drained the queue");
+        assert_eq!(log.woken(served_id), 0, "the replaced hook is no longer called");
+
+        // (c) CLEARED (shell teardown): nobody is woken, yet an explicit poll still
+        // serves the request — the queue, never the wake, is the source of truth.
+        set_notify(None);
+        let polled = Arc::new(SocketSupply::new());
+        let server = tokio::spawn({
+            let supply = Arc::clone(&polled);
+            async move {
+                loop {
+                    if let Some((id, _purpose)) = supply.poll_request() {
+                        let fd = datagram_fd();
+                        assert!(supply.reply(id, fd.as_raw_fd(), "protected").contains("true"));
+                        return id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let (polled_id, polled_fd) =
+            polled.request_with_id(Purpose::Signal).await.expect("polled reply");
+        drop(polled_fd);
+        assert_eq!(server.await.expect("poll server"), polled_id);
+        assert_eq!(log.woken(polled_id), 0, "a cleared hook is never called again");
+        assert_eq!(served.lock().expect("served log").len(), 1, "only scenario (b) served");
+        assert!(polled.poll_request().is_none());
     }
 }

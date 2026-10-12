@@ -63,6 +63,7 @@ import {
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
   connectorStatus, connectorStop, connectorLogout, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
+  socketSupplySubscribe, socketSupplyUnsubscribe,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
   physicalDefaultLanProbe,
   resolveProtectedIp,
@@ -351,6 +352,26 @@ const SELF_BUNDLE_NAME: string = 'cn.alfadb.netbird';
 // killed mid-cellular therefore leaves a ring tail whose counters are at most
 // one minute old. No timer exists while the ring is unconfigured.
 const N2_RING_STATS_MS: number = 60000;
+
+// Socket supply is EVENT-DRIVEN since 0.0.27: the core calls the subscribed
+// ArkTS callback when a request enters its queue (socketSupplySubscribe), and
+// this interval is only the safety net for a wake that the shell could not
+// deliver — a refused subscription, a wake refused while the runtime is closing,
+// or a callback the runtime never dispatches. 5 s is bounded by the core's own
+// per-request contract instead of by taste: the dial's socket-supply wait is 8 s
+// (`socket_supply::WAIT`), so a request that only ever sees the net still
+// reaches the shell inside that window. It costs 0.2 Hz against the retired
+// tick's 10 Hz — and it is never the primary path, so a request the wake
+// delivers is serviced in milliseconds.
+const SOCKET_SUPPLY_SAFETY_NET_MS: number = 5000;
+// The UI -> VPE route-apply mailbox (filesDir/netbird-route-apply-request.json)
+// is a plain file written by ANOTHER process: it has no notification edge, so it
+// keeps a poll — off the retired 100 ms socket tick, and slower because the
+// extension-side read is not the user-visible latency (the page adopts the
+// answer on its existing 2 s status tick) and an unchanged document costs the
+// store one stat, never a re-read. The retained mailbox means the only cost of a
+// slower tick is ≤0.5 s before an apply starts, plus the page's own 2 s.
+const ROUTE_APPLY_MAILBOX_MS: number = 500;
 
 // Explicit user logout (stop-time Logout defect, 2026-10-01): the UI writes
 // ONE `netbird-logout` ticket into the shared filesDir AFTER the user
@@ -796,7 +817,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Shell-owned current WG UDP raw fd; the device owns a separate duplicate.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
+  // The socket-supply SAFETY NET only (a slow poll; the real path is the core's
+  // own enqueue wake) — see startSocketSupply.
   private socketSupplyTimer: number = -1;
+  // Subscribed to the core's enqueue wake (socketSupplySubscribe).
+  private socketSupplyWaked: boolean = false;
+  // The UI->VPE route-apply mailbox's own poll (it was carried by the retired
+  // 100 ms socket-supply tick) — see startRouteApplyMailbox.
+  private routeApplyMailboxTimer: number = -1;
   private networkObserver: connection.NetConnection | undefined = undefined;
   private networkDebounceTimer: number = -1;
   // The network generation the sockets of the CURRENT network were protected
@@ -1962,6 +1990,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // re-protect; further resupply policy is an N4+ increment (a starved
     // queue fails dials CLOSED — never unprotected)
     this.startSocketSupply();
+    // The page's route-apply mailbox poll starts and stops with the same
+    // connector lifecycle as the supply safety net (see the two methods).
+    this.startRouteApplyMailbox();
     this.feedSpareProtectedSocket(connection);
     hilog.info(DOMAIN, TAG, 'VPN_CONNECTOR_STARTED|requestId=%{public}s|state=%{public}s|' +
       'mgmtSocket=protected|connectAddr=%{public}s',
@@ -5744,33 +5775,116 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
+  // Event-driven protected-socket supply (0.0.27). The shell no longer asks the
+  // core "do you need a socket?" every 100 ms: the core calls the ONE callback
+  // registered here the moment a request enters its queue, and the callback
+  // drains that queue until it is EMPTY. This is the pushed form of the official
+  // client's platform callback — upstream `client/android/client.go` hands the
+  // core `tunAdapter.ProtectSocket` and `client/net/protectsocket_android.go`
+  // calls it synchronously from the dial path, so the host never polls.
   private startSocketSupply(): void {
     if (this.socketSupplyTimer >= 0) {
       return;
     }
+    this.subscribeSocketSupplyWake();
+    // The subscription cannot cover what was enqueued BEFORE it existed (the core
+    // may already hold a request from the dial that brought us here), so drain
+    // once now — the same "service the queue" entry point, not a second path.
+    this.drainSocketSupply();
+    // SAFETY NET only (0.2 Hz, was 10 Hz): the wake is a nonblocking threadsafe
+    // call whose DELIVERY this side cannot guarantee — a refused subscription, a
+    // wake refused while the runtime is closing, or a callback the runtime never
+    // dispatches would otherwise strand a request until the core's 8 s
+    // per-request timeout fails that dial closed. 5 s keeps such a one-off inside
+    // that window while costing ~2 % of the retired tick's ArkTS work. It is NOT
+    // the service path: the wake is.
     this.socketSupplyTimer = setInterval((): void => {
       if (this.destroyRequested || this.destroyPromise !== undefined) {
         return;
       }
+      this.drainSocketSupply();
+    }, SOCKET_SUPPLY_SAFETY_NET_MS);
+  }
+
+  // The core's wake: runs ON the ArkTS thread (native threadsafe-function
+  // callback), so it must return immediately and must never throw. Fulfilling a
+  // request is fire-and-forget with its own catch, exactly as the retired tick
+  // had it — the difference is that ONE wake services the WHOLE queue instead of
+  // at most one request per tick.
+  private socketSupplyWake(): void {
+    if (this.destroyRequested || this.destroyPromise !== undefined) {
+      return;
+    }
+    this.drainSocketSupply();
+  }
+
+  private subscribeSocketSupplyWake(): void {
+    if (this.socketSupplyWaked) {
+      return;
+    }
+    this.socketSupplyWaked = true;
+    try {
+      const answer: SocketFeedResult = socketSupplySubscribe((): void => {
+        this.socketSupplyWake();
+      });
+      if (!answer.ok) {
+        hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_SUBSCRIBE_FAILED|error=%{public}s',
+          answer.error ?? 'unknown');
+      }
+    } catch (error) {
+      // A refused subscription is a LATENCY failure, not a correctness one: the
+      // safety-net poll above still serves every request. Logged so a silently
+      // poll-only device is visible in the log.
+      hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_SUBSCRIBE_FAILED|summary=%{public}s',
+        safeError(error as Error));
+    }
+  }
+
+  // Service the queue until it is EMPTY. Every request is answered by
+  // fulfillSocketRequest (which closes its own fd on every path), and an empty
+  // answer is the termination condition — never a fixed number of requests.
+  private drainSocketSupply(): void {
+    for (;;) {
+      if (this.destroyRequested || this.destroyPromise !== undefined) {
+        return;
+      }
+      let request: SocketSupplyRequest;
       try {
-        const request: SocketSupplyRequest = socketSupplyPoll();
-        if (request.id.length > 0) {
-          this.fulfillSocketRequest(request).catch((error: Error): void => {
-            hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_ERROR|id=%{public}s|summary=%{public}s',
-              request.id, safeError(error));
-          });
-        }
+        request = socketSupplyPoll();
       } catch (error) {
         hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_POLL_FAILED|summary=%{public}s',
           safeError(error as Error));
+        return;
       }
-      // 2026-10-09 live route apply: the SAME 100 ms tick carries the page's
-      // apply-request mailbox (NO new timer, no commonEvent, no second
-      // startVpnExtensionAbility). Teardown already returned above, and the
-      // consumer holds its own busy latch, so a tick can never overlap an
-      // in-flight apply.
+      if (request.id.length === 0) {
+        return;
+      }
+      this.fulfillSocketRequest(request).catch((error: Error): void => {
+        hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_ERROR|id=%{public}s|summary=%{public}s',
+          request.id, safeError(error));
+      });
+    }
+  }
+
+  // 2026-10-09 live route apply: the page's apply-request mailbox keeps a poll of
+  // its own — it was carried by the retired 100 ms socket-supply tick, and it has
+  // no notification channel (a plain file the UI process writes). 500 ms instead
+  // of 100 ms because the extension-side read is not on the user-visible critical
+  // path: the page adopts the answer on its existing 2 s status tick, and an
+  // unchanged document costs the store ONE stat (NetBirdRouteRequestStore's
+  // identity probe). Teardown cancels it with the supply safety net, and the
+  // consumer holds its own busy latch, so a tick can never overlap an in-flight
+  // apply.
+  private startRouteApplyMailbox(): void {
+    if (this.routeApplyMailboxTimer >= 0) {
+      return;
+    }
+    this.routeApplyMailboxTimer = setInterval((): void => {
+      if (this.destroyRequested || this.destroyPromise !== undefined) {
+        return;
+      }
       this.maybePollRouteApplyRequest();
-    }, 100);
+    }, ROUTE_APPLY_MAILBOX_MS);
   }
 
   private async fulfillSocketRequest(request: SocketSupplyRequest): Promise<void> {
@@ -5855,8 +5969,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       clearInterval(this.socketSupplyTimer);
       this.socketSupplyTimer = -1;
     }
+    this.stopRouteApplyMailbox();
+    if (this.socketSupplyWaked) {
+      this.socketSupplyWaked = false;
+      try {
+        socketSupplyUnsubscribe();
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_UNSUBSCRIBE_FAILED|summary=%{public}s',
+          safeError(error as Error));
+      }
+    }
     socketSupplyShutdown();
     forgetPhysicalDefaultDns();
+  }
+
+  private stopRouteApplyMailbox(): void {
+    if (this.routeApplyMailboxTimer >= 0) {
+      clearInterval(this.routeApplyMailboxTimer);
+      this.routeApplyMailboxTimer = -1;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -5864,7 +5995,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // ---------------------------------------------------------------------------
   // The page saves the scoped preference and then writes a RETAINED mailbox
   // request (NetBirdRouteRequestStore) naming only WHICH scope changed. This
-  // consumer rides the EXISTING 100 ms socket-supply tick (no new timer):
+  // consumer has its own poll (startRouteApplyMailbox — it was carried by the
+  // retired 100 ms socket-supply tick; a file write has no notification edge):
   //
   //   read request (bounded, never cached by mtime/size) → duplicate? → scope
   //   check → load the LATEST preference document for THIS management URL →
@@ -5882,8 +6014,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   //
   // Nothing here stops, starts or re-logs-in the connector (same connector / WG
   // / ICE / management session); the ONLY teardown reachable from this file is
-  // the pre-existing fail-closed one, and the socket-supply interval is never
-  // touched (it stops only with the pre-existing teardown).
+  // the pre-existing fail-closed one, and this consumer touches no interval at
+  // all (its own poll is started and cancelled by the pre-existing teardown).
   private maybePollRouteApplyRequest(): void {
     if (this.routeRequestBusy || this.destroyRequested || this.destroyPromise !== undefined) {
       return;

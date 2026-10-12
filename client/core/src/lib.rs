@@ -19,8 +19,10 @@
 //!              platform raw fd is never stored nor closed by native
 //! - `abi`    — dlopen+dlsym verification of the 14 frozen BoringTun ffi
 //!              symbols in the loaded .so, adapted from the probe's d1.rs
-//! - `napi`   — handwritten raw NAPI glue (no napi-rs; all exports
-//!              synchronous, zero threadsafe-function / async-work)
+//! - `napi`   — handwritten raw NAPI glue (no napi-rs; every export
+//!              synchronous, zero `napi_create_async_work`; its ONLY threadsafe
+//!              function is the socket-supply wake — the pushed form of the
+//!              official client's platform `ProtectSocket` callback)
 //! - `alloc_stats` — process-global RUST HEAP counters (live bytes, peak,
 //!              allocation/free events): a `System`-wrapping
 //!              `#[global_allocator]` (installed in this file, so it applies to
