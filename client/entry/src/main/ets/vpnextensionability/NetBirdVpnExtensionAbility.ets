@@ -5799,8 +5799,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       if (isDns) {
         const servers: string[] = physicalDefaultDnsServers(this.networkNetId || undefined);
+        // Test the list FIRST: feeding an empty list wiped the core's working
+        // resolver list before the request was refused (report §2.3 / §5 F3),
+        // which made every later protected lookup fail instantly and silently.
+        // An empty list is still a refusal — but a harmless one, and the core
+        // keeps the servers it already had (the recovery path guards the same
+        // way, see this file's `dns.length === 0 || !socketSupplyDnsServers(dns).ok`).
+        if (servers.length === 0) {
+          reason = 'no-physical-dns';
+          return;
+        }
         const updated: SocketFeedResult = socketSupplyDnsServers(servers);
-        if (!updated.ok || servers.length === 0) {
+        if (!updated.ok) {
           reason = 'no-physical-dns';
           return;
         }

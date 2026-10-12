@@ -17,6 +17,11 @@ use crate::socket_supply::{Purpose, SocketSupply};
 
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// The DNS service port every protected query goes to. Fixed in production;
+/// only the in-crate fake-resolver tests move it (a host test cannot bind a
+/// privileged port).
+pub const DNS_PORT: u16 = 53;
+
 pub fn parse_servers(json: &str) -> Result<Vec<Ipv4Addr>, &'static str> {
     let Json::Arr(items) = parse_document(json).map_err(|_| "invalid-json")? else {
         return Err("not-array");
@@ -131,9 +136,17 @@ fn response(packet: &[u8], query: &[u8]) -> io::Result<Ipv4Addr> {
 }
 
 pub async fn resolve(host: &str, supply: &Arc<SocketSupply>) -> io::Result<Ipv4Addr> {
+    resolve_on_port(host, supply, DNS_PORT).await
+}
+
+/// [`resolve`] with an explicit destination port: production callers pass
+/// [`DNS_PORT`]; [`crate::ice::ProtectedUdpFdSource`] passes its (production-
+/// constant, test-movable) port so the fake-resolver tests exercise the very
+/// same socket path.
+pub(crate) async fn resolve_on_port(host: &str, supply: &Arc<SocketSupply>, port: u16) -> io::Result<Ipv4Addr> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() { return Ok(ip); }
     let servers: Vec<_> = supply.dns_servers().into_iter()
-        .map(|ip| SocketAddrV4::new(ip, 53)).collect();
+        .map(|ip| SocketAddrV4::new(ip, port)).collect();
     resolve_on_servers(host, supply, &servers).await
 }
 
@@ -214,7 +227,16 @@ fn emit_dns_facts(host: &str, addr: SocketAddrV4, query_id: u16, request_fd: i32
 }
 
 async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[SocketAddrV4]) -> io::Result<Ipv4Addr> {
-    if servers.is_empty() { return Err(io::Error::other("dns:no-physical-server")); }
+    if servers.is_empty() {
+        // Report it like every other outcome of this function: the pre-F3
+        // shape returned before the result line, so "the shell fed us an
+        // empty server list" was the one resolution failure that left no
+        // trace anywhere in the log.
+        crate::hilog::emit(&format!(
+            "protected-dns: id=0 host={host} fd=-1 server=- elapsed_ms=0 result=dns:no-physical-server"
+        ));
+        return Err(io::Error::other("dns:no-physical-server"));
+    }
     let mut last = io::Error::other("dns:no-answer");
     for &addr in servers {
         let started = Instant::now();

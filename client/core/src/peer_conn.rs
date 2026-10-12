@@ -3521,6 +3521,13 @@ mod tests {
         fn available(&self) -> Option<usize> {
             Some(self.inner.pending())
         }
+        /// Production hands the orchestrator the protected source itself, so
+        /// the wrapper must delegate resolution too — otherwise a hostname
+        /// STUN server would silently fall back to the OS resolver in tests
+        /// (the literal-server tests resolve identically either way).
+        fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], crate::management::ManagementError> {
+            self.inner.resolve_ipv4(host)
+        }
     }
 
     /// 手动执行者：`spawn` 只入队，测试自己决定何时跑哪个 round（trickle 的
@@ -3803,6 +3810,112 @@ mod tests {
         );
         drop(frames);
         drop(sink);
+    }
+
+    /// F1 (report §5/§6 last bullet): the on-demand STUN-hostname resolution
+    /// runs on the GATHER worker, never on the pump — a resolver that eats the
+    /// whole protected query timeout (1.5 s, `protected_dns.rs:18`) must not
+    /// cost `run_once` a single tick. And the failure stays what upstream's
+    /// `gather.go:515` `Debugf` is: one exchange, no session error, no hostname
+    /// disabled for the process.
+    #[test]
+    fn a_slow_protected_dns_lookup_never_blocks_the_pump() {
+        // A UDP sink that never answers: the query is really sent, and the
+        // lookup really waits out its 1.5 s (a closed port would fail fast).
+        let dns_sink = std::net::UdpSocket::bind("127.0.0.1:0").expect("dns sink");
+        let dns_port = dns_sink.local_addr().expect("dns sink addr").port();
+        let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+        supply.set_dns_servers(vec![std::net::Ipv4Addr::LOCALHOST]);
+        let provider = crate::ice::test_support::DnsSocketProvider::start(supply.clone());
+        let socks = Arc::new(CountingSocks {
+            inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            taken: AtomicU64::new(0),
+        });
+        socks
+            .inner
+            .attach_dns(supply.clone(), crate::connector::global_runtime().handle().clone());
+        socks.inner.set_dns_port_for_test(dns_port);
+        socks.feed_batch(8);
+        let signal = Arc::new(FrameLog::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        // A HOSTNAME, so the round must resolve through the protected supply.
+        assert_eq!(orch.set_stuns(&["stun:dns-slow.example:3478".to_string()]), 1);
+        orch.set_peers(&["P0".into(), "P1".into()]);
+        orch.set_signal_ready(true);
+
+        let t0 = std::time::Instant::now();
+        orch.run_once(1_000).expect("beat 1");
+        assert!(
+            t0.elapsed().as_millis() < 250,
+            "the first tick must not wait for the lookup: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            orch.peers.iter().filter(|p| p.gather.is_some()).count(),
+            2,
+            "both peers' rounds must be in flight on workers"
+        );
+        assert!(
+            orch.peers.iter().all(|p| p.locals_done),
+            "host candidates are immediate; only the lookup is in flight"
+        );
+
+        // While both lookups are held by the black-holed resolver, hammer the
+        // pump: every tick must return immediately.
+        let mut worst_tick = std::time::Duration::ZERO;
+        let window = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < window {
+            let now = 1_000 + t0.elapsed().as_millis() as u64;
+            let tick = std::time::Instant::now();
+            orch.run_once(now).expect("beat");
+            worst_tick = worst_tick.max(tick.elapsed());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            worst_tick.as_millis() < 50,
+            "a tick that waited for DNS would cost 1.5 s; worst tick = {worst_tick:?}"
+        );
+        assert!(
+            orch.peers.iter().all(|p| p.gather.is_some()),
+            "the lookups must still be holding both rounds"
+        );
+        assert!(
+            provider.wait_seen(2),
+            "each round asks for its own protected DNS socket: {}",
+            provider.seen.load(Ordering::Relaxed)
+        );
+
+        // The lookup ends as its own per-exchange failure: the round reports,
+        // the session keeps its host candidates and records no error.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while orch.peers.iter().any(|p| p.gather.is_some()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let now = 1_000 + t0.elapsed().as_millis() as u64;
+            let tick = std::time::Instant::now();
+            orch.run_once(now).expect("beat");
+            worst_tick = worst_tick.max(tick.elapsed());
+        }
+        assert!(
+            orch.peers.iter().all(|p| p.gather.is_none()),
+            "both rounds must report the failed lookup"
+        );
+        assert!(
+            orch.peers.iter().all(|p| p.last_error.is_none()),
+            "an unresolvable STUN hostname is not a session error"
+        );
+        assert!(worst_tick.as_millis() < 50, "worst tick over the whole window = {worst_tick:?}");
+        drop(dns_sink);
     }
 
     /// STAGE 2（官方对齐审计 §2.7）：**host 候选不再 bind** —— 它只是
