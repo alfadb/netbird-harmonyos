@@ -726,8 +726,18 @@ pub struct ProtectedUdpFdSource {
     queue: Mutex<VecDeque<OwnedFd>>,
     taken: AtomicU64,
     dns: OnceLock<(Arc<crate::socket_supply::SocketSupply>, tokio::runtime::Handle)>,
+    /// Warm start only — upstream keeps no STUN DNS cache at all: a hit saves
+    /// the on-demand lookup of [`UdpSocketSource::resolve_ipv4`], a miss is
+    /// resolved right there. Never a gate.
     resolved: Arc<Mutex<HashMap<String, [u8; 4]>>>,
     dns_epoch: Arc<AtomicU64>,
+    /// Destination port of the protected DNS query — production is the DNS
+    /// port ([`crate::protected_dns::DNS_PORT`]) and this field does not exist.
+    /// The in-crate tests need a fake resolver and a host test cannot bind the
+    /// privileged port, so they move it (see
+    /// [`ProtectedUdpFdSource::set_dns_port_for_test`]).
+    #[cfg(test)]
+    dns_port: std::sync::atomic::AtomicU16,
 }
 
 impl ProtectedUdpFdSource {
@@ -739,6 +749,8 @@ impl ProtectedUdpFdSource {
         Ok(ProtectedUdpFdSource {
             queue: Mutex::new(q), taken: AtomicU64::new(0), dns: OnceLock::new(),
             resolved: Arc::new(Mutex::new(HashMap::new())), dns_epoch: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            dns_port: std::sync::atomic::AtomicU16::new(crate::protected_dns::DNS_PORT),
         })
     }
 
@@ -746,10 +758,26 @@ impl ProtectedUdpFdSource {
         let _ = self.dns.set((supply, runtime));
     }
 
+    /// Warm the STUN host cache for `servers`. Since F1 this is a pure
+    /// optimisation — [`UdpSocketSource::resolve_ipv4`] resolves a miss on
+    /// demand — so a refresh can only ever make the next gather cheaper, never
+    /// gate it. Two corrections over the pre-F1 shape (report §5 F2):
+    ///
+    /// * an EMPTY list is a no-op. Its caller is
+    ///   `connector.rs::physical_network_changed` with no new management
+    ///   address (`connector.rs:5932-5935`), i.e. exactly the transition that
+    ///   also empties the shell-fed DNS server list: clearing the cache there
+    ///   left the plane with nothing cached and nothing resolving. Upstream's
+    ///   analogue is that a network change never empties the OS resolver.
+    /// * a failed (or epoch-discarded) lookup is logged, never swallowed:
+    ///   the old `if let Ok(ip)` produced no line at all, which is why the
+    ///   device logs showed 100 % srflx-less rounds with zero resolution
+    ///   attempts.
     pub fn refresh_stun_dns(&self, servers: &[StunServer]) {
+        let Some((supply, runtime)) = self.dns.get() else { return };
+        if servers.is_empty() { return; }
         let generation = self.dns_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.resolved.lock().expect("stun dns cache").clear();
-        let Some((supply, runtime)) = self.dns.get() else { return };
         for server in servers {
             let host = server.host.clone();
             if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
@@ -760,13 +788,75 @@ impl ProtectedUdpFdSource {
             let epoch = self.dns_epoch.clone();
             let supply = supply.clone();
             runtime.spawn(async move {
-                if let Ok(ip) = crate::protected_dns::resolve(&host, &supply).await {
-                    if epoch.load(Ordering::Acquire) == generation {
-                        cache.lock().expect("stun dns cache").insert(host, ip.octets());
+                match crate::protected_dns::resolve(&host, &supply).await {
+                    Ok(ip) => {
+                        if epoch.load(Ordering::Acquire) == generation {
+                            cache.lock().expect("stun dns cache").insert(host, ip.octets());
+                        } else {
+                            // Keep the epoch guard's intent observable: a newer
+                            // refresh owns the cache now, and F1 re-resolves
+                            // this host on the next gather instead of leaving
+                            // it permanently missing.
+                            crate::hilog::emit(&format!(
+                                "N5c_ICE|stun-dns|host={host}|outcome=stale|generation={generation}"
+                            ));
+                        }
                     }
+                    Err(e) => crate::hilog::emit(&format!(
+                        "N5c_ICE|stun-dns|host={host}|outcome=failed|reason={e}"
+                    )),
                 }
             });
         }
+    }
+
+    /// F1 (report §5): upstream resolves each STUN URL INSIDE the gather
+    /// (`gather.go:513` / `:585` → `stdnet.go:218` → `:109-112` `LookupNetIP`,
+    /// bounded by `dnsResolveTimeout`) and only that one exchange fails when
+    /// the lookup does (`gather.go:515` `Debugf`). This is that lookup for our
+    /// protected resolver: a cache miss resolves now, on the gather worker
+    /// (never on the pump — `peer_conn.rs` `ThreadGatherExec`), and the result
+    /// warms the cache for the next gather. The failure is a real error token
+    /// (`socket-supply-rejected` / `dns:no-physical-server` / `dns:timeout`),
+    /// never the old `stun:protected-dns-pending` sentinel, and it disables
+    /// nothing: the next gather resolves again.
+    fn resolve_on_demand(&self, host: &str) -> Result<[u8; 4], ManagementError> {
+        let Some((supply, runtime)) = self.dns.get() else {
+            // No protected supply: identical to the pre-F1 no-supply branch —
+            // the host keeps the OS resolver, the device has none.
+            return resolve_ipv4(host);
+        };
+        match protected_lookup(host, supply, self.dns_port(), runtime) {
+            Ok(ip) => {
+                self.resolved.lock().expect("stun dns cache").insert(host.to_string(), ip.octets());
+                Ok(ip.octets())
+            }
+            Err(reason) => {
+                crate::hilog::emit(&format!(
+                    "N5c_ICE|stun-dns|host={host}|outcome=failed|reason={reason}"
+                ));
+                Err(ManagementError::Network(format!("stun-resolve: {reason}")))
+            }
+        }
+    }
+
+    /// The port [`Self::resolve_on_demand`] queries — see the `dns_port` field.
+    #[cfg(not(test))]
+    fn dns_port(&self) -> u16 {
+        crate::protected_dns::DNS_PORT
+    }
+
+    #[cfg(test)]
+    fn dns_port(&self) -> u16 {
+        self.dns_port.load(Ordering::Relaxed)
+    }
+
+    /// Test seam: point the protected resolver at a fake DNS server (a host
+    /// test cannot bind [`crate::protected_dns::DNS_PORT`]). Production code
+    /// never calls this.
+    #[cfg(test)]
+    pub(crate) fn set_dns_port_for_test(&self, port: u16) {
+        self.dns_port.store(port, Ordering::Relaxed);
     }
 
     /// Shell-side resupply: retain a protected UDP socket duplicate now.
@@ -814,15 +904,96 @@ impl ProtectedUdpFdSource {
     }
 }
 
+/// Ceiling on ONE on-demand protected lookup on the gather path — upstream's
+/// `dnsResolveTimeout = 30 * time.Second` (`client/internal/stdnet/stdnet.go:25`,
+/// applied to every `LookupNetIP` at `:109-112`, hence to each gather's
+/// `ResolveUDPAddr` at pion fork `gather.go:513` / `:585`). It is a ceiling,
+/// not a budget: the protected supply's own 8 s request timeout
+/// (`socket_supply.rs:19`) and the 1.5 s per-server query timeout
+/// (`protected_dns.rs:18`) normally end a doomed lookup far sooner, exactly as
+/// they do in the pre-resolved path.
+pub const DNS_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn dns_timeout_reason() -> String {
+    format!("dns:timeout after {}s", DNS_RESOLVE_TIMEOUT.as_secs())
+}
+
+/// One protected A lookup, awaited by a SYNCHRONOUS gather worker: upstream's
+/// gather goroutine blocking on `ResolveUDPAddr` (`gather.go:513`), with
+/// upstream's bound. Returns the seam's own reason token on failure so the
+/// caller logs the real cause.
+fn protected_lookup(
+    host: &str,
+    supply: &Arc<crate::socket_supply::SocketSupply>,
+    port: u16,
+    runtime: &tokio::runtime::Handle,
+) -> Result<std::net::Ipv4Addr, String> {
+    let in_runtime = tokio::runtime::Handle::try_current().is_ok();
+    let current_thread = runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread;
+    if in_runtime || current_thread {
+        // Called from inside a runtime (the deterministic gather executors run
+        // the round inline on the pump's thread) or on a current-thread handle,
+        // which cannot drive its own IO/timers from another thread: drive the
+        // lookup on a private current-thread runtime on a scoped thread, so
+        // neither the caller's thread nor its drivers are needed. Production is
+        // never this branch.
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| private_lookup(host, supply, port))
+                .join()
+                .unwrap_or_else(|_| Err("dns:worker-panicked".to_string()))
+        });
+    }
+    runtime
+        .block_on(async {
+            // The timeout is BUILT inside the runtime context: tokio 1.53
+            // constructs its `Sleep` eagerly, and an argument-position
+            // `timeout(..)` would be evaluated before `block_on` enters.
+            tokio::time::timeout(
+                DNS_RESOLVE_TIMEOUT,
+                crate::protected_dns::resolve_on_port(host, supply, port),
+            )
+            .await
+        })
+        .map_err(|_| dns_timeout_reason())
+        .and_then(|outcome| outcome.map_err(|e| e.to_string()))
+}
+
+fn private_lookup(
+    host: &str,
+    supply: &Arc<crate::socket_supply::SocketSupply>,
+    port: u16,
+) -> Result<std::net::Ipv4Addr, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("dns:runtime-unavailable: {e}"))?;
+    runtime
+        .block_on(async {
+            tokio::time::timeout(
+                DNS_RESOLVE_TIMEOUT,
+                crate::protected_dns::resolve_on_port(host, supply, port),
+            )
+            .await
+        })
+        .map_err(|_| dns_timeout_reason())
+        .and_then(|outcome| outcome.map_err(|e| e.to_string()))
+}
+
 impl UdpSocketSource for ProtectedUdpFdSource {
+    /// Upstream shape (report §3/§5 F1): the gather path resolves the STUN
+    /// hostname itself. [`Self::resolved`] is only a warm start — a hit uses
+    /// it, a miss performs the protected lookup now (bounded by
+    /// [`DNS_RESOLVE_TIMEOUT`], upstream's `dnsResolveTimeout`) and returns its
+    /// real result. There is no "pending" state: nothing was ever in flight
+    /// under the old sentinel, so a failure here is reported once, for this
+    /// exchange, and the next gather tries again.
     fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
         if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() { return Ok(ip.octets()); }
-        if self.dns.get().is_none() {
-            #[cfg(not(target_env = "ohos"))]
-            return resolve_ipv4(host);
+        if let Some(ip) = self.resolved.lock().expect("stun dns cache").get(host).copied() {
+            return Ok(ip);
         }
-        self.resolved.lock().expect("stun dns cache").get(host).copied()
-            .ok_or_else(|| ManagementError::Network("stun:protected-dns-pending".into()))
+        self.resolve_on_demand(host)
     }
 
     /// Exact count of queued (already protected, unbound) sockets — the
@@ -1149,22 +1320,146 @@ pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
 // configuration (`ConfigureWGEndpoint`, conn.go:477), TURN/relay candidates,
 // ---------------------------------------------------------------------------
 
+/// Test-only seams shared by the in-crate test modules (`ice`, `peer_conn`) —
+/// never compiled into the cdylib or the integration-test lib.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::socket_supply::{Purpose, SocketSupply};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A fake DNS server on an ephemeral port (a host test cannot bind
+    /// [`crate::protected_dns::DNS_PORT`]): answers every A query with `answer`
+    /// in the exact wire shape `protected_dns::response` validates, or — with
+    /// `None` — reads and drops the query, i.e. a resolver that eats the whole
+    /// 1.5 s query timeout (`protected_dns.rs:18`).
+    pub(crate) fn fake_dns_server(runtime: &tokio::runtime::Handle, answer: Option<[u8; 4]>) -> u16 {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("fake dns bind");
+        server.set_nonblocking(true).expect("nonblocking fake dns");
+        let port = server.local_addr().expect("fake dns addr").port();
+        runtime.spawn(async move {
+            let server = tokio::net::UdpSocket::from_std(server).expect("async fake dns");
+            let mut buf = [0u8; 512];
+            loop {
+                let Ok((n, peer)) = server.recv_from(&mut buf).await else { return };
+                let Some(ip) = answer else { continue };
+                let mut reply = buf[..n].to_vec();
+                if reply.len() < 12 { continue; }
+                reply[2] = 0x81; // QR=1, RD copied, RA=0 — the flags the parser accepts
+                reply[3] = 0x80; // RCODE=0
+                reply[7] = 1;    // ANCOUNT=1
+                reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4]);
+                reply.extend_from_slice(&ip);
+                let _ = server.send_to(&reply, peer).await;
+            }
+        });
+        port
+    }
+
+    /// Shell-side provider for the protected DNS sockets the core asks for: a
+    /// plain thread (the core waits on a socket it cannot provide itself),
+    /// handing out a real AF_INET/SOCK_DGRAM socket — or rejecting while
+    /// `reject` is set, exactly like the shell during a network transition.
+    pub(crate) struct DnsSocketProvider {
+        /// Requests seen (one per lookup attempt).
+        pub(crate) seen: Arc<AtomicU64>,
+        reject: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DnsSocketProvider {
+        pub(crate) fn start(supply: Arc<SocketSupply>) -> Self {
+            let seen = Arc::new(AtomicU64::new(0));
+            let reject = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::spawn({
+                let seen = seen.clone();
+                let reject = reject.clone();
+                let stop = stop.clone();
+                move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut idle = true;
+                        while let Some((id, purpose)) = supply.poll_request() {
+                            idle = false;
+                            if purpose != Purpose::Dns { continue; }
+                            seen.fetch_add(1, Ordering::Relaxed);
+                            if reject.load(Ordering::Relaxed) {
+                                supply.reply(id, -1, "protect-failed");
+                                continue;
+                            }
+                            let raw = unsafe { crate::sys::socket(crate::sys::AF_INET, crate::sys::SOCK_DGRAM, 0) };
+                            if raw < 0 {
+                                supply.reply(id, -1, "protect-failed");
+                                continue;
+                            }
+                            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+                            let _ = supply.reply(id, fd.as_raw_fd(), "protected");
+                        }
+                        if idle { std::thread::sleep(Duration::from_millis(1)); }
+                    }
+                }
+            });
+            DnsSocketProvider { seen, reject, stop, thread: Some(thread) }
+        }
+
+        pub(crate) fn set_reject(&self, value: bool) {
+            self.reject.store(value, Ordering::Relaxed);
+        }
+
+        /// Bounded wait for `n` observed requests (the lookup itself runs on
+        /// the gather worker / the caller, so the test thread only waits for an
+        /// observable counter — never for a socket).
+        pub(crate) fn wait_seen(&self, n: u64) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.seen.load(Ordering::Relaxed) < n {
+                if Instant::now() >= deadline { return false; }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            true
+        }
+    }
+
+    impl Drop for DnsSocketProvider {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        }
+    }
+}
+
 #[cfg(test)]
 mod feed_ownership_tests {
     use super::{ProtectedUdpFdSource, UdpSocketSource};
     use crate::sys;
     use std::os::fd::{FromRawFd, IntoRawFd};
 
+    /// F1 + F2 (report §5/§6.2): a cache HIT is used, a MISS is resolved on
+    /// demand (here: it fails with the seam's real reason, because the supply
+    /// has no DNS server), and `refresh_stun_dns(&[])` — the
+    /// `physical_network_changed` call with no new management address
+    /// (`connector.rs:5932-5935`) — is a no-op that leaves a warm cache warm.
+    /// Pre-fix this test pinned the opposite: an empty refresh wiped the entry
+    /// and the next gather answered `stun:protected-dns-pending` for the rest
+    /// of the process.
     #[test]
-    fn protected_stun_dns_cache_is_used_and_refresh_discards_old_address() {
+    fn empty_refresh_keeps_a_warm_cache_and_a_miss_is_a_real_error() {
         let source = ProtectedUdpFdSource::new_with_fd(-1).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         source.attach_dns(std::sync::Arc::new(crate::socket_supply::SocketSupply::new()), runtime.handle().clone());
-        assert!(source.resolve_ipv4("stun.example.invalid").is_err());
+        let err = source.resolve_ipv4("stun.example.invalid").unwrap_err().to_string();
+        assert!(err.contains("dns:no-physical-server"), "a miss reports its real cause: {err}");
+        assert!(!err.contains("pending"), "the terminal sentinel is gone: {err}");
         source.resolved.lock().unwrap().insert("stun.example.invalid".into(), [192, 0, 2, 9]);
         assert_eq!(source.resolve_ipv4("stun.example.invalid").unwrap(), [192, 0, 2, 9]);
         source.refresh_stun_dns(&[]);
-        assert!(source.resolve_ipv4("stun.example.invalid").is_err());
+        assert_eq!(
+            source.resolve_ipv4("stun.example.invalid").unwrap(),
+            [192, 0, 2, 9],
+            "an empty refresh must not wipe the cache"
+        );
         assert_eq!(source.resolve_ipv4("192.0.2.10").unwrap(), [192, 0, 2, 10]);
     }
 
@@ -1224,6 +1519,158 @@ mod feed_ownership_tests {
         );
         drop(held);
         assert_eq!(source.pending_try(), Some(0));
+    }
+}
+
+/// F1/F2 (report §5, §6.1-6.5): the resolution behaviour of the protected STUN
+/// hostname source — on-demand resolution on the gather path, a failure that
+/// costs one exchange, a warm cache that is never wiped by an empty refresh.
+#[cfg(test)]
+mod stun_dns_tests {
+    use super::test_support::{fake_dns_server, DnsSocketProvider};
+    use super::{gather_srflx_round, ProtectedUdpFdSource, StunServer, UdpSocketSource};
+    use crate::socket_supply::SocketSupply;
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// A multi-thread runtime on purpose: the production gather worker is a
+    /// plain thread (`peer_conn::ThreadGatherExec`) blocking on this handle,
+    /// and the fake DNS server must make progress on the runtime's own workers.
+    fn dns_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("dns test runtime")
+    }
+
+    fn server(host: &str) -> StunServer {
+        StunServer { host: host.to_string(), port: 3478 }
+    }
+
+    /// Report §6.1/§6.6: with NO refresh event at all, a gather-path miss
+    /// resolves on demand through the protected supply (upstream
+    /// `gather.go:513`), and the cache is only a warm start — a hit costs no
+    /// lookup. The pre-fix outcome (`Err("stun:protected-dns-pending")` with no
+    /// request on the supply) is unreachable.
+    #[test]
+    fn a_gather_path_miss_resolves_on_demand_and_the_cache_is_only_a_warm_start() {
+        let runtime = dns_runtime();
+        let supply = Arc::new(SocketSupply::new());
+        let port = fake_dns_server(runtime.handle(), Some([203, 0, 113, 9]));
+        supply.set_dns_servers(vec![Ipv4Addr::LOCALHOST]);
+        let provider = DnsSocketProvider::start(supply.clone());
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        source.attach_dns(supply.clone(), runtime.handle().clone());
+        source.set_dns_port_for_test(port);
+
+        // The gather path itself (the round calls this at `gather_srflx_round`).
+        assert_eq!(source.resolve_ipv4("stun.example.invalid").unwrap(), [203, 0, 113, 9]);
+        assert!(provider.wait_seen(1), "the miss must issue a protected DNS request");
+        assert_eq!(provider.seen.load(Ordering::Relaxed), 1);
+
+        // Warm start: the next gather is answered from the cache.
+        assert_eq!(source.resolve_ipv4("stun.example.invalid").unwrap(), [203, 0, 113, 9]);
+        assert_eq!(provider.seen.load(Ordering::Relaxed), 1, "a hit costs no lookup");
+
+        // And a round with a fresh hostname asks again — resolution is per
+        // gather, not per process.
+        let mux = crate::ice_mux::IceMux::open_wildcard(0).expect("mux");
+        let mux_port = mux.local_port();
+        let round = gather_srflx_round(&[server("other.example.invalid")], &mux, &source, 50);
+        assert_eq!(round.exchanges.len(), 1);
+        assert!(
+            round.exchanges[0].resolved.is_some(),
+            "the round resolved the host on its own: {:?}",
+            round.exchanges[0]
+        );
+        assert!(provider.wait_seen(2), "the round issued its own lookup");
+    }
+
+    /// Report §6.1/§6.3 (the PC capture, report §1.4): a refresh whose
+    /// protected DNS socket the shell REJECTS is a per-exchange failure with
+    /// the seam's real reason — not a state — so the very next gather for the
+    /// same hostname resolves.
+    #[test]
+    fn a_rejected_lookup_is_not_terminal_and_the_next_gather_retries() {
+        let runtime = dns_runtime();
+        let supply = Arc::new(SocketSupply::new());
+        let port = fake_dns_server(runtime.handle(), Some([198, 51, 100, 7]));
+        supply.set_dns_servers(vec![Ipv4Addr::LOCALHOST]);
+        let provider = DnsSocketProvider::start(supply.clone());
+        provider.set_reject(true);
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        source.attach_dns(supply.clone(), runtime.handle().clone());
+        source.set_dns_port_for_test(port);
+
+        source.refresh_stun_dns(&[server("stun.example.invalid")]);
+        assert!(provider.wait_seen(1), "the refresh did start a lookup");
+        assert!(
+            !source.resolved.lock().unwrap().contains_key("stun.example.invalid"),
+            "a rejected lookup caches nothing"
+        );
+
+        // The failed lookup is a real error with the real reason ...
+        let err = source.resolve_ipv4("rejected.example.invalid").unwrap_err().to_string();
+        assert!(err.contains("socket-protect-failed"), "the seam's reason is surfaced: {err}");
+        assert!(!err.contains("pending"), "the terminal sentinel is gone: {err}");
+        assert!(
+            !source.resolved.lock().unwrap().contains_key("rejected.example.invalid"),
+            "a failure caches nothing"
+        );
+
+        // ... and it disables nothing: the next gather resolves.
+        provider.set_reject(false);
+        assert_eq!(source.resolve_ipv4("rejected.example.invalid").unwrap(), [198, 51, 100, 7]);
+        assert!(
+            provider.seen.load(Ordering::Relaxed) >= 3,
+            "the retry issued a fresh lookup: {}",
+            provider.seen.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Report §6.5: an empty shell-fed DNS server list is the seam's own
+    /// `dns:no-physical-server` error (logged — see `protected_dns.rs`), never
+    /// a "pending" state; and once the shell feeds a working list the NEXT
+    /// GATHER succeeds with no refresh event and no timer in between (F1).
+    #[test]
+    fn an_empty_dns_server_list_is_a_real_error_and_a_later_feed_recovers() {
+        let runtime = dns_runtime();
+        let supply = Arc::new(SocketSupply::new());
+        let port = fake_dns_server(runtime.handle(), Some([192, 0, 2, 30]));
+        let provider = DnsSocketProvider::start(supply.clone());
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        source.attach_dns(supply.clone(), runtime.handle().clone());
+        source.set_dns_port_for_test(port);
+
+        let err = source.resolve_ipv4("stun.example.invalid").unwrap_err().to_string();
+        assert!(err.contains("dns:no-physical-server"), "real reason: {err}");
+        assert_eq!(provider.seen.load(Ordering::Relaxed), 0, "no socket request without a server");
+
+        supply.set_dns_servers(vec![Ipv4Addr::LOCALHOST]);
+        assert_eq!(source.resolve_ipv4("stun.example.invalid").unwrap(), [192, 0, 2, 30]);
+        assert!(provider.wait_seen(1), "the next gather asked the supply itself");
+    }
+
+    /// Report §6.4: two refreshes in a row (the epoch guard may discard the
+    /// first one's late result) leave NO host permanently missing — every miss
+    /// re-resolves on demand.
+    #[test]
+    fn interleaved_refreshes_do_not_lose_a_host() {
+        let runtime = dns_runtime();
+        let supply = Arc::new(SocketSupply::new());
+        let port = fake_dns_server(runtime.handle(), Some([203, 0, 113, 40]));
+        supply.set_dns_servers(vec![Ipv4Addr::LOCALHOST]);
+        let _provider = DnsSocketProvider::start(supply.clone());
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        source.attach_dns(supply.clone(), runtime.handle().clone());
+        source.set_dns_port_for_test(port);
+
+        source.refresh_stun_dns(&[server("first.example.invalid")]);
+        source.refresh_stun_dns(&[server("second.example.invalid")]);
+        assert_eq!(source.resolve_ipv4("first.example.invalid").unwrap(), [203, 0, 113, 40]);
+        assert_eq!(source.resolve_ipv4("second.example.invalid").unwrap(), [203, 0, 113, 40]);
     }
 }
 
