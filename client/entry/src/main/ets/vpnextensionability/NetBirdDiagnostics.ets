@@ -103,9 +103,27 @@
 //                                             BYTES -> KiB by exact integer
 //                                             division). The item names live in
 //                                             the pure core, never here.
+//     hidebug.getAppMemoryLimit()            -> rss_limit_kb, vss_limit_kb,
+//                                             vm_heap_limit_kb (API 12
+//                                             MemoryLimit; the platform answers
+//                                             KILOBYTES, so no division — the
+//                                             core only validates the decimal
+//                                             text through limitKiBText). This
+//                                             is the platform memory manager's
+//                                             own per-process limit, the number
+//                                             the kill investigation previously
+//                                             had to INFER from RSS+swap. A
+//                                             missing/throwing API renders `na`.
+//     The SAME three-key reading is ALSO logged ONCE PER PROCESS START, on the
+//     diag_start record (initialiseRun -> readMemLimit(false)), so the limit is
+//     in the log from the run's first record. The start-time call stays SILENT
+//     when the API is absent: it runs before any detail tick and must not
+//     consume the detail leg's once-per-run report — its `na` fields are the
+//     signal there.
 //   Why a third line: at every field's own bound, mem_detail plus these nine
 //   keys is ~695 chars (pid=42), past MAX_LINE_CHARS; splitting (never
-//   truncating) keeps every reading, and the widest mem_vm alone is 381 chars.
+//   truncating) keeps every reading, and the widest mem_vm alone is 487 chars
+//   (nine keys + the three limit keys; a fourth limit key would not fit).
 //   Each leg is guarded separately: a missing/throwing/non-finite API turns its
 //   own keys into `na` and says the run's FIRST detail failure once.
 //
@@ -155,11 +173,12 @@ import hilog from '@ohos.hilog';
 import hidebug from '@ohos.hidebug';
 import process from '@ohos.process';
 import type { ListFileOptions } from '@ohos.file.fs';
-import { BoundedQueue, buildMarker, buildNativeMemFields, buildRecord,
-  buildResourceFields, buildRustAllocFields, buildSampleFields, buildVmMemFields,
-  bytesToKiBText, cpuMsText, isDetailSample, isPriorUnclean, isPublicEventName,
-  isSystemEventLine, markerBasename, mergeFields, needsRotation, parseMarker,
-  parseProcNumbers, procNumberText, recordPath, rotationSteps, sampleIntervalFor,
+import { BoundedQueue, buildMarker, buildMemLimitFields, buildNativeMemFields,
+  buildRecord, buildResourceFields, buildRustAllocFields, buildSampleFields,
+  buildVmMemFields, bytesToKiBText, cpuMsText, isDetailSample, isPriorUnclean,
+  isPublicEventName, isSystemEventLine, limitKiBText, markerBasename, mergeFields,
+  needsRotation, parseMarker, parseProcNumbers, procNumberText, recordPath,
+  rotationSteps, sampleIntervalFor,
   statNumberText, FD_LIST_MAX, GC_STAT_BYTES_ALLOCATED, GC_STAT_BYTES_FREED,
   GC_STAT_GC_COUNT, GC_STAT_GC_TIME, MARKER_STATE_CLEAN, MARKER_STATE_OPEN,
   PROC_MAX_LINES, PROC_MEMINFO, PROC_MEMINFO_KEYS, PROC_READ_MAX_BYTES,
@@ -423,7 +442,11 @@ class DiagRuntime {
         fields['prev_state'] = prev.state;
         this.emitInternal('PRIOR_EXIT_UNCLEAN', fields);
       }
-      this.emitInternal('diag_start', {});
+      // The run's FIRST record carries the platform's own per-process memory
+      // limit (rss_limit_kb / vss_limit_kb / vm_heap_limit_kb) — logged once
+      // per process start, in addition to every mem_vm record. Silent here: the
+      // detail-tick leg owns the once-per-run failure report (see readMemLimit).
+      this.emitInternal('diag_start', this.readMemLimit(false));
       if (this.role === 'ui' && this.activeLogPath.length > 0) {
         // Seed the byte counter BEFORE the first write, so rotation accounts
         // for whatever a previous run left in the active file.
@@ -852,16 +875,54 @@ class DiagRuntime {
       this.noteDetailUnavailable('gc-stat');
     }
 
-    return buildVmMemFields(vmTotalHeapKb, vmArrayKb, nativeHeapKb, nativeHeapAllocKb,
-      nativeHeapFreeKb, gcCount, gcTimeMs, gcAllocKb, gcFreedKb);
+    return mergeFields(
+      buildVmMemFields(vmTotalHeapKb, vmArrayKb, nativeHeapKb, nativeHeapAllocKb,
+        nativeHeapFreeKb, gcCount, gcTimeMs, gcAllocKb, gcFreedKb),
+      this.readMemLimit(true));
+  }
+
+  // ---- the platform's OWN per-process memory limit -------------------------
+  //
+  // hidebug.getAppMemoryLimit() (API 12, MemoryLimit) answers rssLimit /
+  // vssLimit / vmHeapLimit — the platform memory manager's own figures, in
+  // KILOBYTES (no RLIMIT_RSS: /proc/<pid>/limits says "Max resident set
+  // unlimited"), i.e. the number the 2026-10-12 kill investigation could only
+  // INFER from RSS+VmSwap. ONE reader for BOTH call sites: the once-per-process
+  // -start diag_start record (initialiseRun) and this tick's mem_vm record, so
+  // the absence handling exists exactly once.
+  //
+  // `noteFailure` decides whether an absent/throwing API is said out loud: the
+  // detail-tick call site reports the run's first failure (stage `mem-limit`,
+  // once per run like every other detail leg), while the start-time call site
+  // stays silent — it runs before any detail tick and must not consume that
+  // one-shot report; its `na` fields on the diag_start record are the signal.
+  // A non-decimal or over-long reply is `na` as well (the pure core decides).
+  private readMemLimit(noteFailure: boolean): DiagFields {
+    let rssLimitKb: string | null = null;
+    let vssLimitKb: string | null = null;
+    let vmHeapLimitKb: string | null = null;
+    try {
+      const limit: hidebug.MemoryLimit = hidebug.getAppMemoryLimit();
+      rssLimitKb = limitKiBText(limit.rssLimit.toString());
+      vssLimitKb = limitKiBText(limit.vssLimit.toString());
+      vmHeapLimitKb = limitKiBText(limit.vmHeapLimit.toString());
+    } catch (error) {
+      rssLimitKb = null; // API absent on this build -> explicit `na`, never 0
+      vssLimitKb = null;
+      vmHeapLimitKb = null;
+      if (noteFailure) {
+        this.noteDetailUnavailable('mem-limit');
+      }
+    }
+    return buildMemLimitFields(rssLimitKb, vssLimitKb, vmHeapLimitKb);
   }
 
   // ONE concise line per run when a detail reading fails: the native PSS leg,
-  // the injected Rust reader, or one of the three synchronous mem_vm legs
-  // (vm-heap / native-heap / gc-stat). The per-tick `na` fields carry the ongoing
-  // signal; this must never become a per-tick errno log, so only the first
-  // failure of the run is said out loud (and `stage` is a label — no pid, no
-  // path, no platform item name).
+  // the injected Rust reader, or one of the FOUR synchronous mem_vm legs
+  // (vm-heap / native-heap / gc-stat / mem-limit). The per-tick `na` fields
+  // carry the ongoing signal; this must never become a per-tick errno log, so
+  // only the first failure of the run is said out loud (and `stage` is a label
+  // — no pid, no path, no platform item name).
   private noteDetailUnavailable(stage: string): void {
     if (this.detailUnavailableLogged) {
       return;

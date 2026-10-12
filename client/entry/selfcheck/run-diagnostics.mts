@@ -553,6 +553,24 @@ try {
     naVm['native_heap_free_kb'] === 'na' && naVm['gc_count'] === 'na' &&
     naVm['gc_time_ms'] === 'na' && naVm['gc_alloc_kb'] === 'na' &&
     naVm['gc_freed_kb'] === 'na' && Object.keys(naVm).length === 9);
+  // The platform's own memory limit (getAppMemoryLimit, API >= 12): three keys,
+  // KILOBYTES as the platform reports them — the pure core validates the decimal
+  // text and NOTHING else (no division, no scaling).
+  const naLimit = m.buildMemLimitFields(null, null, null);
+  check('unavailable app-memory-limit readings are explicit na, never 0',
+    naLimit['rss_limit_kb'] === 'na' && naLimit['vss_limit_kb'] === 'na' &&
+    naLimit['vm_heap_limit_kb'] === 'na' && Object.keys(naLimit).length === 3);
+  const limitFields = m.buildMemLimitFields('262144', '4194304', '524288');
+  check('the app-memory-limit fields keep the platform KiB text unchanged',
+    limitFields['rss_limit_kb'] === '262144' && limitFields['vss_limit_kb'] === '4194304' &&
+    limitFields['vm_heap_limit_kb'] === '524288');
+  check('a limit is already KiB: the text is validated, never divided',
+    m.MAX_LIMIT_DIGITS === 20 && m.limitKiBText('0') === '0' &&
+    m.limitKiBText('262144') === '262144' && m.limitKiBText('1'.repeat(20)) === '1'.repeat(20) &&
+    m.limitKiBText(null) === null && m.limitKiBText('') === null &&
+    m.limitKiBText('-1') === null && m.limitKiBText(' 1024') === null &&
+    m.limitKiBText('1.5e+6') === null && m.limitKiBText('1024k') === null &&
+    m.limitKiBText('1'.repeat(21)) === null);
   const vmFields = m.buildVmMemFields('16384', '4096', '20480', '12288', '8191',
     '77', '512', '102400', '51199');
   check('the mem_vm fields keep their own units (KB / ms / counts), no arithmetic here',
@@ -582,20 +600,26 @@ try {
     m.statNumberText(Infinity) === null && m.statNumberText(-Infinity) === null &&
     m.statNumberText(-1) === null);
   const vmRecord = m.buildRecord(ts, 42, 'vpn', 'mem_vm',
-    m.buildVmMemFields('16384', '4096', '20480', '12288', '8191', '77', '512', '102400', '51199'),
+    m.mergeFields(
+      m.buildVmMemFields('16384', '4096', '20480', '12288', '8191', '77', '512',
+        '102400', '51199'),
+      m.buildMemLimitFields('262144', '4194304', '524288')),
     true);
-  check('exact mem_vm record: VM heap + native heap + GC, one bounded line',
+  check('exact mem_vm record: VM heap + native heap + GC + the app memory limit',
     vmRecord === 'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=mem_vm ' +
       'gc_alloc_kb=102400 gc_count=77 gc_freed_kb=51199 gc_time_ms=512 ' +
       'native_heap_alloc_kb=12288 native_heap_free_kb=8191 native_heap_kb=20480 ' +
-      'vm_array_kb=4096 vm_total_heap_kb=16384\n',
+      'rss_limit_kb=262144 vm_array_kb=4096 vm_heap_limit_kb=524288 ' +
+      'vm_total_heap_kb=16384 vss_limit_kb=4194304\n',
     vmRecord);
   check('the fully populated mem_vm stays inside the 512-char line bound',
     vmRecord.length < m.MAX_LINE_CHARS && vmRecord.indexOf('~') < 0,
     `len=${vmRecord.length}`);
   const vmWide = m.buildRecord(ts, 42, 'vpn', 'mem_vm',
-    m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
-      String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText), true);
+    m.mergeFields(
+      m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
+        String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText),
+      m.buildMemLimitFields(bigMaxText, bigMaxText, bigMaxText)), true);
   check('even the widest reachable mem_vm (every field at its own bound) fits 512',
     vmWide.length < m.MAX_LINE_CHARS && vmWide.indexOf('~') < 0, `len=${vmWide.length}`);
   const joinedWide = m.buildRecord(ts, 42, 'vpn', 'mem_detail',
@@ -603,17 +627,23 @@ try {
       m.buildNativeMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText),
       m.buildRustAllocFields('{"bytes":18446744073709551615,"peak":18446744073709551615,' +
         '"allocs":18446744073709551615,"frees":18446744073709551615}')),
-      m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
-        String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText)), true);
+      m.mergeFields(
+        m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
+          String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText),
+        m.buildMemLimitFields(bigMaxText, bigMaxText, bigMaxText))), true);
   check('the mem_detail keys plus the mem_vm keys exceed 512 (hence the third line)',
     joinedWide.length === m.MAX_LINE_CHARS && joinedWide.endsWith('~\n') &&
     joinedWide.indexOf('~') === joinedWide.length - 2,
     `len=${joinedWide.length}`);
   check('the mem_vm keys are internal-only (a public event cannot carry them)',
-    Object.keys(naVm).every((k: string) => m.INTERNAL_FIELD_KEYS.indexOf(k) >= 0 &&
-      m.PUBLIC_FIELD_KEYS.indexOf(k) < 0));
+    Object.keys(naVm).concat(Object.keys(naLimit)).every((k: string) =>
+      m.INTERNAL_FIELD_KEYS.indexOf(k) >= 0 && m.PUBLIC_FIELD_KEYS.indexOf(k) < 0));
   check('a public event cannot smuggle a mem_vm key through',
     m.buildRecord(ts, 42, 'ui', 'ui_ok', { gc_count: '1', vm_array_kb: '2' }, false) ===
+    'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok\n');
+  check('a public event cannot smuggle an app-memory-limit key through',
+    m.buildRecord(ts, 42, 'ui', 'ui_ok',
+      { rss_limit_kb: '1', vss_limit_kb: '2', vm_heap_limit_kb: '3' }, false) ===
     'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok\n');
 
   // ---- bounded queue -------------------------------------------------------
@@ -733,13 +763,30 @@ try {
     runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_GC_COUNT)') &&
     runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_GC_TIME)') &&
     runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_BYTES_ALLOCATED)') &&
-    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_BYTES_FREED)'));
+    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_BYTES_FREED)') &&
+    runtimeCode.includes('hidebug.getAppMemoryLimit()'));
   check('runtime spells no GC item name and converts bytes through the pure core',
     runtimeCode.indexOf('ark.gc.') < 0 &&
     runtimeCode.includes('bytesToKiBText(hidebug.getNativeHeapSize().toString())') &&
     runtimeCode.includes('bytesToKiBText(hidebug.getVMRuntimeStat(GC_STAT_BYTES_ALLOCATED).toString())') &&
     runtimeCode.includes('statNumberText(hidebug.getVMRuntimeStat(GC_STAT_GC_COUNT))') &&
     runtimeCode.includes('buildVmMemFields(vmTotalHeapKb, vmArrayKb, nativeHeapKb, nativeHeapAllocKb,'));
+  // The app memory limit (analysis report extra measurement (a)): ONE reader for
+  // both records, the platform's KiB bigints validated (never scaled) by the
+  // pure core, and the once-per-process-start log ON the diag_start record.
+  check('the app memory limit is read through the core and logged once per process start',
+    runtimeCode.includes('limitKiBText(limit.rssLimit.toString())') &&
+    runtimeCode.includes('limitKiBText(limit.vssLimit.toString())') &&
+    runtimeCode.includes('limitKiBText(limit.vmHeapLimit.toString())') &&
+    runtimeCode.includes('buildMemLimitFields(rssLimitKb, vssLimitKb, vmHeapLimitKb)') &&
+    runtimeCode.includes("emitInternal('diag_start', this.readMemLimit(false))") &&
+    runtimeCode.includes('this.readMemLimit(true)') &&
+    !/rssLimit\s*[/+*-]/.test(runtimeCode) && !/[/+*-]\s*limit\.rssLimit/.test(runtimeCode));
+  check('the mem-limit absence is reported by the detail leg only (the start leg is silent)',
+    runtimeCode.split('this.readMemLimit(false)').length === 2 &&
+    runtimeCode.split('this.readMemLimit(true)').length === 2 &&
+    runtimeCode.indexOf("this.noteDetailUnavailable('mem-limit')") >
+      runtimeCode.indexOf('private readMemLimit(noteFailure: boolean): DiagFields {'));
 
   // ---- decodeAscii: block decoding is identical to the per-byte loop -------
   // The runtime decodes its fixed 16 KiB buffer itself (no @ohos.util — pinned
@@ -830,10 +877,12 @@ try {
   let nextFd = 1;
   let failOpen = false;
   let memThrow = false;
-  // The two synchronous mem_vm legs that can fail on their own: the native
-  // (mallinfo) heap and the ArkTS GC statistics.
+  // The synchronous mem_vm legs that can fail on their own: the native
+  // (mallinfo) heap, the ArkTS GC statistics and the platform memory limit
+  // (getAppMemoryLimit, API >= 12).
   let nativeHeapThrows = false;
   let gcStatThrows = false;
+  let memLimitThrows = false;
   let procStatusText = STATUS_FIXTURE;
   let procMeminfoText = MEMINFO_FIXTURE;
   let denyProcOpen = ''; // exact proc path whose open throws EACCES
@@ -1016,6 +1065,16 @@ try {
       if (nativeMemThrows) { throw new Error('unsupported'); }
       return { pss: 204800n, vss: 4194304n, rss: 200000n, sharedDirty: 8000n,
         privateDirty: 120000n, sharedClean: 4096n, privateClean: 64000n };
+    },
+    // API >= 12: the platform's own per-process memory limit, in KILOBYTES
+    // (rssLimit 256 MiB / vssLimit 4 GiB / vmHeapLimit 512 MiB). The values are
+    // already KiB, so any scaling in the module would be visible as a wrong
+    // record. `memLimitThrows` is its OWN latch so the graceful-absence path can
+    // be driven without taking the other mem_vm legs down with it.
+    getAppMemoryLimit: (): Record<string, bigint> => {
+      if (memLimitThrows) { throw new Error('unsupported'); }
+      return { rssLimit: 262144n, vssLimit: 4194304n, vmHeapLimit: 524288n,
+        vmTotalHeapSize: 1048576n };
     }
   };
   (globalThis as unknown as { __diagFake: unknown }).__diagFake =
@@ -1089,6 +1148,20 @@ try {
     a1.join(' ~ '));
   check('ui run: every record carries ts/pid/role/event',
     a1.every((l: string) => RECORD_RE.test(l)));
+  // 2026-10-12 (analysis report extra measurement (a)): the platform's own
+  // per-process memory limit is logged ONCE PER PROCESS START, on the run's
+  // first record — hidebug.getAppMemoryLimit()'s three KiB fields, no scaling.
+  const startFields = fieldsOf(a1[0]);
+  check('ui run: diag_start carries the app memory limit once per process start',
+    startFields.get('rss_limit_kb') === '262144' &&
+    startFields.get('vss_limit_kb') === '4194304' &&
+    startFields.get('vm_heap_limit_kb') === '524288' &&
+    a1[0].length < m.MAX_LINE_CHARS,
+    a1[0]);
+  check('ui run: the limit keys never ride the per-tick mem_sample line',
+    fieldsOf(a1[1]).get('rss_limit_kb') === undefined &&
+    fieldsOf(a1[1]).get('vss_limit_kb') === undefined &&
+    fieldsOf(a1[1]).get('vm_heap_limit_kb') === undefined, a1[1]);
   const sampleFields = fieldsOf(a1[1]);
   check('ui run: memory units and scope are explicit KB fields',
     sampleFields.get('rss_kb') === '45120' && sampleFields.get('swap_kb') === '3' &&
@@ -1671,6 +1744,10 @@ try {
   check('mem_vm: the GC counters are counts/ms and the two byte counters are floored KiB',
     mdVm.get('gc_count') === '77' && mdVm.get('gc_time_ms') === '512' &&
     mdVm.get('gc_alloc_kb') === '102400' && mdVm.get('gc_freed_kb') === '51199', mdVms()[0]);
+  check('mem_vm: the app memory limit rides every mem_vm record, in KiB as answered',
+    mdVm.get('rss_limit_kb') === '262144' && mdVm.get('vss_limit_kb') === '4194304' &&
+    mdVm.get('vm_heap_limit_kb') === '524288' &&
+    fieldsOf(mdLog()[0]).get('rss_limit_kb') === '262144', mdVms()[0]);
   check('mem_vm: the whole mem_vm record stays inside the 512-char bound',
     mdVms()[0].length < m.MAX_LINE_CHARS && mdVms()[0].indexOf('~') < 0 &&
     /^ts=\d{4}-\d{2}-\d{2}T[\d:.]+Z pid=\d+ role=ui event=mem_vm/.test(mdVms()[0]),
@@ -1683,7 +1760,8 @@ try {
     mdSamples()[9]);
   check('detail: the three records of a detail tick are disjoint (no key on the wrong line)',
     mdDetail.get('gc_count') === undefined && mdDetail.get('native_heap_kb') === undefined &&
-    mdDetail.get('vm_array_kb') === undefined && mdVm.get('pss_kb') === undefined &&
+    mdDetail.get('vm_array_kb') === undefined && mdDetail.get('rss_limit_kb') === undefined &&
+    mdVm.get('pss_kb') === undefined &&
     mdVm.get('rust_heap_kb') === undefined, mdVms()[0]);
   check('detail: every emitted line stays inside the 512-char bound, unmarked',
     mdLog().every((l: string): boolean => l.length < m.MAX_LINE_CHARS && l.indexOf('~') < 0),
@@ -1890,6 +1968,54 @@ try {
   memThrow = false;
   check('mem_vm failure: the run still closes clean after the mem_vm failures',
     /state=clean/.test(fileText(join(dirMVV, 'netbird-diag-ui.marker'))));
+
+  // ---- ML: an absent getAppMemoryLimit is `na` in BOTH places, no crash -----
+  // API 12 may be missing on an older build. The start-time read must render
+  // `na` on diag_start WITHOUT consuming the run's once-per-run detail report
+  // (it runs before any detail tick), and the detail-tick leg then reports the
+  // failure once with its own stage label — while every other mem_vm leg keeps
+  // answering.
+  const dirML = join(dir, 'ml');
+  const mlWarnBefore = hilogLines.filter((l: string): boolean =>
+    l.includes('DIAG_DETAIL_UNAVAILABLE')).length;
+  memLimitThrows = true;
+  const runML = await newRuntime('ml');
+  runML.start(dirML, 'ui');
+  await settle();
+  const mlLog = (): string[] => linesOf(join(dirML, 'netbird-ui.log'));
+  check('mem-limit absence: diag_start renders the three limit keys as na, never 0',
+    fieldsOf(mlLog()[0]).get('rss_limit_kb') === 'na' &&
+    fieldsOf(mlLog()[0]).get('vss_limit_kb') === 'na' &&
+    fieldsOf(mlLog()[0]).get('vm_heap_limit_kb') === 'na', mlLog()[0]);
+  check('mem-limit absence: the start-time read is silent (no failure report yet)',
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length === mlWarnBefore,
+    String(hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length));
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const mlVms = mlLog().filter((l: string): boolean => l.includes('event=mem_vm'));
+  check('mem-limit absence: the mem_vm record is still emitted, limits na, other legs live',
+    mlVms.length === 1 && fieldsOf(mlVms[0]).get('rss_limit_kb') === 'na' &&
+    fieldsOf(mlVms[0]).get('vss_limit_kb') === 'na' &&
+    fieldsOf(mlVms[0]).get('vm_heap_limit_kb') === 'na' &&
+    fieldsOf(mlVms[0]).get('gc_count') === '77' &&
+    fieldsOf(mlVms[0]).get('native_heap_kb') === '20480' &&
+    fieldsOf(mlVms[0]).get('vm_total_heap_kb') === '16384', mlVms.join(' ~ '));
+  check('mem-limit absence: it is said ONCE, with its own stage label',
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length === mlWarnBefore + 1 &&
+    hilogLines.some((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE') && l.includes('mem-limit')),
+    String(hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length));
+  runML.stop();
+  await settle();
+  memLimitThrows = false;
+  check('mem-limit absence: the run still closes clean',
+    /state=clean/.test(fileText(join(dirML, 'netbird-diag-ui.marker'))));
 
   // ---- S: the system-event watcher's ingress into the same bounded writer --
   // The UI ability passes appendSystemEvent as NetBirdSystemEvents' sink, so a
