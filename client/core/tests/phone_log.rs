@@ -477,6 +477,80 @@ fn rate_budget_bounds_records_per_window_and_recovers_next_window() {
     assert!(text.contains(marker), "the recovered line was not written: {text}");
 }
 
+// The startup gap of the 0.0.26 device runs: the ordinary budget is spent
+// inside the first seconds of a connect and swallows lifecycle/selection
+// EVIDENCE lines (103 refusals in 6 s; one peer's `N5_ICE|selected-pair`
+// among them). The marker lines must now be admitted by their own, small
+// window while the ordinary budget keeps refusing ordinary lines — and the
+// aggregate is still bounded (the priority allowance is a fixed budget too,
+// pinned by the unit tests next to the windows themselves).
+#[test]
+fn priority_evidence_lines_are_admitted_when_the_ordinary_budget_is_spent() {
+    let _guard = lock();
+    let dir = Dir::new("priority");
+    let path = dir.file("netbird-vpn.log");
+    // The ordinary budget is spent after ONE tiny line per window; the priority
+    // (marker) allowance keeps its production default, so the only brake that
+    // can touch the evidence lines below is the priority budget itself.
+    phone_log::configure_with(&path, &options_with_rate(2 * 1024 * 1024, 4, 4096, 1, 1)).unwrap();
+
+    // (1) The SHELL entrance (`append_shell` = the ArkTS bridge) routes a
+    // NON-evidence record to the ORDINARY window: as the window's first line it
+    // fits and is persisted ...
+    let shell_ordinary = "ts=1 pid=2 event=vpn_net_switch detail=netId=7";
+    phone_log::append_shell(shell_ordinary);
+    let first = phone_log::stats();
+    assert_eq!(first.accepted, 1, "the ordinary window must admit its first line: {first:?}");
+    assert_eq!(first.rate_suppressed, 0, "{first:?}");
+
+    // (2) ... and the ordinary burst behind it is refused.
+    for i in 0..20 {
+        phone_log::append(&format!("ORD|i={i}|pad={}", "o".repeat(40)));
+    }
+    let during = phone_log::stats();
+    assert!(during.rate_suppressed > 0, "the ordinary budget must refuse the burst: {during:?}");
+    assert_eq!(during.dropped, during.rate_suppressed, "the queue is not the brake here");
+
+    // (3) Every lifecycle/selection marker class still gets through — through
+    // the CORE entrance (`append_evidence`, what `hilog::emit_evidence` calls)
+    // for the core lines, and through the SHELL entrance (`append_shell`) for
+    // the shell's `VPN_*` lifecycle record.
+    let core_evidence = [
+        "N5_ICE|selected-pair|192.168.50.9:34486|endpoint_changed=true|peer=t7tldQA3",
+        "N6_WG_DEVICE|session-established|peer=t7tldQA3",
+        "N13_WG|carrier->direct|ice-selected-path|peer=t7tldQA3",
+        "connector: state -> connected",
+        "connector: login attempt=login result=ok",
+    ];
+    for line in core_evidence {
+        phone_log::append_evidence(line);
+    }
+    let shell_evidence = "ts=1 pid=2 event=vpn_protect_begin detail=VPN_PROTECT_BEGIN:stage=protect";
+    phone_log::append_shell(shell_evidence);
+    let mut evidence: Vec<&str> = core_evidence.to_vec();
+    evidence.push(shell_evidence);
+
+    let after = phone_log::stats();
+    assert_eq!(
+        after.rate_suppressed, during.rate_suppressed,
+        "no evidence line may be refused while the ordinary budget is spent: {after:?}"
+    );
+    assert_eq!(after.accepted, during.accepted + evidence.len() as u64, "{after:?}");
+
+    assert!(phone_log::flush(Duration::from_secs(5)), "flush timed out");
+    assert!(phone_log::shutdown(Duration::from_secs(5)));
+    let text = read_segments(&path, 4);
+    for line in evidence {
+        assert!(text.contains(line), "evidence line lost: {line}\n{text}");
+    }
+    // The ordinary side of the SAME window was really refused (this is the
+    // budget that swallowed the device's nomination record) — while the one
+    // ordinary line that got in first is the shell record from (1).
+    let ordinary = parse_records(&text).iter().filter(|r| r.line.starts_with("ORD|")).count();
+    assert!(ordinary < 20, "the ordinary burst must have been refused: {ordinary}");
+    assert!(text.contains(shell_ordinary), "the admitted shell record must land: {text}");
+}
+
 #[test]
 fn secrets_are_redacted_useful_endpoints_survive() {
     let _guard = lock();

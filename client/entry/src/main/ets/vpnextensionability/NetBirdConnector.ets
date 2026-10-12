@@ -291,6 +291,28 @@ export interface CoreIcePeerEntry {
   last_error: ConnectorErrorClass | null;
 }
 
+// The shared ICE/WG mux counters (core `ice_mux` tail, appended AFTER
+// `ice_peers` — every pre-existing field keeps its position; added 0.0.26 and
+// never wired into the published document until 0.0.27, see
+// NetBirdUiModel.buildIceMux). The core's `ice_mux` is `null` when there is NO
+// mux at all or its state lock was busy at the sample instant — this document's
+// own "unknown", never a fabricated zero — and an object otherwise. Counter
+// names are kept verbatim from `client/core/src/ice_mux.rs` (`MuxStats`):
+// `reads`, the srflx-cache `xor_hits`/`xor_misses`/`xor_expired`/`xor_filled`,
+// and the demux drops `overlay_dropped`/`stun_unknown`/`data_unknown`/
+// `queue_dropped`. Counters only: no peer key, fd, address or payload.
+export interface CoreIceMuxStats {
+  reads: number;
+  xor_hits: number;
+  xor_misses: number;
+  xor_expired: number;
+  xor_filled: number;
+  overlay_dropped: number;
+  stun_unknown: number;
+  data_unknown: number;
+  queue_dropped: number;
+}
+
 // Lenient shell-side view of the `relay_advertised` section (see
 // parseRelayAdvertised): `advertised` is the USABLE verdict (valid string
 // urls present), `malformed` marks a type anomaly for the grep-able hint —
@@ -360,6 +382,13 @@ export interface ConnectorStatusResult {
   // UI must never invent a state, an endpoint or a role. Absent on an older
   // core. Public material only (see CoreIcePeerEntry).
   ice_peers?: CoreIcePeerEntry[] | null;
+  // 0.0.26: the shared ICE/WG mux counters (core `ice_mux`, the TAIL of the
+  // status document, after `ice_peers`). `null` = no mux at all, or the mux
+  // state lock was busy at the sample instant (the core's own "unknown" —
+  // NEVER a set of zero counters); otherwise one `CoreIceMuxStats`. Absent on
+  // an older core. The published document carries the SAME distinction (see
+  // NetBirdUiModel.buildIceMux). Counters only.
+  ice_mux?: CoreIceMuxStats | null;
 }
 
 // One managed route from core.connector_network_config (canonical masked

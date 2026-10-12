@@ -750,13 +750,28 @@ pub(crate) fn peer_short(key: &str) -> String {
 /// 落配成功**的地址相同（物理网络换代后重新走同一条对端路径，真机 0.0.25
 /// §5.4 的 `HkPMIwdu` 就是这种形态）；`true` = 真的换了远端 endpoint。
 ///
-/// 公开运行材料：ip + port + 一个布尔，不含任何密钥/凭据。
-pub(crate) fn selected_pair_line(addr: [u8; 4], port: u16, endpoint_changed: bool) -> String {
+/// 2026-10-12（diag/0027 gap 2，真机 0.0.26 报告 §B4/§5.7）：行尾追加
+/// `peer=<公钥前8位>`。0.0.26 这行只有远端 `ip:port`——同一毫秒多个对端提名
+/// 时（真机上就出现过两条同毫秒的行）只能靠地址反查归属。与 `N5c_ICE`/
+/// `N13_WG`/`session-established` 行**同一个** [`peer_short`] 规则，且**追加
+/// 在行尾**：既有 `ip:port` + `endpoint_changed=` 前缀逐字不变，沿用 0050
+/// §8 item 2 给 `session-established`/`session-expired` 补 `peer=` 时的尾追加
+/// 纪律。
+///
+/// 公开运行材料：ip + port + 一个布尔 + 公钥字母数字前 8 位，不含任何密钥/
+/// 凭据。
+pub(crate) fn selected_pair_line(
+    peer: &str,
+    addr: [u8; 4],
+    port: u16,
+    endpoint_changed: bool,
+) -> String {
     format!(
-        "N5_ICE|selected-pair|{}:{}|endpoint_changed={}",
+        "N5_ICE|selected-pair|{}:{}|endpoint_changed={}|peer={}",
         std::net::Ipv4Addr::from(addr),
         port,
-        endpoint_changed
+        endpoint_changed,
+        peer_short(peer)
     )
 }
 
@@ -2438,7 +2453,15 @@ impl PeerIceOrchestrator {
                         // 所以「物理网络换代后沿用了同一个远端地址」这条路径
                         // 也有独立一行（真机 0.0.25 §5.4 的 `HkPMIwdu`）。
                         let endpoint_changed = peer.last_applied_endpoint != Some((addr, remote.port));
-                        crate::hilog::emit(&selected_pair_line(addr, remote.port, endpoint_changed));
+                        // 2026-10-12（diag/0027 item 3）：提名行是**证据**，
+                        // 走 `emit_evidence`（phone log 的小额优先预算）——
+                        // 0.0.26 真机上正是这一行在启动突发里被普通预算拒收。
+                        crate::hilog::emit_evidence(&selected_pair_line(
+                            &peer.key,
+                            addr,
+                            remote.port,
+                            endpoint_changed,
+                        ));
                         // N11：WG 骑选中连接 —— 先把选中 pair 的本地 socket
                         // dup 进设备做 egress，再落配 endpoint（落配即触发
                         // 握手，握手必须从选中路径发出）。attach 失败 =
@@ -4775,15 +4798,23 @@ mod tests {
     /// 0.0.26 gap 4（真机 0.0.25 §5.4）：提名证据行的格式——远端 `ip:port`
     /// 之后追加 `endpoint_changed`，所以「重新提名到同一个远端地址」与
     /// 「真的换了远端路径」在日志里可区分，而不是两条一模一样的行。
+    ///
+    /// 2026-10-12（diag/0027 gap 2）：行尾再追加 `peer=<公钥前8位>`，既有
+    /// 两段逐字不变（尾追加，同一毫秒多个对端提名时可归因）。
     #[test]
     fn selected_pair_line_marks_an_unchanged_endpoint() {
         assert_eq!(
-            selected_pair_line([47, 251, 179, 205], 51820, false),
-            "N5_ICE|selected-pair|47.251.179.205:51820|endpoint_changed=false"
+            selected_pair_line("HkPMIwduFyLw4PSBg1hjr+9/x0=", [47, 251, 179, 205], 51820, false),
+            "N5_ICE|selected-pair|47.251.179.205:51820|endpoint_changed=false|peer=HkPMIwdu"
         );
         assert_eq!(
-            selected_pair_line([192, 168, 50, 8], 37538, true),
-            "N5_ICE|selected-pair|192.168.50.8:37538|endpoint_changed=true"
+            selected_pair_line("HkPMIwduFyLw4PSBg1hjr+9/x0=", [192, 168, 50, 8], 37538, true),
+            "N5_ICE|selected-pair|192.168.50.8:37538|endpoint_changed=true|peer=HkPMIwdu"
+        );
+        // `peer_short` 只留字母数字：`+`/`/`/`=` 跳过，短/空 key 不 panic。
+        assert_eq!(
+            selected_pair_line("", [10, 0, 0, 1], 1, false),
+            "N5_ICE|selected-pair|10.0.0.1:1|endpoint_changed=false|peer="
         );
     }
 }

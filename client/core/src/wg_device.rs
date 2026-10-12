@@ -217,7 +217,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use base64::Engine as _;
 
 use crate::connector::{WgPeerApplier, WgPeerEntry};
-use crate::hilog::emit;
+use crate::hilog::{emit, emit_evidence};
 use crate::sys;
 use crate::tun::TunFd;
 use crate::wg::{Tunnel, OP_DONE, OP_ERROR, OP_NETWORK, OP_TUN_V4, OP_TUN_V6};
@@ -1913,7 +1913,9 @@ impl WgDevice {
         };
         let replaced = self.peers[idx].carrier.is_some();
         self.peers[idx].carrier = Some(carrier);
-        emit(&carrier_attach_line(
+        // 2026-10-12（diag/0027 item 3）：载体切换行是**证据**（每对端每次
+        // 切换一行），走 phone log 的小额优先预算，不再与 ICE 风暴争普通预算。
+        emit_evidence(&carrier_attach_line(
             self.peers[idx]
                 .carrier
                 .as_ref()
@@ -1937,7 +1939,7 @@ impl WgDevice {
             // the bearer source resets with the carrier: the next dispatch
             // (direct OR a re-attached carrier) counts as a fresh transition
             self.peers[idx].on_carrier = false;
-            emit(&carrier_detach_line(pub_key_b64));
+            emit_evidence(&carrier_detach_line(pub_key_b64));
             true
         } else {
             false
@@ -2199,7 +2201,7 @@ impl WgDevice {
                 self.peers[idx].expired = false;
                 self.peers[idx].session_established_ms = now_ms;
                 self.peers[idx].first_init_ms = None; // campaign done
-                emit(&session_established_line(&self.peers[idx].key_b64));
+                emit_evidence(&session_established_line(&self.peers[idx].key_b64));
                 // managed-route overlay: a live session re-ranks this peer in
                 // every HA set it belongs to (may switch nets onto it)
                 self.rebuild_route_overlay("session-established");
@@ -2371,7 +2373,7 @@ impl WgDevice {
                     >= cfg.session_max_ms
             {
                 self.peers[idx].expired = true;
-                emit(&session_expired_line(&self.peers[idx].key_b64));
+                emit_evidence(&session_expired_line(&self.peers[idx].key_b64));
                 // managed-route overlay: the peer just failed — fail its nets
                 // over to another HA candidate (if any)
                 self.rebuild_route_overlay("session-expired");
@@ -2510,7 +2512,7 @@ impl WgDevice {
             if self.peers[idx].on_carrier {
                 self.peers[idx].on_carrier = false;
                 self.stats.direct_restores += 1;
-                emit(&carrier_to_direct_line(&self.peers[idx].key_b64));
+                emit_evidence(&carrier_to_direct_line(&self.peers[idx].key_b64));
             }
             let ep = self.peers[idx].endpoint.expect("endpoint checked above");
             let fd = self.egress_fd_of(idx);
@@ -2519,7 +2521,7 @@ impl WgDevice {
         if !self.peers[idx].on_carrier {
             self.peers[idx].on_carrier = true;
             self.stats.carrier_takeovers += 1;
-            emit(&direct_to_carrier_line(&self.peers[idx].key_b64));
+            emit_evidence(&direct_to_carrier_line(&self.peers[idx].key_b64));
         }
         let Some(carrier) = self.peers[idx].carrier.clone() else {
             // routed but never given any path: fail-closed, counted

@@ -40,10 +40,39 @@
 //! to the whole byte budget, so one oversized line consumes the window instead
 //! of being refused for ever) — the charge is therefore an ingress-side
 //! conservative measure and no buffer is allocated for a line that will be
-//! refused. The default budget is wide enough for ordinary troubleshooting:
-//! one default-cap (1024-char, ≤ 4 KiB UTF-8) record still fits, and the rare
-//! memory/lifecycle record is far below it — no separate high-priority API is
-//! needed.
+//! refused. The default budget carries one default-cap (1024-char, ≤ 4 KiB
+//! UTF-8) record whole, and the rare memory/lifecycle record is far below it,
+//! but it does NOT carry a real STARTUP burst: on the 0.0.26 device runs the
+//! first seconds of a connect refused 5.6–16 % of the lines (103 refusals
+//! inside the first 6 s, one peer's `N5_ICE|selected-pair` among them) because
+//! the bounded lifecycle/selection evidence markers were competing with the
+//! ICE/route storm for the same budget.
+//!
+//! ## Priority admission (evidence markers survive an exhausted budget)
+//!
+//! The lifecycle/selection EVIDENCE markers named by [`PRIORITY_MARKERS`] are
+//! exactly the lines 0.0.26 lost to that burst, and the ones whose absence
+//! cannot be reconstructed afterwards. They enter through [`append_evidence`],
+//! which offers a SEPARATE, small per-second window
+//! ([`DEFAULT_PRIORITY_RATE_BYTES_PER_SEC`] /
+//! [`DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC`]) FIRST and falls back to the
+//! ordinary one, so evidence is admitted whenever EITHER budget has room.
+//!
+//! Two entrances, deliberately: the core's own emitters know their markers and
+//! call [`append_evidence`] directly (`hilog::emit_evidence`) — the storm lines
+//! on the same hot path ([`append`]) pay NOTHING for this, no scan at all. The
+//! shell bridge ([`append_shell`]) receives opaque record TEXT built by the
+//! ArkTS diagnostics writer, so that one low-rate entry (shell milestones are
+//! per-event, never per-packet) classifies the same closed marker set.
+//!
+//! Nothing else changes: the ordinary budget is NOT widened (a producer storm
+//! is capped exactly as before) and the priority allowance is itself a FIXED
+//! budget (a marker storm is capped too). Per window the tee therefore admits
+//! at most `ordinary + priority` charged bytes / records — the overall bound is
+//! the sum of two constants, never unbounded and never carried over. A line is
+//! charged to at most one window, both attempts share one timestamp, and the
+//! two windows turn over lazily and independently, exactly like the single
+//! window below.
 //!
 //! The window is reset LAZILY by the first append of the next second: there is
 //! no timer, no background thread and nothing runs while the tee is idle. An
@@ -174,6 +203,14 @@ pub const DEFAULT_RATE_BYTES_PER_SEC: u64 = 8192;
 /// rate for a flood of tiny records while still carrying an ordinary
 /// startup/lifecycle burst (tens of lines inside one second) whole.
 pub const DEFAULT_RATE_RECORDS_PER_SEC: u64 = 64;
+/// Priority admission budget in charged bytes per window: the separate, small
+/// allowance that carries the [`PRIORITY_MARKERS`] evidence lines when the
+/// ordinary budget is exhausted (half the ordinary byte budget — ~25–40
+/// marker lines, still a FIXED bound, so a marker storm cannot exceed it).
+pub const DEFAULT_PRIORITY_RATE_BYTES_PER_SEC: u64 = 4096;
+/// Priority admission budget in records per window (half the ordinary record
+/// budget). The observed startup marker burst is ~10 lines inside one second.
+pub const DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC: u64 = 32;
 /// Smallest accepted segment cap (tests use tiny caps to force rotation).
 pub const MIN_MAX_BYTES: u64 = 1024;
 /// Largest accepted segment cap.
@@ -379,19 +416,72 @@ impl RateWindow {
     }
 }
 
-/// Resolved admission budget (see [`Options`]).
+/// Resolved admission budget (see [`Options`]). The same shape serves the
+/// ordinary window ([`Options::rate_bytes_per_sec`] /
+/// [`Options::rate_records_per_sec`]) and the fixed priority window
+/// ([`DEFAULT_PRIORITY_RATE_BYTES_PER_SEC`] /
+/// [`DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC`]).
 #[derive(Clone, Copy, Debug, Default)]
 struct RateLimit {
     bytes: u64,
     records: u64,
 }
 
+/// The closed set of LIFECYCLE/SELECTION EVIDENCE markers that are offered the
+/// separate, small priority window first (see the module docs "Priority
+/// admission"). One entry = one substring of the line's text. Each name marks a
+/// line the 0.0.26 device runs proved is emitted once per event (never per
+/// packet), is the ONLY evidence of that event, and cannot be reconstructed
+/// from anything else once it is lost:
+///
+/// * `VPN_` — the shell lifecycle markers (`VPN_CREATE_BEGIN/RESOLVED/REJECTED`,
+///   `VPN_CONNECTION_CREATED`, `VPN_PROTECT_BEGIN/RESOLVED/FAIL_CLOSED`,
+///   `VPN_ICE_MUX_ARMED/FAIL`, `VPN_DESTROY_…`), which ride the persisted
+///   record as `detail=VPN_…`;
+/// * `N5_ICE|selected-pair` — the per-peer ICE pair nomination (the `N5c_ICE` /
+///   `N5d_ICE` check/gather lines are storms and deliberately stay ordinary);
+/// * `N6_WG_DEVICE|session-established` / `session-expired` — the WG session
+///   lifecycle (one line per session);
+/// * the four `N13_WG` carrier transitions (direct⇄carrier, attach/detach) —
+///   `N13_WG_FEED|…` and the bounded `N13_WG|carrier-reject` lines are NOT
+///   transitions and stay ordinary;
+/// * `connector: state ->` and `connector: login` — the management state
+///   machine and every login outcome (attempt/ok/needs-login/fatal/exhausted).
+///
+/// Deliberately absent: every high-rate producer (`N5c_ICE|gather-stun`,
+/// `N5d_ICE|check-rx`, `N11_ICE|failed`, relay-lane retries, `N5e_ICE|mux`),
+/// which must keep competing for the ordinary budget only.
+pub const PRIORITY_MARKERS: &[&str] = &[
+    "VPN_",
+    "N5_ICE|selected-pair",
+    "N6_WG_DEVICE|session-established",
+    "N6_WG_DEVICE|session-expired",
+    "N13_WG|carrier-attach",
+    "N13_WG|carrier-detach",
+    "N13_WG|carrier->direct",
+    "N13_WG|direct->carrier",
+    "connector: state ->",
+    "connector: login",
+];
+
+/// Whether `line` carries one of the [`PRIORITY_MARKERS`]. PURE (no clock, no
+/// shared state) and pinned by unit tests. It scans the text, so the CORE never
+/// calls it on its hot path: the core's emitters use [`append_evidence`]
+/// directly and the shell bridge ([`append_shell`]) is the only caller.
+pub fn is_evidence(line: &str) -> bool {
+    PRIORITY_MARKERS.iter().any(|marker| line.contains(marker))
+}
+
 struct Logger {
     tx: SyncSender<Msg>,
     counters: Arc<Counters>,
-    /// Admission gate, checked BEFORE any allocation and before the queue.
+    /// Admission gates, checked BEFORE any allocation and before the queue.
+    /// `rate` is the ordinary window every line walks first; `priority_rate` is
+    /// the small window [`append_evidence`] tries first (see the module docs).
     rate: Mutex<RateWindow>,
+    priority_rate: Mutex<RateWindow>,
     limits: RateLimit,
+    priority_limits: RateLimit,
     path: String,
     session: String,
     cfg: Options,
@@ -514,7 +604,12 @@ pub fn configure_with(path: &str, opts: &Options) -> Result<(), &'static str> {
         tx,
         counters,
         rate: Mutex::new(RateWindow::default()),
+        priority_rate: Mutex::new(RateWindow::default()),
         limits: RateLimit { bytes: rate_bytes_per_sec, records: rate_records_per_sec },
+        priority_limits: RateLimit {
+            bytes: DEFAULT_PRIORITY_RATE_BYTES_PER_SEC,
+            records: DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC,
+        },
         path: path.to_string(),
         session,
         cfg,
@@ -529,21 +624,58 @@ pub fn configure_with(path: &str, opts: &Options) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Tee one funnel line into the phone log (non-blocking; callable from any
-/// thread, including the network/ArkTS caller).
+/// Tee one ORDINARY funnel line into the phone log (non-blocking; callable from
+/// any thread, including the network/ArkTS caller). This is the hot path of the
+/// ICE/route storm and does exactly one admission check — the ordinary
+/// per-second budget — with no text scan.
 ///
-/// Disk I/O never happens here. The line first passes the per-second admission
-/// budget (one short lock, no allocation: a refused line costs nothing more),
-/// then it is redacted + capped at ingress and handed to the bounded queue with
-/// `try_send`. A line refused by the budget or by a full queue is dropped and
-/// counted in `stats().dropped` (the budget part also in `rate_suppressed`);
-/// the caller is never blocked.
+/// Disk I/O never happens here. An admitted line is redacted + capped at ingress
+/// and handed to the bounded queue with `try_send`; a line the budget refuses
+/// (or that meets a full queue) is dropped and counted in `stats().dropped`
+/// (the budget part also in `rate_suppressed`). The caller is never blocked.
+/// Evidence lines go through [`append_evidence`] instead.
 pub fn append(line: &str) {
     if line.is_empty() || !ENABLED.load(Ordering::Acquire) {
         return;
     }
     if let Some(logger) = current() {
         logger.offer(line);
+    }
+}
+
+/// Tee one EVIDENCE line (see [`PRIORITY_MARKERS`]) into the phone log: the
+/// small priority per-second window is tried FIRST and the ordinary budget is
+/// its fallback, so a lifecycle/selection marker survives a burst that spends
+/// the ordinary budget (the 0.0.26 startup gap).
+///
+/// Same contract as [`append`] otherwise: no disk I/O, no allocation for a
+/// refused line, non-blocking, drops counted the same way. Callers that KNOW
+/// they are emitting evidence (the core's marker emitters, via
+/// `hilog::emit_evidence`) use this; text that merely MIGHT be evidence goes
+/// through [`append_shell`]. Nothing is scanned here.
+pub fn append_evidence(line: &str) {
+    if line.is_empty() || !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(logger) = current() {
+        logger.offer_evidence(line);
+    }
+}
+
+/// Tee one SHELL diagnostics record — the ArkTS `phone_log_append` bridge
+/// (`NetBirdConnector.phoneLogAppend` → `napi::phone_log_append_export`).
+///
+/// The shell builds its records itself and hands over opaque TEXT, so this entry
+/// classifies it against [`PRIORITY_MARKERS`] and routes it to
+/// [`append_evidence`] or [`append`]. Only this entry scans: shell records are
+/// per-EVENT milestones (a handful per second at most), while the per-packet
+/// ICE/route storm reaches the tee through the core's own [`append`] — which
+/// stays scan-free by design.
+pub fn append_shell(line: &str) {
+    if is_evidence(line) {
+        append_evidence(line);
+    } else {
+        append(line);
     }
 }
 
@@ -660,6 +792,8 @@ pub fn status_json() -> String {
 }
 
 impl Logger {
+    /// The ORDINARY hot path (every core line): one window, no scan, exactly the
+    /// admission the tee had before the priority window existed.
     fn offer(&self, line: &str) {
         // Admission BEFORE any allocation and before the queue: a refused line
         // costs one short lock and a few arithmetic ops, no payload buffer, no
@@ -669,10 +803,39 @@ impl Logger {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .admit(mono_ms(), line.len(), self.limits);
+        self.enqueue(line, admitted);
+    }
+
+    /// The EVIDENCE path ([`append_evidence`]): the small priority window is
+    /// tried FIRST and the ordinary window is its fallback, so a marker is never
+    /// worse off than an ordinary line and the ordinary budget is only touched
+    /// when the priority allowance is already spent. Both attempts share one
+    /// `now_ms`, so they agree on which second they charge; each is a FIXED
+    /// budget, so the aggregate per window is their sum (see the module docs).
+    fn offer_evidence(&self, line: &str) {
+        let now_ms = mono_ms();
+        let admitted = self
+            .priority_rate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .admit(now_ms, line.len(), self.priority_limits)
+            || self
+                .rate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .admit(now_ms, line.len(), self.limits);
+        self.enqueue(line, admitted);
+    }
+
+    /// The shared tail of both paths: count the offer, count a refusal (as a
+    /// drop, named separately as rate suppression) or hand the payload to the
+    /// bounded queue. Never blocks the caller.
+    #[inline]
+    fn enqueue(&self, line: &str, admitted: bool) {
         self.counters.offered.fetch_add(1, Ordering::AcqRel);
         if !admitted {
-            // Over the per-second budget: refused, counted as a drop and named
-            // separately; the caller is never blocked.
+            // Over the per-second budget(s): refused, counted as a drop and
+            // named separately; the caller is never blocked.
             self.counters.dropped.fetch_add(1, Ordering::AcqRel);
             self.counters.rate_suppressed.fetch_add(1, Ordering::AcqRel);
             return;
@@ -1498,5 +1661,103 @@ mod tests {
             "one capped record is {capped} bytes but the window is {DEFAULT_RATE_BYTES_PER_SEC}"
         );
         assert!(DEFAULT_RATE_RECORDS_PER_SEC >= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // priority admission: the closed marker set (pure classification) and the
+    // separate, small window its lines are charged to
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn priority_markers_are_the_closed_evidence_set() {
+        // Every listed class, in the exact text the core/shell emits on device.
+        for line in [
+            "ts=2026-10-12T11:24:33.020Z pid=7775 event=vpn_protect_begin \
+             detail=VPN_PROTECT_BEGIN:stage=protect",
+            "N5_ICE|selected-pair|192.168.50.9:34486|endpoint_changed=true|peer=t7tldQA3",
+            "N6_WG_DEVICE|session-established|peer=t7tldQA3",
+            "N6_WG_DEVICE|session-expired|peer=t7tldQA3",
+            "N13_WG|carrier-attach|kind=relay|replaced=false|peer=t7tldQA3",
+            "N13_WG|carrier-detach|peer=t7tldQA3",
+            "N13_WG|carrier->direct|ice-selected-path|peer=t7tldQA3",
+            "N13_WG|direct->carrier|no-ice-endpoint|peer=t7tldQA3",
+            "connector: state -> connected",
+            "connector: login attempt=login result=ok",
+            "connector: login ok (peer address assigned)",
+        ] {
+            assert!(is_evidence(line), "{line}");
+        }
+        // The high-rate neighbours and the near-misses stay ORDINARY: they must
+        // keep competing for the ordinary budget (a storm cannot buy priority
+        // by resembling a marker). `append_shell` — the only caller of
+        // `is_evidence` — routes exactly these to the ordinary path.
+        for line in [
+            "N5c_ICE|gather-stun|peer=t7tldQA3|outcome=mapped|iface=mux|ms=0",
+            "N5d_ICE|check-rx|peer=t7tldQA3|remote=192.168.50.9:34486|rtt_ms=29",
+            "N5e_ICE|mux|read=11|xor_hit=3|periodic=1",
+            "N6_WG_DEVICE|peers=20",
+            "N13_WG|carrier-reject|kind=relay|reason=no-lane|count=100",
+            "N13_WG_FEED|replay-carrier-failed|peer=t7tldQA3",
+            "N11_ICE|failed|peer=t7tldQA3",
+            "connector: signal frame routed (kind=offer)",
+            "ROTLINE|i=1|pad=xxxx",
+            "",
+        ] {
+            assert!(!is_evidence(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn priority_window_is_separate_and_the_aggregate_bound_is_the_sum() {
+        let ordinary = RateLimit { bytes: 100, records: 4 };
+        let priority = RateLimit { bytes: 40, records: 2 };
+        let mut ordinary_window = RateWindow::default();
+        let mut priority_window = RateWindow::default();
+        // The ordinary window is spent on ordinary lines ...
+        for i in 0..4 {
+            assert!(ordinary_window.admit(0, 25, ordinary), "ordinary line {i}");
+        }
+        assert!(!ordinary_window.admit(0, 1, ordinary), "the ordinary budget is exhausted");
+        // ... while a priority line is still admitted by its OWN window ...
+        assert!(priority_window.admit(0, 20, priority), "priority line 1");
+        assert!(priority_window.admit(0, 20, priority), "priority line 2");
+        // ... which is a fixed budget too: the allowance is bounded, not a hole.
+        assert!(!priority_window.admit(0, 1, priority), "the priority allowance is bounded too");
+        assert_eq!(priority_window.bytes, 40);
+        assert_eq!(priority_window.records, 2);
+        // Aggregate per window = the SUM of two fixed budgets, never unbounded.
+        assert!(ordinary_window.bytes + priority_window.bytes <= ordinary.bytes + priority.bytes);
+        assert!(
+            ordinary_window.records + priority_window.records
+                <= ordinary.records + priority.records
+        );
+        // The production shape keeps the ordinary bound unchanged and the
+        // priority allowance strictly smaller than it.
+        assert!(DEFAULT_PRIORITY_RATE_BYTES_PER_SEC < DEFAULT_RATE_BYTES_PER_SEC);
+        assert!(DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC < DEFAULT_RATE_RECORDS_PER_SEC);
+    }
+
+    #[test]
+    fn default_priority_budget_carries_the_observed_startup_marker_burst() {
+        // The 0.0.26 device runs refused evidence lines inside the first
+        // seconds: one lifecycle/selection marker burst of ~10 lines (6 shell
+        // `VPN_*` markers, the WG sessions coming up, the pair nominations and
+        // the connector state/login lines) must fit ONE priority window.
+        let burst = [
+            "ts=1 pid=2 event=vpn_connection_created detail=VPN_CONNECTION_CREATED",
+            "ts=1 pid=2 event=vpn_create_begin detail=VPN_CREATE_BEGIN:phase=create",
+            "ts=1 pid=2 event=vpn_create_resolved detail=VPN_CREATE_RESOLVED:state=accepted",
+            "ts=1 pid=2 event=vpn_protect_begin detail=VPN_PROTECT_BEGIN:stage=protect",
+            "ts=1 pid=2 event=vpn_protect_resolved detail=VPN_PROTECT_RESOLVED:stage=protect",
+            "ts=1 pid=2 event=vpn_ice_mux_armed detail=VPN_ICE_MUX_ARMED:stage=arm",
+            "connector: state -> connected",
+            "connector: login attempt=login result=ok",
+            "N6_WG_DEVICE|session-established|peer=t7tldQA3",
+            "N5_ICE|selected-pair|192.168.50.9:34486|endpoint_changed=true|peer=t7tldQA3",
+            "N13_WG|carrier->direct|ice-selected-path|peer=t7tldQA3",
+        ];
+        let bytes: usize = burst.iter().map(|line| line.len()).sum();
+        assert!((burst.len() as u64) <= DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC, "{bytes} bytes");
+        assert!((bytes as u64) <= DEFAULT_PRIORITY_RATE_BYTES_PER_SEC, "{bytes} bytes");
     }
 }

@@ -17,8 +17,8 @@
 // hands its connector_status()/connector_network_config() results straight
 // through with no structural-typing cast (arkts-no-structural-typing).
 import type { ConnectorStatusResult, CoreNetworkConfig, CorePeerSummary,
-  CorePeerRelayEntry, CoreIcePeerEntry, CoreIceEndpoint, CoreRouteEntry,
-  CoreDnsServer, ManagementEndpoint,
+  CorePeerRelayEntry, CoreIcePeerEntry, CoreIceEndpoint, CoreIceMuxStats,
+  CoreRouteEntry, CoreDnsServer, ManagementEndpoint,
   WgDataplaneStatus, WgPeerStatusEntry } from './NetBirdConnector';
 
 // ---------------------------------------------------------------------------
@@ -227,6 +227,13 @@ export interface UiStatusDocument {
   // not parsed a management url yet; the KEY ABSENT means a document written
   // before this field existed.
   management?: UiManagementEndpoint | null;
+  // 0.0.26 gap 1 (device reports §B.1b): the shared ICE/WG mux counters the
+  // core appends as `ice_mux`. Published EXACTLY as the core distinguishes
+  // them: an object when the core delivered the whole section, and `null` when
+  // the core said `null` (no mux at all / its lock was busy — unknown, never
+  // zeros). The KEY ABSENT means a document written before this field existed
+  // (same rule as `management`).
+  ice_mux?: UiIceMux | null;
 }
 
 export interface UiManagementEndpoint {
@@ -322,6 +329,27 @@ export interface UiWgTraffic {
   // no registered peer). Exported next to the other two; 0 when the core
   // section predates the field (never a missing key).
   unknown_peer_drops: number;
+}
+
+// The shared ICE/WG mux counters (core's `ice_mux`, counter names kept verbatim
+// so a value can be traced back to the core field). 0.0.26 gap 1: the core has
+// emitted this section since 0.0.26 and the 0.0.26 device runs proved it never
+// reached the published document (the UI document type had no member for it, so
+// the counters were only readable from the periodic log line). Published ONLY
+// when the core really delivered the whole section: the core's `null` (no mux
+// at all, or its lock was busy at the sample instant) stays an explicit `null`
+// and a partial section is `null` too — this document never turns "unknown"
+// into a set of zero counters (see buildIceMux).
+export interface UiIceMux {
+  reads: number;
+  xor_hits: number;
+  xor_misses: number;
+  xor_expired: number;
+  xor_filled: number;
+  overlay_dropped: number;
+  stun_unknown: number;
+  data_unknown: number;
+  queue_dropped: number;
 }
 
 // The relay client view (core's `relay`). `current_url` is the effective
@@ -804,6 +832,53 @@ function buildWgTraffic(wg: WgDataplaneStatus): UiWgTraffic {
   return traffic;
 }
 
+// 0.0.26 gap 1 (device reports §B.1b): the shared ICE/WG mux counters. The
+// core emits the section as an OBJECT or as `null` (no mux at all, or its
+// state lock was busy at the sample instant — the core's own "unknown", never
+// a fabricated zero). This builder publishes the same distinction, in three
+// states: `undefined` in = the core never emitted the key (older core) →
+// `undefined` out, so the published key stays ABSENT; `null` in → explicit
+// `null` out (unknown, exactly as the core said); an object out ONLY when
+// EVERY counter leaf is a number — a partial / type-anomalous section is
+// `null` too, because a counter set with a hole in it would be
+// indistinguishable, in the published file, from activity that was really
+// zero. Never a throw: an unreadable section is unknown, not zeros.
+function buildIceMux(
+  mux: CoreIceMuxStats | null | undefined): UiIceMux | null | undefined {
+  if (mux === undefined) {
+    return undefined;
+  }
+  if (mux === null) {
+    return null;
+  }
+  const readsIsNumber: boolean = typeof mux.reads === 'number';
+  const hitsIsNumber: boolean = typeof mux.xor_hits === 'number';
+  const missesIsNumber: boolean = typeof mux.xor_misses === 'number';
+  const expiredIsNumber: boolean = typeof mux.xor_expired === 'number';
+  const filledIsNumber: boolean = typeof mux.xor_filled === 'number';
+  const overlayIsNumber: boolean = typeof mux.overlay_dropped === 'number';
+  const stunIsNumber: boolean = typeof mux.stun_unknown === 'number';
+  const dataIsNumber: boolean = typeof mux.data_unknown === 'number';
+  const queueIsNumber: boolean = typeof mux.queue_dropped === 'number';
+  if (!readsIsNumber || !hitsIsNumber || !missesIsNumber || !expiredIsNumber ||
+    !filledIsNumber || !overlayIsNumber || !stunIsNumber || !dataIsNumber ||
+    !queueIsNumber) {
+    return null;
+  }
+  const view: UiIceMux = {
+    reads: mux.reads,
+    xor_hits: mux.xor_hits,
+    xor_misses: mux.xor_misses,
+    xor_expired: mux.xor_expired,
+    xor_filled: mux.xor_filled,
+    overlay_dropped: mux.overlay_dropped,
+    stun_unknown: mux.stun_unknown,
+    data_unknown: mux.data_unknown,
+    queue_dropped: mux.queue_dropped
+  };
+  return view;
+}
+
 // Build the WHOLE published document. The legacy fields carry the exact
 // pre-phase-1 meaning; the appended fields ride the tail. ifacePresent is
 // the extension's vpn-tun interface probe (true/false); undefined leaves
@@ -917,6 +992,9 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
   const management: UiManagementEndpoint | null = managementEndpointView(
     typeof managementUrl === 'string' ? managementUrl : '',
     managementEndpoint);
+  // 0.0.26 gap 1: the shared mux counters. `status.ice_mux === undefined` = the
+  // core never emitted the key (an older core): the published key stays absent.
+  const iceMux: UiIceMux | null | undefined = buildIceMux(status.ice_mux);
   const doc: UiStatusDocument = {
     updated_at_ms: nowMs,
     request_id: requestId,
@@ -945,7 +1023,8 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
     session_expires_at_s: sessionExpiresAt,
     started_at_unix: coreStartedAt,
     last_update_unix: coreLastUpdate,
-    management: management
+    management: management,
+    ice_mux: iceMux
   };
   return doc;
 }

@@ -1606,6 +1606,13 @@ fn phone_log_configure_export(path: &str) -> String {
 /// DROPS the overflow by design (counted in `dropped`, the budget part in
 /// `rate_suppressed`; both visible via `phone_log_status()`), and an
 /// unconfigured/stopped tee answers `not-configured`.
+///
+/// This is the SHELL entrance (the ArkTS diagnostics sink), so it routes through
+/// [`crate::phone_log::append_shell`]: the shell hands over opaque record text,
+/// and that entry classifies the small lifecycle/selection marker set against
+/// the module's own priority window (0.0.27). The core's per-packet storm never
+/// comes through here — it uses `hilog::emit`/`phone_log::append`, which pay no
+/// scan.
 fn phone_log_append_export(line: Option<&str>) -> String {
     let Some(line) = line else {
         return phone_log_error("invalid-line");
@@ -1613,7 +1620,7 @@ fn phone_log_append_export(line: Option<&str>) -> String {
     if !crate::phone_log::enabled() {
         return phone_log_error("not-configured");
     }
-    crate::phone_log::append(line);
+    crate::phone_log::append_shell(line);
     format!("{{{}}}", crate::util::jbool("ok", true))
 }
 

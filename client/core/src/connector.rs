@@ -1723,7 +1723,9 @@ impl ConnectorShared {
             g.machine.transition(event).ok()
         };
         if let Some(to) = to {
-            hilog::emit(&format!("connector: state -> {}", to.as_str()));
+            // 2026-10-12（diag/0027 item 3）：管理状态机迁移是**证据行**
+            // （每次迁移一行），走 phone log 的小额优先预算。
+            hilog::emit_evidence(&format!("connector: state -> {}", to.as_str()));
         }
     }
 
@@ -6410,10 +6412,10 @@ fn emit_login_attempt(
     secrets: &ConnectorSecrets,
 ) {
     match result {
-        Ok(_) => hilog::emit(&format!("connector: login attempt={attempt} result=ok")),
+        Ok(_) => hilog::emit_evidence(&format!("connector: login attempt={attempt} result=ok")),
         Err(e) => {
             let detail = redacted_login_detail(e, secrets);
-            hilog::emit(&format!(
+            hilog::emit_evidence(&format!(
                 "connector: login attempt={attempt} result={}{}",
                 ErrorClass::from_management(e).as_str(),
                 if detail.is_empty() { String::new() } else { format!(" ({detail})") }
@@ -6465,9 +6467,9 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 shared.lock().deadline.apply_wire(outcome.session_deadline_unix);
                 shared.remember_login_signal(&outcome.response);
                 if outcome.peer_address.is_some() {
-                    hilog::emit("connector: login ok (peer address assigned)");
+                    hilog::emit_evidence("connector: login ok (peer address assigned)");
                 } else {
-                    hilog::emit("connector: login ok");
+                    hilog::emit_evidence("connector: login ok");
                 }
                 *logout_slot.lock_poison() = Some(client.clone());
                 break client;
@@ -6483,7 +6485,7 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                     shared.record_error(&e);
                     shared.transition(ConnEvent::FatalError);
                     shared.set_running(false);
-                    hilog::emit(&format!(
+                    hilog::emit_evidence(&format!(
                         "connector: login needs-login, giving up ({})",
                         redacted_login_detail(&e, &secrets)
                     ));
@@ -6498,7 +6500,7 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                     // 2026-10-06: the device log carries the server's own
                     // verdict (status + redacted message) — the status/error
                     // surfaces stay class-only.
-                    hilog::emit(&format!(
+                    hilog::emit_evidence(&format!(
                         "connector: login fatal (auth), giving up ({})",
                         redacted_login_detail(&e, &secrets)
                     ));
@@ -6508,7 +6510,7 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 shared.count_retryable_failure();
                 shared.transition(ConnEvent::Lost);
                 let detail = redacted_login_detail(&e, &secrets);
-                hilog::emit(&format!(
+                hilog::emit_evidence(&format!(
                     "connector: login attempt failed ({}), will retry{}",
                     ErrorClass::from_management(&e).as_str(),
                     if detail.is_empty() {
@@ -6525,7 +6527,7 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 // retry budget spent — upstream retry.go:34-39
                 shared.transition(ConnEvent::RetryExhausted);
                 shared.set_running(false);
-                hilog::emit("connector: login retry budget exhausted");
+                hilog::emit_evidence("connector: login retry budget exhausted");
                 return;
             }
         }
