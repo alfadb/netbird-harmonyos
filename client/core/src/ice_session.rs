@@ -239,6 +239,27 @@ const WG_MSG_TYPE_MAX: u32 = 4;
 /// packet (keepalive), 32 bytes (ice_bind.go:31-33).
 pub const WG_MIN_MSG_SIZE: usize = 32;
 
+/// The WireGuard message TYPE of a datagram — `1` initiation / `2` response /
+/// `3` cookie reply / `4` transport — or `None` when the datagram is not a
+/// WireGuard message at all.
+///
+/// This is the pre-crypto gate shared by BOTH sides of the shared socket: the
+/// bind's demux ([`is_wg_datagram`]) and the WG receive path
+/// (`wg_device::handle_udp`, upstream `device/receive.go:130-208`, whose
+/// `msgType` switch drops everything else before any peer lookup). The type is
+/// a little-endian u32 in the first four bytes, and the datagram must be long
+/// enough to hold the smallest WG message (an empty transport = keepalive,
+/// [`WG_MIN_MSG_SIZE`]).
+pub fn wg_message_type(pkt: &[u8]) -> Option<u32> {
+    if pkt.len() < WG_MIN_MSG_SIZE {
+        return None;
+    }
+    let msg_type = u32::from_le_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]);
+    (WG_MSG_TYPE_MIN..=WG_MSG_TYPE_MAX)
+        .contains(&msg_type)
+        .then_some(msg_type)
+}
+
 /// Upstream `isWireGuardMsg` (ice_bind.go:403-421): a little-endian u32
 /// message type in 1..=4, in a packet long enough to hold any WG message.
 /// Deliberately checked BEFORE the STUN classifier: a WG transport packet's
@@ -247,11 +268,7 @@ pub const WG_MIN_MSG_SIZE: usize = 32;
 /// keeps such a session's data from being misrouted into the STUN handler
 /// (ice_bind.go:408-420 comment).
 pub fn is_wg_datagram(pkt: &[u8]) -> bool {
-    if pkt.len() < WG_MIN_MSG_SIZE {
-        return false;
-    }
-    let msg_type = u32::from_le_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]);
-    (WG_MSG_TYPE_MIN..=WG_MSG_TYPE_MAX).contains(&msg_type)
+    wg_message_type(pkt).is_some()
 }
 
 /// pion `stun.IsMessage` shape (ice_bind.go:320 consumes it): at least a

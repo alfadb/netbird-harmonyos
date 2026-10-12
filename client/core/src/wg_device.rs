@@ -28,10 +28,21 @@
 //!   metric 小者优先 → 公钥稳定序」选择，选中 peer 会话失效即切换，
 //!   每次变更一行 `N6_WG_DEVICE|route-peer|…`。系统侧路由（TUN 里进什么）
 //!   仍由壳层按 managed 路由安装，本层不改。
-//! - **入向**：UDP 收包 → **按来源地址匹配 peer**（握手包同规则；来源不
-//!   属于任何 peer 的 endpoint → 丢弃并计 `unknown_peer_drops`）→ 送该
-//!   peer 的 tunnel 解封装 → 明文写 TUN（dup 副本，[`TunFd`] 合同）。解密
-//!   失败（`OP_ERROR`）计 `decrypt_errors` 并丢弃。
+//! - **入向**：UDP 收包 → 按**报文自身**定位 peer（上游同款：transport 的
+//!   receiving index / 握手包的静态密钥解密），来源地址只用来**优先**试
+//!   已登记在该地址上的 peer；一个 peer 的 tunnel 都不能消费该包 → 丢弃并
+//!   计 `unknown_peer_drops` → 该 peer 的 tunnel 解封装 → 明文写 TUN（dup
+//!   副本，[`TunFd`] 合同）。解密失败（`OP_ERROR`）计 `decrypt_errors` 并
+//!   丢弃。**标准 WireGuard roaming**：包被**认证消费**后，其来源地址成为
+//!   该 peer 的新 endpoint（上游 `Peer.SetEndpointFromPacket`，
+//!   `device/receive.go:374`/`:401`/`:459`/`:515`；NetBird 从不关闭
+//!   roaming——`DisableSomeRoamingForBrokenMobileSemantics` 在 iOS/Android
+//!   两条设备路径上都是**注释掉**的，`device_ios.go:92-94` /
+//!   `device_android.go:91-93`）。未认证的包（坏 MAC1 / 静态密钥不符 /
+//!   AEAD 失败 / 计数器重放 / 未知 index / 报文形态不符）**永不**改动任何
+//!   状态；被消费的 cookie reply 同样不改 endpoint
+//!   （`device/receive.go:284-320`）。roaming 不触碰 relay 载体：载体入向
+//!   按身份（公钥）匹配、不带地址，见 [`WgDevice::handle_carrier`]。
 //! - **握手**：endpoint 落配（或变更）即发起（`wireguard_force_handshake`，
 //!   对应上游 `ConfigureWGEndpoint` 后的握手驱动
 //!   `client/internal/peer/conn.go:444-478`）；无会话时的出向数据也会触发
@@ -166,17 +177,23 @@
 //! - **载体故障不阻塞直连**：endpoint 在位时 dispatch 根本不触碰载体；
 //!   载体拒绝（容量/未就绪/超限）是**类型化**失败（`Err(reason)`），计
 //!   [`WgDeviceStats::carrier_rejects`] 并有界记日志——绝不静默丢弃。
-//! - **入向匹配映射**（与 `handle_udp` 的源地址匹配等价）：UDP 域里身份
-//!   = `src == endpoint`；relay 域里没有 UDP 五元组，身份由帧自带——
+//! - **入向匹配映射**（`handle_udp` 的身份域的等价物）：UDP 域里身份主要
+//!   由报文自带（receiving index / 握手静态解密），来源地址只决定优先顺序
+//!   并被 roaming 采纳；relay 域里没有 UDP 五元组，身份由帧自带——
 //!   Transport 帧的 36B 字段是**发送方 peer id**（§4.2，服务端改写），
 //!   而 peer id = `PeerId::from_wg_pubkey_string(对端 WG 公钥 base64)`
 //!   （relay spec §3.2）。编排层（connector 的 `RelayCarrier`）持有
 //!   「注册 peer 公钥 → peer id」反查表，把 sender id 反查回 WG 公钥后调
 //!   [`WgDevice::handle_carrier`]，按 `key_b64` 定位 peer——与
-//!   `handle_udp` 共用同一段收包体（解封装 → TUN / 回包 / 会话建立观察），
-//!   既有 UDP 语义零改动。选择「公钥匹配」而非上游的假地址注册：假地址
-//!   需要一个额外的状态位区分真假 endpoint，公钥匹配则把 relay 帧的既有
-//!   身份字段直接用足。
+//!   `handle_udp` 共用同一段收包体（解封装 → TUN / 回包 / 会话建立观察）。
+//!   **roaming 不碰载体**：上游 relay 入向把包连同**对端自己的 synthetic
+//!   endpoint** 一起交给 wireguard-go（`wgproxy/bind/proxy.go:199`
+//!   `ReceiveFromEndpoint(ctx, p.wgCurrentUsed, …)` → `ice_bind.go:378`
+//!   `eps[0] = msg.Endpoint`），`SetEndpointFromPacket` 于是把它原样写回、
+//!   等于 no-op；本层的载体入向根本没有地址可采纳，语义只会更严（载体报文
+//!   无论认证与否都不会移动 endpoint，也不会把直连路径换成 relay）。
+//!   选择「公钥匹配」而非上游的假地址注册：假地址需要一个额外的状态位区分
+//!   真假 endpoint，公钥匹配则把 relay 帧的既有身份字段直接用足。
 //! - **MTU / 封装开销**（登记，spec §7.2）：Transport 帧 = 2B 头 + 36B id
 //!   ⇒ 38B 固定开销，再套 WS 客户端帧（2–4B 头 + 4B mask）+ TLS/TCP/IP
 //!   ⇒ 典型每包 ≈ 44–46B。`send_to_peer` 单包上限 **8782B**
@@ -203,7 +220,7 @@ use crate::connector::{WgPeerApplier, WgPeerEntry};
 use crate::hilog::emit;
 use crate::sys;
 use crate::tun::TunFd;
-use crate::wg::{Tunnel, OP_ERROR, OP_NETWORK, OP_TUN_V4, OP_TUN_V6};
+use crate::wg::{Tunnel, OP_DONE, OP_ERROR, OP_NETWORK, OP_TUN_V4, OP_TUN_V6};
 
 /// One WG datagram / one TUN frame working buffer (probe BUF parity; >= MTU
 /// 1420 + transport overhead).
@@ -294,7 +311,13 @@ pub struct WgDeviceStats {
     /// Encapsulated transport datagrams actually handed to sendto.
     pub tx_packets: u64,
     pub tx_bytes: u64,
-    /// UDP datagrams accepted for a known peer (before decapsulation).
+    /// Inbound UDP datagrams ATTRIBUTED to a peer: the source address equals
+    /// a registered peer endpoint (the pre-roaming rule, and the only rule for
+    /// a datagram no tunnel can consume), OR the datagram identified its peer
+    /// by itself and that peer's crypto consumed it (roaming discovery —
+    /// upstream identifies the peer from the datagram, `receive.go`). Counted
+    /// BEFORE decapsulation, so a source-matched datagram that fails its AEAD
+    /// is in here as well (and in `decrypt_errors`).
     pub rx_packets: u64,
     /// Plaintext bytes written into the TUN.
     pub rx_bytes_to_tun: u64,
@@ -304,7 +327,12 @@ pub struct WgDeviceStats {
     pub keepalives_sent: u64,
     /// Outbound frames dropped: no allowed_ips prefix matched the dst.
     pub no_route_drops: u64,
-    /// Inbound datagrams dropped: source address matches no peer endpoint.
+    /// Inbound datagrams DROPPED: no peer was registered at the source
+    /// address AND no peer's tunnel could consume the datagram (a WireGuard
+    /// message from an address we have not seen is not a drop any more — its
+    /// peer authenticates it and the source is adopted as the new endpoint,
+    /// standard WireGuard roaming). A datagram that merely failed to decrypt
+    /// on a source-matched peer is `decrypt_errors`, not this.
     pub unknown_peer_drops: u64,
     /// Inbound datagrams a matched peer failed to process (`OP_ERROR`).
     pub decrypt_errors: u64,
@@ -375,7 +403,9 @@ pub struct WgPeerStatus {
 /// One `handle_udp` outcome (observation surface for tests/pumps).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WgInbound {
-    /// Source matched a registered peer endpoint.
+    /// A peer took the datagram: its source matched a registered peer
+    /// endpoint, or the datagram identified its peer itself and that peer's
+    /// crypto consumed it (roaming discovery).
     pub peer_matched: bool,
     /// Decapsulated plaintext bytes written to the TUN (0 = none).
     pub wrote_tun: usize,
@@ -1934,18 +1964,100 @@ impl WgDevice {
         self.encap_and_send(idx, frame, now_ms)
     }
 
-    /// Process one inbound UDP datagram from `src`. Source must equal a
-    /// registered peer endpoint (handshakes included); everything else is
-    /// dropped + counted (`unknown_peer_drops`).
+    /// Process one inbound UDP datagram from `src`.
+    ///
+    /// Upstream model (`device/receive.go`, netbirdio/wireguard-go
+    /// @8bf8fa968f1a): the peer is identified from the DATAGRAM — transport
+    /// messages by their receiving index (`indexTable.Lookup`, `:151-156`),
+    /// handshake initiations by decrypting the static key with ours and
+    /// looking the peer up (`noise-protocol.go:340` `ConsumeMessageInitiation`),
+    /// responses by the receiver index (`noise-protocol.go:512`
+    /// `ConsumeMessageResponse`) — never from the source address. The source
+    /// is adopted as the peer's endpoint only once the crypto CONSUMED the
+    /// packet (`Device`→`peer.SetEndpointFromPacket`: initiation `:374`,
+    /// response `:401`, transport data/keepalive `:459` and `:515`). An
+    /// authenticated packet from an address the peer is not registered at is
+    /// therefore standard WireGuard ROAMING, not a drop; NetBird never
+    /// disables roaming (see the module docs).
+    ///
+    /// This device keeps a fast path — the peer already bound to `src` is
+    /// tried FIRST — and then hands the datagram to the remaining peers'
+    /// tunnels: the first peer whose crypto does not reject it IS the packet's
+    /// peer, because boringtun bundles upstream's index-table / static-key
+    /// lookup into [`crate::wg::Tunnel::read`] (there is no index API to
+    /// consult first — the trial decapsulation is the identification, and a
+    /// failed trial mutates nothing: `receive_handshake_initialization` only
+    /// touches state after the static-key check, `receive_packet_data` only
+    /// after the AEAD tag). Only an AUTHENTICATED outcome adopts the source as
+    /// the peer's new endpoint; a consumed cookie reply changes nothing
+    /// (`receive.go:284-320`), and a rejected packet changes nothing at all.
+    /// Everything else is dropped: `unknown_peer_drops` when no peer was
+    /// registered at `src` either, `decrypt_errors` when one was (the
+    /// pre-roaming accounting, unchanged).
     pub fn handle_udp(&mut self, datagram: &[u8], src: ([u8; 4], u16), now_ms: u64) -> WgInbound {
         let mut out = WgInbound::default();
-        let Some(idx) = self.peers.iter().position(|p| p.endpoint == Some(src)) else {
-            self.stats.unknown_peer_drops += 1;
+        // The peer registered at this source (upstream's steady state). Tried
+        // first, and the ONLY case the pre-roaming accounting counts as
+        // received before the crypto runs.
+        let known = self.peers.iter().position(|p| p.endpoint == Some(src));
+        if known.is_some() {
+            out.peer_matched = true;
+            self.stats.rx_packets += 1;
+        }
+        // Pre-crypto gate (upstream `receive.go:145-148` `size < MinMessageSize
+        // → continue` + the `msgType` switch, i.e. `isWireGuardMsg`): a
+        // datagram that is not a WireGuard message never reaches any peer's
+        // crypto, so it can identify no peer. An EMPTY datagram additionally
+        // means "repeat the last call" to boringtun (`decapsulate` on `&[]`
+        // drains the staged-packet queue) — never hand one to a tunnel.
+        let Some(msg_type) = crate::ice_session::wg_message_type(datagram) else {
+            if known.is_none() {
+                self.stats.unknown_peer_drops += 1;
+            } else {
+                self.stats.decrypt_errors += 1;
+            }
             return out;
         };
-        out.peer_matched = true;
-        self.stats.rx_packets += 1;
-        self.ingest(idx, datagram, InboundPath::Udp(src), now_ms, &mut out);
+        for idx in known
+            .into_iter()
+            .chain((0..self.peers.len()).filter(|j| Some(*j) != known))
+        {
+            let (op, len, plain) = self.decapsulate(idx, datagram);
+            match inbound_outcome(msg_type, op) {
+                // Nothing happened (`goto skip` / `continue`): try the next
+                // peer — the datagram, not the source, decides.
+                InboundOutcome::Rejected => continue,
+                InboundOutcome::CookieConsumed => {
+                    // `receive.go:284-320`: the cookie was consumed and that is
+                    // ALL — no endpoint change, no reply, no session
+                    // observation.
+                    out.peer_matched = true;
+                    if known.is_none() {
+                        self.stats.rx_packets += 1;
+                    }
+                    return out;
+                }
+                InboundOutcome::Authenticated => {
+                    // Standard WireGuard roaming (`peer.SetEndpointFromPacket`,
+                    // `peer.go:280-288`). A no-op when the source is already
+                    // this peer's endpoint (the fast path).
+                    self.adopt_endpoint(idx, src);
+                    out.peer_matched = true;
+                    if known.is_none() {
+                        self.stats.rx_packets += 1;
+                    }
+                    self.ingest(idx, op, &plain[..len], InboundPath::Udp(src), now_ms, &mut out);
+                    return out;
+                }
+            }
+        }
+        // WireGuard messages, but no tunnel consumed one: the source is a
+        // stranger AND the crypto rejected it.
+        if known.is_none() {
+            self.stats.unknown_peer_drops += 1;
+        } else {
+            self.stats.decrypt_errors += 1;
+        }
         out
     }
     /// N13-D2 — process one inbound datagram that arrived over the peer's
@@ -1953,10 +2065,16 @@ impl WgDevice {
     /// 「入向匹配映射」): the carrier layer already identified the SENDER —
     /// the relay Transport frame's 36B field is the sender peer id, which
     /// the orchestration layer reverses to the WG public key. Matching is
-    /// therefore by registered `key_b64` — the identity-domain equivalent
-    /// of `handle_udp`'s `src == endpoint` rule, sharing the same ingest
-    /// body (decapsulate → TUN / reply / session observation). Unknown keys
-    /// are dropped + counted (`unknown_peer_drops`), never processed.
+    /// therefore by registered `key_b64` — the identity-domain equivalent of
+    /// `handle_udp`'s datagram identification, sharing the same ingest body
+    /// (decapsulate → TUN / reply / session observation). Unknown keys are
+    /// dropped + counted (`unknown_peer_drops`), never processed.
+    ///
+    /// NO endpoint adoption here: a carrier frame carries no source address.
+    /// Upstream's relayed receive path hands the datagram to WireGuard with
+    /// the peer's OWN synthetic endpoint (`wgproxy/bind/proxy.go:199` →
+    /// `ice_bind.go:378`), so its roaming write is a no-op; ours has no
+    /// address at all, which is the same outcome by construction.
     pub fn handle_carrier(&mut self, datagram: &[u8], pub_key_b64: &str, now_ms: u64) -> WgInbound {
         let mut out = WgInbound::default();
         let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
@@ -1965,24 +2083,56 @@ impl WgDevice {
         };
         out.peer_matched = true;
         self.stats.rx_packets += 1;
-        self.ingest(idx, datagram, InboundPath::Carrier, now_ms, &mut out);
+        let (op, len, plain) = self.decapsulate(idx, datagram);
+        self.ingest(idx, op, &plain[..len], InboundPath::Carrier, now_ms, &mut out);
         out
     }
 
-    /// Shared inbound body of BOTH receive paths (UDP + carrier): decrypt →
-    /// TUN / reply, then the session-establishment observation + queued
-    /// packet flush. The reply path follows the arrival path for UDP (back
-    /// to `src`, the pre-D2 rule) and the bearer priority for carrier
-    /// arrivals (`dispatch`).
+    /// Decapsulate one datagram with ONE peer's tunnel: boringtun's
+    /// `decapsulate` (upstream `RoutineDecryption`'s crypto step) plus the
+    /// plaintext buffer it wrote. `&self`: the tunnel's own interior mutability
+    /// carries the session/timer state (`crate::wg::Tunnel` is an
+    /// `Arc<Mutex<Tunn>>`-backed handle).
+    fn decapsulate(&self, idx: usize, datagram: &[u8]) -> (i32, usize, [u8; WG_BUF]) {
+        let mut plain = [0u8; WG_BUF];
+        let (op, len) = { self.peers[idx].tunnel.read(datagram, &mut plain) };
+        (op, len, plain)
+    }
+
+    /// Upstream `device/peer.go:280-288` `SetEndpointFromPacket`: the peer's
+    /// endpoint becomes the source address of the packet that just
+    /// authenticated. Upstream also drops the sticky-socket `clearSrcOnTx`
+    /// flag here; this device has no sticky source, so the assignment is the
+    /// whole behaviour. Roaming is never disabled upstream (NetBird does not
+    /// call `DisableSomeRoamingForBrokenMobileSemantics`, `device_ios.go:92-94`
+    /// / `device_android.go:91-93`) and it is not disabled here. Observable on
+    /// every change, and it re-arms the UDP path (`dispatch` prefers a landed
+    /// endpoint over the relay carrier) — exactly upstream's "the bind sends
+    /// to `peer.endpoint.val`".
+    fn adopt_endpoint(&mut self, idx: usize, src: ([u8; 4], u16)) {
+        let from = self.peers[idx].endpoint;
+        if from == Some(src) {
+            return;
+        }
+        self.peers[idx].endpoint = Some(src);
+        emit(&wg_roam_line(&self.peers[idx].key_b64, from, src));
+    }
+
+    /// Shared inbound body of BOTH receive paths (UDP + carrier): the
+    /// already-decapsulated packet → TUN / reply, then the
+    /// session-establishment observation + queued packet flush. The reply path
+    /// follows the arrival path for UDP (back to `src`, the pre-D2 rule) and
+    /// the bearer priority for carrier arrivals (`dispatch`).
     fn ingest(
         &mut self,
         idx: usize,
-        datagram: &[u8],
+        op: i32,
+        plain: &[u8],
         path: InboundPath,
         now_ms: u64,
         out: &mut WgInbound,
     ) {
-        self.process_datagram(idx, datagram, path, out);
+        self.process_outcome(idx, op, plain, path, out);
 
         // Session-establishment observation (boringtun stats flips to >= 0
         // the moment a handshake completes) + queued-packet flush. The TX
@@ -2260,21 +2410,23 @@ impl WgDevice {
 
     // -- internals ----------------------------------------------------------
 
-    /// Decrypt/process one source-matched datagram: transport data → TUN,
-    /// handshake responses/cookies → out (UDP: back to the arrival `src`;
-    /// carrier: via the bearer-priority `dispatch`).
-    fn process_datagram(
+    /// Handle the outcome of ONE already-decapsulated datagram (upstream
+    /// `RoutineSequentialReceiver`'s body): transport data → TUN, handshake
+    /// responses/cookies → out (UDP: back to the arrival `src`; carrier: via
+    /// the bearer-priority `dispatch`). `op`/`plain` come from
+    /// [`Self::decapsulate`], the peer identification step.
+    fn process_outcome(
         &mut self,
         idx: usize,
-        datagram: &[u8],
+        op: i32,
+        plain: &[u8],
         path: InboundPath,
         out: &mut WgInbound,
     ) {
-        let mut plain = [0u8; WG_BUF];
-        let (op, len) = { self.peers[idx].tunnel.read(datagram, &mut plain) };
+        let len = plain.len();
         match op {
             OP_TUN_V4 | OP_TUN_V6 => {
-                let frame = &plain[..len];
+                let frame = plain;
                 match self.tun.write_frame_budget(frame, TUN_WRITE_BUDGET_MS) {
                     Ok(_) => {
                         self.stats.rx_bytes_to_tun += len as u64;
@@ -2294,11 +2446,11 @@ impl WgDevice {
                 let sent = match path {
                     InboundPath::Udp(src) => {
                         let fd = self.egress_fd_of(idx);
-                        self.send_to(fd, &plain[..len], src)
+                        self.send_to(fd, plain, src)
                     }
                     // reply rides the selected bearer (ICE endpoint if it
                     // won meanwhile, the carrier otherwise)
-                    InboundPath::Carrier => self.dispatch(idx, &plain[..len]),
+                    InboundPath::Carrier => self.dispatch(idx, plain),
                 };
                 if sent {
                     out.sent += 1;
@@ -2579,6 +2731,77 @@ enum InboundPath {
     Udp(([u8; 4], u16)),
     /// The relay carrier: replies follow the bearer priority.
     Carrier,
+}
+
+/// What one tunnel's crypto did with an inbound datagram — upstream
+/// `device/receive.go`'s three possible landing places. The distinction is the
+/// WHOLE of the endpoint-update rule: only [`Self::Authenticated`] may adopt
+/// the packet's source address as the peer's endpoint
+/// (`peer.SetEndpointFromPacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundOutcome {
+    /// The crypto CONSUMED the packet as an authenticated one. Upstream reaches
+    /// the endpoint update for exactly these: a valid handshake initiation
+    /// (`receive.go:374`) or response (`:401`), and a decrypted
+    /// transport packet — data OR keepalive — that cleared its replay filter
+    /// (`:459`, `:515`).
+    Authenticated,
+    /// A cookie reply was consumed (`:284-320`): upstream logs it, consumes it
+    /// and `goto skip`s — no endpoint update, no reply, no session change.
+    CookieConsumed,
+    /// Bad MAC1 / wrong static key / bad AEAD tag / unknown or replayed
+    /// counter / unknown receiver index / malformed: upstream's `goto skip` /
+    /// `continue` — inert, and never a peer identification.
+    Rejected,
+}
+
+/// Classify one tunnel's `read` on a datagram already known to be a WireGuard
+/// message of type `msg_type` ([`crate::ice_session::wg_message_type`]).
+///
+/// boringtun's single `OP_ERROR` covers every rejection, and its `OP_DONE` is
+/// ambiguous by itself — an authenticated keepalive and a consumed cookie reply
+/// both produce it — so the message TYPE breaks the tie, exactly as upstream's
+/// `switch msgType` does. The `(type, op)` pairs that cannot come from a
+/// consumed packet fall through to [`InboundOutcome::Rejected`].
+fn inbound_outcome(msg_type: u32, op: i32) -> InboundOutcome {
+    if op == OP_ERROR {
+        return InboundOutcome::Rejected;
+    }
+    match (msg_type, op) {
+        // 4 = transport: decrypted data, or an authenticated keepalive
+        // (empty payload, `noise/mod.rs::validate_decapsulated_packet`).
+        (4, OP_TUN_V4) | (4, OP_TUN_V6) | (4, OP_DONE) => InboundOutcome::Authenticated,
+        // 1 = initiation / 2 = response: only a CONSUMED one produces a reply
+        // (the response packet, or the initiating side's keepalive).
+        (1, OP_NETWORK) | (2, OP_NETWORK) => InboundOutcome::Authenticated,
+        // 3 = cookie reply: consumed, nothing else happens.
+        (3, OP_DONE) => InboundOutcome::CookieConsumed,
+        _ => InboundOutcome::Rejected,
+    }
+}
+
+/// `ip:port`, or `none` when the peer had no endpoint — the `from=` field of
+/// the roaming line (public routing material only).
+pub fn endpoint_text(v: Option<([u8; 4], u16)>) -> String {
+    match v {
+        Some((ip, port)) => format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port),
+        None => "none".to_string(),
+    }
+}
+
+/// `N6_WG_DEVICE|roam|peer=<公钥前8位>|from=<ip:port|none>|to=<ip:port>` ——
+/// 上游 `peer.SetEndpointFromPacket`（`device/peer.go:280-288`；调用点
+/// `device/receive.go:459`/`:515`）在本层的落点：一个被**认证消费**的入向包
+/// 把该 peer 的 endpoint 改成它的来源地址（标准 WireGuard roaming，NetBird
+/// 从不关闭）。`from=none` 就是「对端此前根本没有 endpoint」——会话从零建立
+/// 的那一下。公开路由信息，无密钥材料。
+pub fn wg_roam_line(pub_key_b64: &str, from: Option<([u8; 4], u16)>, to: ([u8; 4], u16)) -> String {
+    format!(
+        "N6_WG_DEVICE|roam|peer={}|from={}|to={}",
+        crate::peer_conn::peer_short(pub_key_b64),
+        endpoint_text(from),
+        endpoint_text(Some(to))
+    )
 }
 
 /// N11 (tests / host CLI): derive the x25519 PUBLIC key (base64 std) of a
@@ -4367,6 +4590,24 @@ mod lifecycle_line_tests {
         // 短/空 key 不 panic（前缀就是它自己的字母数字前缀）。
         assert_eq!(session_established_line("ab"), "N6_WG_DEVICE|session-established|peer=ab");
         assert_eq!(session_established_line(""), "N6_WG_DEVICE|session-established|peer=");
+    }
+
+    /// 真机校验用的 roaming 行：上游 `peer.SetEndpointFromPacket` 的唯一落点
+    /// （只有认证消费的包会走到这里）。`from=none` = 对端此前没有 endpoint，
+    /// 会话从零建立；`from=`/`to=` 都是公开路由信息。
+    #[test]
+    fn roam_line_names_the_peer_and_both_addresses() {
+        let key = "FyLw4PSBg1hjr+9/x0=";
+        assert_eq!(
+            wg_roam_line(key, None, ([100, 64, 0, 7], 51820)),
+            "N6_WG_DEVICE|roam|peer=FyLw4PSB|from=none|to=100.64.0.7:51820"
+        );
+        assert_eq!(
+            wg_roam_line(key, Some(([192, 168, 1, 9], 41234)), ([100, 64, 0, 7], 51820)),
+            "N6_WG_DEVICE|roam|peer=FyLw4PSB|from=192.168.1.9:41234|to=100.64.0.7:51820"
+        );
+        assert_eq!(endpoint_text(None), "none");
+        assert_eq!(endpoint_text(Some(([0, 0, 0, 0], 0))), "0.0.0.0:0");
     }
 }
 
