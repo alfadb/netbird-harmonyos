@@ -174,6 +174,12 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("account_login_start", napi_account_login_start);
     reg!("account_login_poll", napi_account_login_poll);
     reg!("account_login_cancel", napi_account_login_cancel);
+    // 2026-10-13: the interactive SESSION EXTEND's management step (upstream
+    // `client/android/session.go:127-155` → `engine_authsession.go:83-107`).
+    // Same one-shot job shape as the login action; append-only.
+    reg!("account_extend_start", napi_account_extend_start);
+    reg!("account_extend_poll", napi_account_extend_poll);
+    reg!("account_extend_cancel", napi_account_extend_cancel);
     // Increment 131: dedicated route catalog (append-only at the tail of the
     // registration list — every pre-existing name keeps its position).
     reg!("connector_routes", napi_connector_routes);
@@ -612,6 +618,9 @@ mod tests {
             "account_login_start",
             "account_login_poll",
             "account_login_cancel",
+            "account_extend_start",
+            "account_extend_poll",
+            "account_extend_cancel",
             "connector_routes",
             "connector_route_selection_set",
             "alloc_stats",
@@ -1710,6 +1719,32 @@ unsafe extern "C" fn napi_account_login_cancel(env: NapiEnv, info: NapiCallbackI
     let args = cb_args(env, info);
     let id = args.i32_at(0, 0);
     ret_json(env, crate::account_auth::account_login_cancel_json(id.max(0) as u64))
+}
+
+// 2026-10-13: the interactive session extend's management step (same one-shot
+// job shape as the login action). `account_extend_start(requestJson)` takes
+// `{"config": <connector start config>, "jwt": <token exchange result>}`; the
+// JWT lives only inside that call and is never written anywhere. The poll
+// answer is `{"state":"done","outcome":"success","session_expiry":…,
+// "session_expires_at_unix":…}` — the server's own 3-state deadline.
+unsafe extern "C" fn napi_account_extend_start(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    match args.string_at_bounded(0, ACCOUNT_AUTH_INPUT_MAX) {
+        Some(request) => ret_json(env, crate::account_auth::account_extend_start_json(&request)),
+        None => ret_json(env, "{\"ok\":false,\"error\":\"invalid-input\"}".into()),
+    }
+}
+
+unsafe extern "C" fn napi_account_extend_poll(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_extend_poll_json(id.max(0) as u64))
+}
+
+unsafe extern "C" fn napi_account_extend_cancel(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_extend_cancel_json(id.max(0) as u64))
 }
 
 // Increment 131: the ArkTS-facing route catalog, a ZERO-argument read-only

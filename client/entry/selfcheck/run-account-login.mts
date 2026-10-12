@@ -24,6 +24,13 @@ const state = {
   // sends after the token exchange, what it gets back, and what it cancels.
   loginRequests: [], loginPolls: [], loginCancelled: [], loginOutcome: 'success',
   loginFailure: '', loginWait: false,
+  // 2026-10-13: the session extend's management step (`account_extend_*`).
+  extendRequests: [], extendPolls: [], extendCancelled: [],
+  extendFailure: '', extendWait: false,
+  extendReply: {
+    state: 'done', outcome: 'success',
+    session_expiry: 'set', session_expires_at_unix: 1_893_456_000
+  },
   requestId: 40, metadata, pollWait: false, tokenResult: {
     ok: true, errorCode: '', errorDetail: '',
     tokens: { accessToken: 'access-secret', idToken: 'id-secret', refreshToken: 'refresh-secret', expiresIn: 90 }
@@ -56,9 +63,13 @@ try {
   const controller = new AccountLoginController();
   const prepared = await controller.begin('https://mgmt.example', '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----');
   const start = state.requests[state.requests.length - 1];
-  check('discovery receives only management URL and required CA',
+  // 2026-10-13: the discovery request carries exactly three fields — the
+  // management URL, the CA and the SessionExtend flag (upstream
+  // `GetPKCEAuthorizationFlow(sessionExtend)`, shared/management/client/
+  // grpc.go:744-760). The ordinary login/registration flow sends false.
+  check('discovery receives only management URL, CA and the login flow flag',
     start.management_url === 'https://mgmt.example' && start.ca_pem.includes('CERTIFICATE') &&
-    Object.keys(start).length === 2);
+    start.session_extend === false && Object.keys(start).length === 3);
   check('authorize URL has PKCE, exact chosen redirect, query response and login flag mapping',
     prepared.expectedState === 'secure-state' && prepared.redirectUri === 'https://client.example/callback' &&
     prepared.authorizeUrl.includes('response_mode=query') && prepared.authorizeUrl.includes('prompt=login') &&
@@ -167,6 +178,82 @@ try {
   check('cancel during the login job cancels the native job and rejects the finish',
     await rejected(pendingJob, 'cancelled') && state.loginCancelled.length > 0);
   state.loginWait = false;
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-13: the interactive SESSION EXTEND (upstream
+  // client/android/session.go:127-155 → engine_authsession.go:83-107). Same SSO
+  // run, a DIFFERENT management commit: the fresh JWT goes to the core's
+  // `account_extend_*` job, and the caller gets the server's own 3-state
+  // deadline — no account fact, no config.
+  // ---------------------------------------------------------------------------
+  const extend = new AccountLoginController();
+  const extendPrepared = await extend.begin('https://mgmt.example', 'ca', true);
+  const extendStart = state.requests[state.requests.length - 1];
+  check('the extend discovery marks SessionExtend and builds the same PKCE request',
+    extendStart.session_extend === true && extendStart.management_url === 'https://mgmt.example' &&
+    extendPrepared.authorizeUrl.includes('response_mode=query') &&
+    extendPrepared.expectedState === 'secure-state');
+  const extendResult = await extend.finishExtend('extend-code', CONFIG);
+  check('the extend job received the exchanged JWT and the connector config',
+    state.extendRequests.length === 1 && state.extendRequests[0].config === CONFIG &&
+    state.extendRequests[0].jwt === 'access-secret');
+  check('the extend result is the server 3-state and NOTHING token-shaped',
+    extendResult.sessionExpiry === 'set' && extendResult.sessionExpiresAtS === 1_893_456_000 &&
+    Object.keys(extendResult).length === 2 &&
+    !JSON.stringify(extendResult).includes('access-secret') &&
+    !JSON.stringify(extendResult).includes('refresh-secret'));
+  check('a successful extend is reported as success and cancels nothing',
+    state.extendCancelled.length === 0);
+  check('duplicate extend is rejected and the code is exchanged once for it',
+    await rejected(extend.finishExtend('extend-code', CONFIG), 'exchange_already_used'));
+  // `use_id_token` selects the id JWT here too (the SAME rule as the login
+  // action — upstream `tokenInfo.GetTokenToUse()` is shared by both).
+  state.metadata = { ...metadata, use_id_token: true };
+  const idExtend = new AccountLoginController();
+  await idExtend.begin('https://mgmt.example', 'ca', true);
+  await idExtend.finishExtend('id-extend-code', CONFIG);
+  check('the extend sends the id JWT when the provider selects the id token',
+    state.extendRequests[1].jwt === 'id-secret');
+  state.metadata = metadata;
+  // `unknown` (no deadline in the reply) leaves the caller's anchor alone: the
+  // result carries no positive deadline.
+  state.extendReply = { state: 'done', outcome: 'success', session_expiry: 'unknown' };
+  const unknownExtend = new AccountLoginController();
+  await unknownExtend.begin('https://mgmt.example', 'ca', true);
+  const unknownResult = await unknownExtend.finishExtend('unknown-code', CONFIG);
+  check('an unknown deadline is reported as unknown with no timestamp',
+    unknownResult.sessionExpiry === 'unknown' && unknownResult.sessionExpiresAtS === 0);
+  state.extendReply = {
+    state: 'done', outcome: 'success',
+    session_expiry: 'set', session_expires_at_unix: 1_893_456_000
+  };
+  // the management call's own failure keeps its stable class token.
+  state.extendFailure = 'management-error';
+  const refusedExtend = new AccountLoginController();
+  await refusedExtend.begin('https://mgmt.example', 'ca', true);
+  check('an extend refusal surfaces its own stable token',
+    await rejected(refusedExtend.finishExtend('refused-extend', CONFIG), 'management-error'));
+  state.extendFailure = '';
+  // a malformed extend reply is refused, never interpreted.
+  state.extendReply = { state: 'done', outcome: 'success', session_expiry: 7 };
+  const malformedExtend = new AccountLoginController();
+  await malformedExtend.begin('https://mgmt.example', 'ca', true);
+  check('a malformed extend deadline field is refused',
+    await rejected(malformedExtend.finishExtend('malformed-extend', CONFIG), 'extend_failed'));
+  state.extendReply = {
+    state: 'done', outcome: 'success',
+    session_expiry: 'set', session_expires_at_unix: 1_893_456_000
+  };
+  // a cancel while the extend job is in flight cancels THAT job too.
+  state.extendWait = true;
+  const duringExtend = new AccountLoginController();
+  await duringExtend.begin('https://mgmt.example', 'ca', true);
+  const pendingExtend = duringExtend.finishExtend('job-extend', CONFIG);
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  duringExtend.cancel();
+  check('cancel during the extend job cancels the native job and rejects the finish',
+    await rejected(pendingExtend, 'cancelled') && state.extendCancelled.length > 0);
+  state.extendWait = false;
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

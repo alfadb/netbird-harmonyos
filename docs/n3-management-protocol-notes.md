@@ -373,6 +373,17 @@ connector_stop()     幂等：abort worker（关 Sync 流）→ 尽力 logout
   `{"state":"failed","error":"invalid-input"|"jwt-required"|"invalid-config"|
   "network-error"|"timeout"|"management-error"}`。**JWT 只存在于该 job 的内存里，
   任何一步都不落盘**（upstream profilemanager/config.go:62-135 无 token 字段）。
+- `account_extend_start(requestJson)` / `account_extend_poll(id)` /
+  `account_extend_cancel(id)`（2026-10-13 追加）→ 交互式会话续期的管理面步骤
+  （upstream `client/android/session.go:127-155` → `engine_authsession.go:83-107`）。
+  `requestJson` 与 login action **同一形状**：`{"config": <同 connector_start 的
+  config 文档>, "jwt": <token exchange 结果>}`；用**调用方自己的**配置新拨一条管理
+  连接（生产上调用方是界面进程：扩展进程里的引擎连接句柄跨进程拿不到），只发
+  `ExtendAuthSession`——不 Login、不 Sync、不重连，空 JWT 在本地就拒绝
+  （engine_authsession.go:84-86）。poll 回 `{"state":"done","outcome":"success",
+  "session_expiry":"unknown"|"disabled"|"set","session_expires_at_unix":<秒|null>}`
+  （服务端响应的三态；`unknown` 表示该次响应没有期限、调用方保持原锚点）或
+  `{"state":"failed","error":<同上一组稳定 token>}`。JWT 同样只活在该 job 的内存里。
 - `connector_status()` → `{"running","state","started_at_unix","last_update_unix",
   "peer_count","route_count","reconnects","last_error","session_expiry",
   "session_expires_at_unix","wg_apply_failed",
@@ -416,8 +427,10 @@ SSO 拿新 JWT（`client/android/login.go:191-204`），再把 token 交给引�
 而且 Android 引擎自己不设任何到期定时器（`session.go:20-24` 注释）。本仓核心
 **没有任何 token**，因此静默续期路径（`renew_check_interval` /
 `session_renew_lead_ms` / `session_renew_attempts`）已随 2026-10-12 的
-"JWT 不落盘"改动一并删除；对应的交互入口（UI 进程 SSO → 核心 extend）尚未
-实现，是已知缺口。
+"JWT 不落盘"改动一并删除；对应的交互入口由 2026-10-13 的
+`account_extend_*` 补齐（见上文 NAPI 契约与 `docs/account-webview-login.md` 的
+"与上游的一处结构差异"：界面进程用同一设备身份自拨管理连接，期限由扩展进程的
+连接器在下一次 SyncResponse 上重新锚定）。
 
 ## ⚠️ 限制（不得误读为"已能连上 peer"）
 
