@@ -192,6 +192,17 @@ impl SignalExchange for MockSignalEndpoint {
     }
 }
 
+/// guard 节拍的定序熵源：恒 0.5 —— cenkalti/backoff 的 ±10% 抖动恰好取
+/// **裸间隔**（delay = current×(1+f×(2r−1))），于是重发节拍逐值确定：
+/// 3 s → 6 s → 12 s → 24 s → 封顶 37.5 s（timeout 抽定同样吃 0.5 样本 =
+/// 30 s + 0.5×15 s）。生产从不装它（默认 OsRandom）。
+struct FixedHalfRng;
+impl netbird_core::backoff::Rng for FixedHalfRng {
+    fn next_uniform(&mut self) -> f64 {
+        0.5
+    }
+}
+
 /// Injectable WG seam: records every endpoint landing (peer, addr, port) and
 /// every N11 egress attach (peer; fd numbers are process-global, so only the
 /// fact + ordering vs the endpoint landing are asserted).
@@ -385,6 +396,9 @@ impl TestOrch {
         // `black_holed_stun_never_blocks_the_pump` /
         // `candidates_are_delivered_as_each_interface_round_finishes` 覆盖。
         orch.set_gather_exec(Arc::new(InlineGatherExec));
+        // guard 熵源在 set_peers **之前**装定：每 peer 的 timeout 抽定
+        // （每个新 PeerConn 消耗一个样本）与逐跳抖动都由此确定。
+        orch.set_guard_rng(Box::new(FixedHalfRng));
         orch.set_peers(&keys);
         orch.set_signal_ready(true);
         TestOrch { orch, socks, wg, me }
@@ -416,6 +430,7 @@ impl TestOrch {
             advertised_candidates: Vec::new(),
         });
         orch.set_gather_exec(Arc::new(InlineGatherExec));
+        orch.set_guard_rng(Box::new(FixedHalfRng));
         let keys: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
         orch.set_peers(&keys);
         orch.set_signal_ready(true);
@@ -915,9 +930,11 @@ fn disconnect_and_failed_transitions_follow_the_injected_clock() {
     assert_eq!(a.status_of(KEY_B).state, PeerIceState::Connected);
 
     // B goes silent: no more pumps, no more deliveries. Only A keeps
-    // running on the injected clock.
+    // running on the injected clock. 上游形态：Disconnected 于 +6 s
+    // （keepalive 超时）即 closeAgent（worker_ice.go:591-600）并停在
+    // Disconnected——agent 已关，pion 自己的 +12 s Failed 不再存在；
+    // guard 在 +6.8 s 前后重发起（B 仍缺席，Idle 会话空转）。
     let mut disconnected_at = None;
-    let mut failed_at = None;
     while now <= selected_at + 20_000 {
         let _ = a.orch.run_once(now);
         now += 100;
@@ -935,10 +952,7 @@ fn disconnect_and_failed_transitions_follow_the_injected_clock() {
                 "Disconnected must not fire before +6 s of silence (now={now})"
             );
         }
-        if failed_at.is_none() && now > selected_at + 12_000 && st.state == PeerIceState::Failed {
-            failed_at = Some(now);
-        }
-        if failed_at.is_some() {
+        if disconnected_at.is_some() && now > selected_at + 13_500 {
             break;
         }
     }
@@ -948,16 +962,15 @@ fn disconnect_and_failed_transitions_follow_the_injected_clock() {
         "Disconnected must land at ~+6 s (got +{} ms)",
         d - selected_at
     );
-    let f = failed_at.expect("Failed must arrive after +12 s of silence");
-    assert!(
-        (selected_at + 12_000..=selected_at + 13_500).contains(&f),
-        "Failed must land at ~+12 s (got +{} ms)",
-        f - selected_at
+    assert_ne!(
+        a.status_of(KEY_B).state,
+        PeerIceState::Failed,
+        "closeAgent at Disconnected: no +12 s Failed transition follows"
     );
 
     // The timed-out peer is unreachable and the gate stays held.
     let summary = a.orch.summary();
-    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.disconnected, 1);
     assert_eq!(summary.reachable, 0);
     assert!(!ice_ready_for_default_route(&summary));
     let snap = gated_config(true, &summary);
@@ -972,7 +985,8 @@ fn disconnect_and_failed_transitions_follow_the_injected_clock() {
 /// ③ B 彻底静默时，A 的 keepalive/断连计时器仍按注入时钟前进
 ///   （+6s Disconnected、+12s Failed）——修复前 A 会永远冻结在 Connected
 ///   （12:00 主机侧快照 `ice{connected:1}` 的形态），对端反而被误判；
-/// ④ signal 恢复后，冷却期满 A 以全新凭证重新发起（renegotiation armed）。
+/// ④ signal 恢复后，guard 复位到 800 ms 的下一跳，A 以**同一对凭证**重新
+///   发起（per-peer 凭证稳定，worker_ice.go:91-97）。
 #[test]
 fn ice_session_pump_survives_signal_outage_and_timers_stay_honest() {
     let bus = Arc::new(SignalBus::default());
@@ -1014,9 +1028,12 @@ fn ice_session_pump_survives_signal_outage_and_timers_stay_honest() {
         "no signaling frames may leave while signal_ready=false"
     );
 
-    // ③ B 彻底静默：A 的计时器仍前进（不再冻结在 Connected）。
+    // ③ B 彻底静默：A 的计时器仍前进（不再冻结在 Connected）。上游形态：
+    // Disconnected 事件即刻 closeAgent（worker_ice.go:591-600）+ 状态置
+    // Disconnected（conn.go:496-540）——agent 已关，pion 自己的 +12 s Failed
+    // 不再存在；「A 还在说话」的窗口（0..+6 s）不受影响。
     let silence_at = now;
-    let mut failed_at = None;
+    let mut disconnected_at = None;
     while now <= silence_at + 16_000 {
         let _ = a.orch.run_once(now);
         now += 50;
@@ -1024,21 +1041,31 @@ fn ice_session_pump_survives_signal_outage_and_timers_stay_honest() {
         if now <= silence_at + 6_000 {
             assert_ne!(st.state, PeerIceState::Disconnected, "no premature disconnect");
         }
-        if failed_at.is_none() && now > silence_at + 12_000 && st.state == PeerIceState::Failed {
-            failed_at = Some(now);
+        if disconnected_at.is_none()
+            && now > silence_at + 6_000
+            && st.state == PeerIceState::Disconnected
+        {
+            disconnected_at = Some(now);
         }
-        if failed_at.is_some() {
+        if disconnected_at.is_some() {
             break;
         }
     }
+    let disconnected_at = disconnected_at.expect(
+        "A must reach Disconnected on the injected clock while its signal is down \
+         (the frozen-session bug kept such a peer at Connected forever)",
+    );
     assert!(
-        failed_at.is_some(),
-        "A must reach Failed on the injected clock while its signal is down \
-         (the frozen-session bug kept such a peer at Connected forever)"
+        (silence_at + 6_000..=silence_at + 7_000).contains(&disconnected_at),
+        "Disconnected must land at ~+6 s of silence, got +{} ms",
+        disconnected_at - silence_at
     );
 
-    // ④ signal 恢复：冷却期满，A 以全新凭证重新发起。
+    // ④ signal 恢复：guard 复位到 800 ms 的下一跳，A 以**同一对凭证**重新
+    // 发起（per-peer 凭证稳定，worker_ice.go:91-97；曾经的自造「换新凭证
+    // 重新发起」绕道已删——对端手里永远有本端有效的 ufrag:pwd）。
     a.orch.set_signal_ready(true);
+    let frames_before_recovery = bus.seen().iter().filter(|f| f.from == KEY_A).count();
     let first_offer = bus
         .seen()
         .iter()
@@ -1051,38 +1078,41 @@ fn ice_session_pump_survives_signal_outage_and_timers_stay_honest() {
         let _ = a.orch.run_once(now);
         now += 50;
         deliver(&bus, now, &mut a, None); // B 仍缺席
-        if let Some(f) = bus
+        let after: Vec<Frame> = bus
             .seen()
+            .into_iter()
+            .skip(frames_before_recovery)
+            .collect();
+        if let Some(f) = after
             .iter()
-            .rev()
             .find(|f| f.kind == PeerSignalKind::Offer && f.from == KEY_A)
         {
-            if f.payload != first_offer {
-                reoffered = Some(f.payload.clone());
-                break;
-            }
+            reoffered = Some(f.payload.clone());
+            break;
         }
     }
-    let fresh = reoffered
-        .expect("after the signal link returns, A must re-initiate with FRESH credentials");
-    assert_ne!(
-        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
+    let reoffered =
+        reoffered.expect("after the signal link returns, A must re-offer on the guard hop");
+    assert_eq!(
+        parse_ufrag_pwd(&reoffered).expect("re-offer wire form"),
         parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
-        "the re-initiation must carry NEW credentials (a new negotiation, not a replay)"
+        "the re-offer carries the SAME stable credentials"
     );
 }
 
-/// 真机 20260913 H3 回归：对端仍持有旧会话、不再应答（收不到
-/// Answer/候选）时，本端此前会**永久沉默**——会话永不 `start()`，
-/// `want_initiate` 要 `session.is_none()`、`want_locals` 要
-/// `!locals_done`，谁都不再触发，gather 一次后死寂（池填满、无
-/// `locals-gathered`，只有对端重启才救活）。修复：会话创建后
-/// [`netbird_core::peer_conn::START_DEADLINE_MS`] 内仍未 start → 拆除、
-/// 冷却、以全新凭证重新发起（上游 handshaker 超时重启语义）。
+/// 真机 20260913 H3 回归（guard 形态重述）：对端仍持有旧会话、不再应答
+/// （收不到 Answer/候选）时，本端**永不沉默**——上游没有按谈判龄期拆会的
+/// 机制（审计 E4：`START_DEADLINE_MS` 无对应物）；重发是 guard 的职责
+/// （`guard.go:129-130` → `conn.go:688-692` → `handshaker.SendOffer`），
+/// 节拍 3 s ×2 封顶在本 peer 抽定的 [30,45) s timeout
+/// （`engine.go:91-92`，逐 peer 随机 `engine.go:2010-2011`）。每一跳重发的
+/// 都是同一对凭证（per-peer 稳定，`worker_ice.go:91-97`）。
 #[test]
-fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
+fn silent_peer_is_reoffered_on_the_guard_backoff_with_stable_credentials() {
     let bus = Arc::new(SignalBus::default());
     // B 从不存在：A 的 OFFER/候选全部发进虚空（对端持旧会话、永不回答）。
+    // TestOrch::new 已装定 FixedHalfRng：裸间隔 3 s / 6 s / 12 s / 24 s →
+    // 封顶 37.5 s（r=0.5 抽定的 timeout）。
     let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
 
     let mut now = 1000u64;
@@ -1097,53 +1127,60 @@ fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
         .expect("initial offer");
     assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no answer → never leaves Idle");
 
-    // 截止前：不拆除；周期重发只复用同一凭证（signaled 母本去重）。
-    while now < 1000 + netbird_core::peer_conn::START_DEADLINE_MS - 500 {
-        let _ = a.orch.run_once(now);
-        now += 100;
-        deliver(&bus, now, &mut a, None);
+    // guard 节拍：3 s / 6 s / 12 s / 24 s → 封顶，每一跳重发同一对凭证；
+    // 全程零 teardown（没有 9 s 僵尸拆除）。hop 到点前 1 ms 与到点各拍一遍。
+    let mut prev_offers = bus
+        .seen()
+        .iter()
+        .filter(|f| f.kind == PeerSignalKind::Offer)
+        .count();
+    let hop_edges = [4_000u64, 10_000, 22_000, 46_000, 83_500];
+    for edge in hop_edges {
+        let _ = a.orch.run_once(edge - 100);
+        deliver(&bus, edge - 100, &mut a, None);
+        let n = bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count();
+        assert_eq!(n, prev_offers, "no re-offer before the hop at {edge}");
+        let _ = a.orch.run_once(edge);
+        deliver(&bus, edge, &mut a, None);
+        let n = bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count();
+        assert!(n > prev_offers, "the guard hop at {edge} must re-offer");
+        prev_offers = n;
     }
-    assert_eq!(
-        a.status_of(KEY_B).state,
-        PeerIceState::Idle,
-        "no teardown before the start deadline"
+    // 封顶档（+37.5 s）之后继续按封顶重复。
+    let _ = a.orch.run_once(83_500 + 37_400);
+    deliver(&bus, 83_500 + 37_400, &mut a, None);
+    let n = bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count();
+    assert_eq!(n, prev_offers, "inside the capped interval");
+    let _ = a.orch.run_once(83_500 + 37_500);
+    deliver(&bus, 83_500 + 37_500, &mut a, None);
+    assert!(
+        bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count() > prev_offers,
+        "the cap repeats every 37.5 s"
     );
+
+    // 每一跳重发的都是同一对凭证；全程恰一枚共享 mux socket（会话未拆）。
     let distinct_offers: std::collections::HashSet<String> = bus
         .seen()
         .iter()
         .filter(|f| f.kind == PeerSignalKind::Offer)
         .map(|f| f.payload.clone())
         .collect();
-    assert_eq!(distinct_offers.len(), 1, "pre-deadline re-signals reuse the SAME offer");
-
-    // 截止后：拆除 + 冷却 + 全新凭证重新发起（自愈，无需对端重启）。
-    let mut fresh = None;
-    while now <= 1000 + netbird_core::peer_conn::START_DEADLINE_MS + 15_000 {
-        let _ = a.orch.run_once(now);
-        now += 100;
-        deliver(&bus, now, &mut a, None);
-        if let Some(f) = bus.seen().iter().rev().find(|f| f.kind == PeerSignalKind::Offer) {
-            if f.payload != first_offer {
-                fresh = Some(f.payload.clone());
-                break;
-            }
-        }
-    }
-    let fresh = fresh.expect("a FRESH offer must be re-initiated after the start deadline");
-    assert_ne!(
-        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
-        parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
-        "the zombie teardown must re-initiate with NEW credentials"
+    assert_eq!(
+        distinct_offers.len(),
+        1,
+        "every guard hop re-offers the SAME per-peer credentials"
     );
     assert_eq!(
         a.socks.taken(),
         1,
-        "STAGE 2: ONE shared mux socket for the whole ICE plane — the re-initiated \
-         negotiation reuses it instead of taking a fresh per-session socket"
+        "STAGE 2: ONE shared mux socket for the whole ICE plane — no session ever \
+         came and went, and the mux was taken exactly once"
     );
-    assert!(
-        a.orch.ice_mux().is_some(),
-        "the shared mux outlived the torn-down session"
+    assert!(a.orch.ice_mux().is_some(), "the shared mux outlives everything");
+    assert_eq!(
+        a.status_of(KEY_B).state,
+        PeerIceState::Idle,
+        "a silent remote never changes the local state: the guard just keeps offering"
     );
 }
 
@@ -1154,16 +1191,16 @@ fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
 // "candidates but no credentials" zombie.
 // ---------------------------------------------------------------------------
 
-/// 0048 requirement 4 regression: the zombie criterion must not be fooled by
-/// remote CANDIDATES alone. A remote that trickles candidates but never sends
-/// credentials can never satisfy `maybe_start` (`remote_creds` is mandatory),
-/// so the session must still expire at [`netbird_core::peer_conn::START_DEADLINE_MS`]
-/// and re-initiate with fresh credentials. The pre-fix `remote_cands_seen == 0`
-/// clause kept such a peer `idle` forever (device run 0048: the host peer held
-/// 64 remote candidates and 0 credentials).
+/// 0048 requirement 4 regression（guard 形态重述）：只 trickle 候选、从不发
+/// 凭证的对端不能把本端搅成僵尸。`maybe_start` 仍然要求远端凭证（上游 agent
+/// 也要凭据才起跳），这样的 peer 永远 Idle——但 guard 每一跳照常重发同一对
+/// 凭证（修复前的 `remote_cands_seen == 0` 僵尸判据会把这种 peer 永久搁置，
+/// device run 0048：host 对端 64 条候选、0 条凭证），且没有按龄期拆会的机制
+/// 在旁边倒计时。
 #[test]
-fn candidate_only_remote_still_times_out_and_reinitiates() {
+fn candidate_only_remote_never_wedges_and_keeps_getting_reoffers() {
     let bus = Arc::new(SignalBus::default());
+    // TestOrch::new 已装定 FixedHalfRng（节拍逐值确定）。
     let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
 
     let mut now = 1000u64;
@@ -1184,34 +1221,28 @@ fn candidate_only_remote_still_times_out_and_reinitiates() {
         .expect("remote candidate");
     assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no credentials → never starts");
 
-    // Before the deadline nothing is torn down.
-    while now < 1000 + netbird_core::peer_conn::START_DEADLINE_MS - 500 {
-        let _ = a.orch.run_once(now);
-        now += 100;
-        deliver(&bus, now, &mut a, None);
+    // The candidate-only negotiation is NOT a zombie: no teardown timer runs,
+    // the guard keeps re-offering the SAME credentials on its backoff.
+    let mut reoffers = 0usize;
+    let mut prev = bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count();
+    for edge in [4_000u64, 10_000, 22_000] {
+        let _ = a.orch.run_once(edge);
+        deliver(&bus, edge, &mut a, None);
+        let n = bus.seen().iter().filter(|f| f.kind == PeerSignalKind::Offer).count();
+        assert!(n > prev, "the guard hop at {edge} re-offers");
+        reoffers += n - prev;
+        prev = n;
     }
-    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no teardown before the deadline");
-
-    // At the deadline the candidate-only negotiation is a zombie: tear down
-    // and re-initiate with FRESH credentials.
-    let mut fresh = None;
-    while now <= 1000 + netbird_core::peer_conn::START_DEADLINE_MS + 15_000 {
-        let _ = a.orch.run_once(now);
-        now += 100;
-        deliver(&bus, now, &mut a, None);
-        if let Some(f) = bus.seen().iter().rev().find(|f| f.kind == PeerSignalKind::Offer) {
-            if f.payload != first_offer {
-                fresh = Some(f.payload.clone());
-                break;
-            }
-        }
-    }
-    let fresh = fresh.expect("the candidate-only negotiation must re-arm with a fresh offer");
-    assert_ne!(
-        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
-        parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
-        "the re-initiation must carry NEW credentials"
-    );
+    assert!(reoffers >= 3, "re-offers continue: {reoffers}");
+    let distinct_offers: std::collections::HashSet<String> = bus
+        .seen()
+        .iter()
+        .filter(|f| f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload.clone())
+        .collect();
+    assert_eq!(distinct_offers.len(), 1, "every re-offer carries the SAME credentials");
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "still idle, but not silent");
+    assert_eq!(a.socks.taken(), 1, "no extra sockets were taken across the re-offers");
 }
 
 /// 0048 R3 regression, re-shaped by STAGE 2 (official-alignment §2.7): initiate
@@ -1238,7 +1269,8 @@ fn initiate_before_socket_supply_still_offers_credentials() {
         .run_once(now)
         .expect_err("no mux is a fail-closed error, never an unprotected socket");
     assert!(format!("{err}").contains("no-mux"), "got {err}");
-    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle);
+    // closeAgent 语义：半成品会话整段拆掉，观测面 = Failed（不是 Idle）。
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Failed);
     assert!(bus.queue.lock().expect("queue").is_empty(), "fail-closed: no frame may leave");
 
     // The remote trickles candidates while A still has no credentials (the
@@ -1287,11 +1319,13 @@ fn initiate_before_socket_supply_still_offers_credentials() {
 }
 
 /// 0048 glare regression (requirement 2), re-shaped by STAGE 2 (official-alignment
-/// §2.7): the local side attempted to initiate while its socket provider was
-/// empty — which now means "no mux", so the initiate beat fails CLOSED and the
-/// half-built session is rolled back. The remote's OFFER then arrives and takes
-/// the normal answerer path (no session ⇒ no glare), so the ANSWER leaves as soon
-/// as the provider hands out the mux and both sides converge.
+/// §2.7) and the guard reconnection beat: the local side attempted to initiate
+/// while its socket provider was empty — which now means "no mux", so the
+/// initiate beat fails CLOSED and the half-built session is rolled back
+/// (closeAgent). The remote's OFFER then arrives unanswered (the gather has no
+/// mux); once the provider hands out the socket, A's guard hop re-offers (and
+/// answers B's re-offer) inside the first 3 s backoff step, and the glare
+/// resolves through the public-key tie-breaker.
 #[test]
 fn remote_offer_after_failed_initiate_is_answered() {
     let bus = Arc::new(SignalBus::default());
@@ -1321,9 +1355,11 @@ fn remote_offer_after_failed_initiate_is_answered() {
     let supply_at = now;
     a.socks.feed_lo_sockets(8);
 
-    // Pump observing WHEN the ANSWER leaves: the remote OFFER is unanswered
-    // until the socket supply arrives, and the fix must answer it on the next
-    // local-candidate collection — not after a whole failed negotiation cycle.
+    // Pump observing WHEN the ANSWER leaves: after the socket supply the next
+    // event is A's guard hop (the failed initiate left the peer Failed; the
+    // guard re-offers at its first hop — `guard.go:129-130`), and B's
+    // (re-)offer / A's offer cross as glare that the tie-breaker resolves.
+    // The ANSWER must ride that first hop window — not a whole backoff cap.
     let mut answer_at = None;
     let mut converged = false;
     while now <= 40_000 {
@@ -1351,12 +1387,13 @@ fn remote_offer_after_failed_initiate_is_answered() {
     );
     let answer_at = answer_at.expect("A must signal an ANSWER");
     assert!(
-        answer_at <= supply_at + 3_000,
-        "the ANSWER must follow the socket supply promptly (answer at +{} ms after supply), \
-         not after a failed negotiation cycle",
+        answer_at <= supply_at + netbird_core::peer_conn::GUARD_INITIAL_MS + 1_000,
+        "the ANSWER must ride the guard's FIRST re-offer hop (answer at +{} ms after supply), \
+         not a grown-backoff cycle",
         answer_at - supply_at
     );
 
+    // 凭证 per-peer 稳定：A 的全部 OFFER/ANSWER 各只有一种 payload。
     let answers: std::collections::HashSet<String> = bus
         .seen()
         .into_iter()
@@ -1365,12 +1402,20 @@ fn remote_offer_after_failed_initiate_is_answered() {
         .collect();
     assert_eq!(answers.len(), 1, "A must send exactly one distinct ANSWER, got {answers:?}");
     assert!(parse_ufrag_pwd(answers.iter().next().expect("answer")).is_ok());
+    let offers: std::collections::HashSet<String> = bus
+        .seen()
+        .into_iter()
+        .filter(|f| f.from == KEY_A && f.to == KEY_B && f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload)
+        .collect();
     assert!(
-        !bus.seen().iter().any(|f| f.from == KEY_A && f.kind == PeerSignalKind::Offer),
-        "A answered the remote OFFER; it must not also offer"
+        offers.iter().all(|o| answers.contains(o)),
+        "A's re-offer (guard hop after closeAgent) carries the SAME stable credentials \
+         as its answer: offers={offers:?} answers={answers:?}"
     );
-    assert_eq!(a.status_of(KEY_B).controlling, Some(false), "A answered → controlled");
-    assert_eq!(b.status_of(KEY_A).controlling, Some(true), "B offered → controlling");
+    // 角色由公钥比较决定，与 Offer/Answer 方向无关（官方 isController）。
+    assert_eq!(a.status_of(KEY_B).controlling, Some(false), "A (smaller key) → controlled");
+    assert_eq!(b.status_of(KEY_A).controlling, Some(true), "B (bigger key) → controlling");
 }
 
 // ---------------------------------------------------------------------------
