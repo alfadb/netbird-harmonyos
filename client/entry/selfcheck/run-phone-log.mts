@@ -732,9 +732,17 @@ try {
     extText.split('connectorResourceStatus(').length === 2 &&
     extText.split('nativeResourceSample(').length === 2);
   // STAGE 4 (official-alignment audit §2.7): the retired ICE socket pool took
-  // its own 4 s top-up timer with it, so the reviewed count is now 4.
-  check('the resource bridge adds NO second timer to the extension (the reviewed 4 remain)',
-    extText.split('setInterval(').length === 5);
+  // its own 4 s top-up timer with it. 0.0.27 then replaced the 100 ms
+  // socket-supply tick: the supply is event-driven now (the core's own enqueue
+  // wake) with a 5 s safety net, and the route-apply mailbox that tick used to
+  // carry got its own 500 ms interval. The reviewed count is therefore 5 —
+  // watcher (5 s), N2 iface burst (500 ms, armed window only), N2 ring stats
+  // (60 s, configured only), supply safety net (5 s), mailbox (500 ms) — and
+  // NONE of them belongs to the phone-log resource bridge.
+  check('the resource bridge adds NO timer of its own to the extension (its five are: ' +
+    'watcher, N2 burst, N2 ring, supply safety net, mailbox poll)',
+    extText.split('setInterval(').length === 6 &&
+    sample.indexOf('setInterval') < 0 && resourceMethod.indexOf('setInterval') < 0);
   check('the diagnostics helper is started exactly once in the whole extension (no re-arm timer)',
     extText.split('startDiagnostics(').length === 2 &&
     extText.split('startSystemEvents(').length === 2);

@@ -50,8 +50,10 @@
 //   L8  the answer document appears only AFTER the ACK was accepted.
 //   L9  the pre-existing automatic caller still ACKs kind 'auto' and the recreate
 //       reports its real outcome token.
-//   L10 the page's mailbox rides the EXISTING 100 ms socket-supply tick, and that
-//       interval is stopped ONLY by the pre-existing teardown.
+//   L10 the socket supply is EVENT-DRIVEN (one registered wake; ONE wake drains
+//       the whole queue in order; the 100 ms tick is gone) and the page's mailbox
+//       rides its OWN poll, both intervals stopped ONLY by the pre-existing
+//       teardown, which also unsubscribes the wake.
 //   L11 the remaining native answers: no-map (stored-no-map, NOT applied), a
 //       refusal (its own error token, connection untouched), an unreadable answer
 //       (never applied) and a WG-seam refusal after the mutation (the existing
@@ -69,9 +71,11 @@
 //       initial ACK) and the retained request is then applied exactly once as
 //       no-os-change; a user stop / connector death / refused outbound socket can
 //       never be undone by a late completion.
-//   P   source pins: one call site, the synchronous decision turn, the four
-//       answer branches, the two teardown re-checks, no new timer, no direct FS
-//       access from the consumer, no locally re-spelled state/mode literal.
+//   P   source pins: one mailbox call site on its own timer, the retired 100 ms
+//       socket tick gone, the wake→drain-until-empty servicing loop, the
+//       synchronous decision turn, the four answer branches, the two teardown
+//       re-checks, no direct FS access from the consumer, no locally re-spelled
+//       state/mode literal.
 //
 // Run: node client/entry/selfcheck/run-route-apply-vpe.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -301,6 +305,17 @@ function resetWorld(): void {
   G['__NB_SUPPLY_WG_FEED'] = 0;
   G['__NB_SUPPLY_ICE_MUX_ARM'] = 0;
   G['__NB_SUPPLY_POLL'] = 0;
+  // Since 0.0.27 the supply seam is the core's WAKE (one registered callback,
+  // fired by the fixture) plus a slow safety net — so the per-world reset owns
+  // the wake registration and whatever the fixture queued for one wake to drain.
+  G['__NB_SOCKET_SUPPLY_QUEUE'] = undefined;
+  G['__NB_SOCKET_SUPPLY_REQUEST'] = undefined;
+  G['__NB_SUPPLY_WAKE'] = undefined;
+  G['__NB_SUPPLY_SUBSCRIBE'] = 0;
+  G['__NB_SUPPLY_UNSUBSCRIBE'] = 0;
+  G['__NB_SUPPLY_REPLY'] = 0;
+  G['__NB_SUPPLY_REPLY_IDS'] = undefined;
+  G['__NB_SUPPLY_REPLY_LAST'] = undefined;
   G['__NB_IFACE_PROBES'] = 0;
   G['__NB_IFACE_ANSWER'] = undefined;
   G['__NB_FLIP_ON_PROBE'] = false;
@@ -969,7 +984,7 @@ try {
       JSON.stringify({ ack: ack, outcome: outcome }));
   }
 
-  // ---- L10: the EXISTING 100 ms supply tick carries the mailbox --------------
+  // ---- L10: the event-driven supply wake + the mailbox's own poll ------------
   resetWorld();
   seedFile(SELECTION_PATH, serializeSelection(MGMT, SELECTION_OFF));
   answer(setterAnswer(true, true, DESIRED, true));
@@ -977,22 +992,62 @@ try {
   {
     const ability = settledWorld(mod, createConnection);
     (ability['startSocketSupply'] as () => void)();
+    // The start leg arms both intervals; drive the same two calls here.
+    (ability['startRouteApplyMailbox'] as () => void)();
+    // Starting the supply path SUBSCRIBES and drains ONCE (the core may already
+    // hold a request from the dial that brought us here). Nothing else polls the
+    // core: the retired 100 ms tick is gone.
+    check('L10a starting the supply path registers ONE wake and drains the queue once ' +
+      '(no fixed-cadence core poll)',
+      count('__NB_SUPPLY_SUBSCRIBE') === 1 && count('__NB_SUPPLY_UNSUBSCRIBE') === 0 &&
+      typeof G['__NB_SUPPLY_WAKE'] === 'function' &&
+      count('__NB_SUPPLY_POLL') === 1 && count('__NB_SUPPLY_REPLY') === 0,
+      JSON.stringify({ subscribe: count('__NB_SUPPLY_SUBSCRIBE'),
+        polls: count('__NB_SUPPLY_POLL'), wake: typeof G['__NB_SUPPLY_WAKE'] }));
+
+    // The core enqueues THREE requests and fires ONE wake: the servicing loop
+    // must drain until the poll answers an EMPTY id (every request answered —
+    // the REPLIES land in completion order, the POLLS in queue order).
+    G['__NB_SOCKET_SUPPLY_QUEUE'] = [
+      { id: '51', kind: 'tcp', purpose: 'management' },
+      { id: '52', kind: 'tcp', purpose: 'signal' },
+      { id: '53', kind: 'udp', purpose: 'dns' }
+    ];
+    (G['__NB_SUPPLY_WAKE'] as () => void)();
+    {
+      const deadline: number = Date.now() + 4000;
+      while (Date.now() < deadline && count('__NB_SUPPLY_REPLY') < 3) { await delay(5); }
+    }
+    const replied: unknown[] = ((G['__NB_SUPPLY_REPLY_IDS'] ?? []) as unknown[]).slice().sort();
+    check('L10b ONE wake drains the WHOLE queue (until the poll answers an EMPTY id) and ' +
+      'every request is answered — the wake, not a tick, is the entry point',
+      JSON.stringify(replied) === JSON.stringify(['51', '52', '53']) &&
+      count('__NB_SUPPLY_POLL') >= 5 && (G['__NB_SOCKET_SUPPLY_QUEUE'] as unknown[]).length === 0,
+      JSON.stringify({ replied: replied, polls: count('__NB_SUPPLY_POLL') }));
+
+    // The page's mailbox now rides its OWN poll (the supply tick it used to share
+    // is gone), and that poll is started and stopped by the same lifecycle.
     const deadline: number = Date.now() + 8000;
     while (Date.now() < deadline && fileOf(RESULT_PATH) === undefined) {
       await delay(10);
     }
     const doc = result();
-    check('L10a the page mailbox is picked up by the EXISTING 100 ms socket-supply tick ' +
-      '(no new timer), which keeps serving the native socket poll',
-      doc !== undefined && doc['id'] === 'ui-route-timer' && doc['state'] === 'applied' &&
-      count('__NB_SUPPLY_POLL') > 0,
-      JSON.stringify({ doc: doc, supplyPolls: count('__NB_SUPPLY_POLL') }));
-    check('L10b the supply interval is STILL running after an apply (only teardown stops it)',
-      ability['socketSupplyTimer'] !== undefined && ability['socketSupplyTimer'] !== -1,
-      String(ability['socketSupplyTimer']));
+    check('L10c the page mailbox still gets its apply through its OWN poll ' +
+      '(no shared 100 ms socket tick)',
+      doc !== undefined && doc['id'] === 'ui-route-timer' && doc['state'] === 'applied',
+      JSON.stringify({ doc: doc }));
+    check('L10d both intervals are armed and distinct: the supply SAFETY NET and the ' +
+      'mailbox poll (the only two left on this lifecycle)',
+      ability['socketSupplyTimer'] !== undefined && ability['socketSupplyTimer'] !== -1 &&
+      ability['routeApplyMailboxTimer'] !== undefined &&
+      ability['routeApplyMailboxTimer'] !== -1 &&
+      ability['socketSupplyTimer'] !== ability['routeApplyMailboxTimer'],
+      `${String(ability['socketSupplyTimer'])}/${String(ability['routeApplyMailboxTimer'])}`);
     (ability['stopSocketSupply'] as () => void)();
-    check('L10c and it is stopped by the pre-existing teardown',
-      ability['socketSupplyTimer'] === -1);
+    check('L10e teardown stops both intervals, unsubscribes the wake and shuts the supply',
+      ability['socketSupplyTimer'] === -1 && ability['routeApplyMailboxTimer'] === -1 &&
+      ability['socketSupplyWaked'] === false && count('__NB_SUPPLY_UNSUBSCRIBE') === 1 &&
+      G['__NB_SUPPLY_WAKE'] === undefined);
   }
 
   // ---- L11: the remaining native answers -------------------------------------
@@ -1297,14 +1352,35 @@ try {
     const stop: number = extSource.indexOf('private async feedSpareProtectedSocket(');
     return at < 0 || stop < 0 ? '' : extSource.slice(at, stop);
   })();
-  check('P1 the mailbox rides the ONE existing 100 ms tick: exactly one call site, inside ' +
-    'startSocketSupply, and the consumer adds no timer of its own',
+  check('P1 the mailbox rides its OWN poll (the shared 100 ms socket tick is gone): exactly ' +
+    'one call site, inside startRouteApplyMailbox, and the consumer adds no timer of its own',
     extSource.split('this.maybePollRouteApplyRequest();').length === 2 &&
     extSource.indexOf('this.maybePollRouteApplyRequest();') >
-      extSource.indexOf('this.socketSupplyTimer = setInterval(') &&
+      extSource.indexOf('this.routeApplyMailboxTimer = setInterval(') &&
+    extSource.indexOf('}, 100);') < 0 &&
+    extSource.indexOf('this.socketSupplyTimer = setInterval(') > 0 &&
+    extSource.indexOf('}, SOCKET_SUPPLY_SAFETY_NET_MS);') > 0 &&
     consumer.length > 0 && consumer.indexOf('setInterval(') < 0 &&
     consumer.indexOf('setTimeout(') < 0 && consumer.indexOf('commonEvent') < 0 &&
     consumer.indexOf('startVpnExtensionAbility(') < 0);
+  const wake = ((): string => {
+    const at: number = extSource.indexOf('private socketSupplyWake(): void {');
+    const stop: number = extSource.indexOf('private subscribeSocketSupplyWake(): void {');
+    return at < 0 || stop < 0 ? '' : extSource.slice(at, stop);
+  })();
+  const drain = ((): string => {
+    const at: number = extSource.indexOf('private drainSocketSupply(): void {');
+    const stop: number = extSource.indexOf('private startRouteApplyMailbox(): void {');
+    return at < 0 || stop < 0 ? '' : extSource.slice(at, stop);
+  })();
+  check('P1b the core wake is the servicing ENTRY POINT (it calls the drain loop) and the ' +
+    'drain loop services the queue until the core answers an EMPTY id — never a fixed count, ' +
+    'never a timer of its own',
+    wake.length > 0 && wake.indexOf('this.drainSocketSupply();') > 0 &&
+    drain.length > 0 && drain.indexOf('socketSupplyPoll()') > 0 &&
+    drain.indexOf('if (request.id.length === 0) {') > 0 &&
+    drain.indexOf('this.fulfillSocketRequest(request)') > 0 &&
+    drain.indexOf('setInterval(') < 0 && drain.indexOf('setTimeout(') < 0);
   const guardAt: number = consumer.indexOf(
     'if (this.destroyRequested || this.connectorDeathHandled || this.recreateInFlight ||');
   const setterAt: number = consumer.indexOf('connectorRouteSelectionSet(desired)');
