@@ -835,7 +835,7 @@ static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// across ALL of this session's local sockets, not per socket. The previous
 /// shape drained 8 per socket per pump, so a session with several candidate
 /// sockets multiplied the read cap and a 100 ms pump capped the selected
-/// direction at ~80 pps (≈0.9 Mbps at 1400 MTU). STUN checks/keepalives ride
+/// direction at ~80 pps (≈0.8 Mbps at the default 1280 MTU). STUN checks/keepalives ride
 /// the same budget and are never dropped by it; anything left unread stays in
 /// the kernel socket buffer and is served by the next pump (bounded memory
 /// either way). Stage 4 dropped the old clamp against the retired per-session

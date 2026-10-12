@@ -21,7 +21,7 @@
 //!   "endpoint":       "host:port (required)",
 //!   "allowed_ips":    ["10.0.0.0/24", "0.0.0.0/0"] (required, may be empty),
 //!   "dns_servers":    ["1.1.1.1"] (optional, IPv4 literals),
-//!   "mtu":            1420 (optional, 576..=1500, default 1420),
+//!   "mtu":            1280 (optional, 576..=1500, default 1280),
 //!   "listen_port":    51820 | null (optional, 0 = ephemeral)
 //! }
 //! ```
@@ -89,10 +89,16 @@ pub struct ClientConfig {
     pub listen_port: Option<u16>,
 }
 
-/// Default tunnel MTU when the document omits `mtu` (classic WireGuard
-/// default: 1500 - 80 bytes of WireGuard/UDP/IP overhead over IPv6 worst case).
-pub const DEFAULT_MTU: u16 = 1420;
-/// Accepted MTU envelope: 576 = IPv4 minimum, 1500 = Ethernet.
+/// Default tunnel MTU when the document omits `mtu`: the OFFICIAL client's
+/// `iface.DefaultMTU = 1280` (`client/iface/iface.go:29` @67c2041) — the same
+/// value the Android app hands to `VpnService.Builder.setMtu`
+/// (`android-client tool/.../IFace.java:73`). Upstream's own
+/// `MTU_MIN`/`MTU_MAX` are 576/8192; this client keeps the PLATFORM envelope
+/// below (HarmonyOS `VpnConfig.mtu` accepts 576..=1500 — a value outside it
+/// makes `VpnConnection.create()` fail, device-verified 2026-09-15).
+pub const DEFAULT_MTU: u16 = 1280;
+/// Accepted MTU envelope: 576 = IPv4 minimum, 1500 = Ethernet / the upper
+/// bound the HarmonyOS `VpnConfig.mtu` declaration accepts.
 pub const MTU_MIN: u16 = 576;
 pub const MTU_MAX: u16 = 1500;
 

@@ -431,6 +431,14 @@ export interface CoreNetworkConfig {
   // UI phase 1: own peer fqdn (the Home screen's domain line); null when
   // management sent none. Tail-appended by the core after `stuns`.
   fqdn?: string | null;
+  // 2026-10-12 upstream MTU alignment: the announced `PeerConfig.mtu` (field
+  // 7, upstream `selectMTU`'s peer input — client/internal/connect.go:740),
+  // exported by the core ONLY when it is usable on this platform
+  // ([576,1500], the envelope VpnConfig.mtu accepts). TAIL-appended after
+  // `fqdn`. null/absent = nothing usable announced — the official server's
+  // normal answer (its toPeerConfig never sets the field) — and the shell
+  // keeps the official default 1280 (selectTunnelMtu).
+  mtu?: number | null;
 }
 
 // netbird-device-config.json shape (app-private dir, development-time —

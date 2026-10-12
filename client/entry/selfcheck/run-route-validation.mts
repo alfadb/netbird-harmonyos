@@ -361,7 +361,7 @@ try {
     '{"interface":"vpn-tun","destination":{"address":{"address":"203.0.113.7","family":1},' +
     '"prefixLength":32},"gateway":{"address":"10.99.0.1","family":1},' +
     '"hasGateway":true,"isDefaultRoute":false,"isExcludedRoute":true}],' +
-    '"dnsAddresses":["8.8.8.8"],"mtu":1400}';
+    '"dnsAddresses":["8.8.8.8"],"mtu":1280}';
   check('T1 platform VpnConfig byte-identical to baseline',
     JSON.stringify(platform) === expectedPlatform, JSON.stringify(platform));
   check('T1 provenance tag never leaks into platform routes',
@@ -369,6 +369,40 @@ try {
       !('source' in r) && Object.keys(r).length === (r['isExcludedRoute'] !== undefined ? 6 : 5)),
     JSON.stringify(platform.routes.map((r: Record<string, unknown>): string[] =>
       Object.keys(r))));
+
+  // ---- T-MTU: upstream MTU alignment (2026-10-12) -------------------------
+  // The template default is the OFFICIAL client's `iface.DefaultMTU = 1280`
+  // (client/iface/iface.go:29) — the Android app's VpnService builder value —
+  // and the announced `PeerConfig.mtu` (snapshot tail field, upstream
+  // `selectMTU`'s peer input, client/internal/connect.go:740) replaces it when
+  // it is usable. The platform accepts [576,1500] on VpnConfig.mtu; a value
+  // outside it is never handed to the platform (device-verified create-401).
+  check('T-MTU: the template default is upstream iface.DefaultMTU 1280',
+    cfg.DEFAULT_TUNNEL_MTU === 1280 && base.mtu === 1280 &&
+    cfg.TUNNEL_MTU_MIN === 576 && cfg.TUNNEL_MTU_MAX === 1500,
+    String(base.mtu));
+  const withAnnouncedMtu = (mtu: unknown): Record<string, unknown> =>
+    cfg.applyNetworkConfig(base, JSON.parse('{"available":true,"serial":21,' +
+      '"routes":[{"network":"172.16.0.0/12","is_default":false}],"mtu":' +
+      JSON.stringify(mtu) + '}'));
+  check('T-MTU: a usable announced MTU replaces the default',
+    withAnnouncedMtu(1380).mtu === 1380 && withAnnouncedMtu(576).mtu === 576 &&
+    withAnnouncedMtu(1500).mtu === 1500,
+    JSON.stringify([withAnnouncedMtu(1380).mtu, withAnnouncedMtu(576).mtu,
+      withAnnouncedMtu(1500).mtu]));
+  check('T-MTU: an out-of-envelope or malformed announcement keeps the default',
+    withAnnouncedMtu(1501).mtu === 1280 && withAnnouncedMtu(575).mtu === 1280 &&
+    withAnnouncedMtu(8192).mtu === 1280 && withAnnouncedMtu(-1).mtu === 1280 &&
+    withAnnouncedMtu(0).mtu === 1280 && withAnnouncedMtu(null).mtu === 1280 &&
+    withAnnouncedMtu('1380').mtu === 1280 && withAnnouncedMtu(1380.5).mtu === 1280,
+    JSON.stringify([withAnnouncedMtu(1501).mtu, withAnnouncedMtu(575).mtu,
+      withAnnouncedMtu('1380').mtu, withAnnouncedMtu(1380.5).mtu]));
+  check('T-MTU: a snapshot without the field keeps the default (no-network-map leg)',
+    cfg.applyNetworkConfig(base, JSON.parse('{"available":false}')).mtu === 1280 &&
+    merged.mtu === 1280, JSON.stringify([merged.mtu]));
+  check('T-MTU: the selected MTU reaches the platform VpnConfig unchanged',
+    cfg.buildPlatformVpnConfig(withAnnouncedMtu(1380)).mtu === 1380 &&
+    cfg.buildPlatformVpnConfig(base).mtu === 1280);
 
   // T2/T3 end-to-end: core snapshot JSON passthrough -> validator verdict
   const snapMissing = JSON.parse('{"available":true,"address":"10.99.0.1",' +
