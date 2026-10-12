@@ -180,12 +180,30 @@ pub const DISCONNECTED_TIMEOUT_MS: u64 = 6000;
 /// Upstream `iceFailedTimeoutDefault` (`agent.go:24`) — counted AFTER the
 /// disconnected transition, so Failed lands at disconnected + failed.
 pub const FAILED_TIMEOUT_MS: u64 = 6000;
-/// Per-transaction retransmission interval (RFC 5389 §7.2.1 default RTO;
-/// pion default rto = 500ms).
-pub const CHECK_RTO_MS: u64 = 500;
-/// Attempts per transaction before the pair is Failed
-/// (RFC 5245 §16 `Rc` default = 7).
+/// Candidate-check cadence while the session is checking. Upstream does not
+/// use a per-transaction retransmission timer at all: the pion agent's task
+/// loop re-runs every `checkInterval` (`defaultCheckInterval = 200ms`, fork
+/// `agent_config.go:17-18`, never overridden by netbird's `peer/ice/agent.go:22-28`;
+/// consumed by `connectivityChecks` `agent.go:405-425` → `contact()`), and each
+/// run pings every Waiting/InProgress pair once (`pingAllCandidates`,
+/// `agent.go:477-494`). We keep the per-pair transaction shape (same
+/// transaction id re-sent, RFC 5389 §7.2.1) but at upstream's cadence.
+pub const CHECK_RTO_MS: u64 = 200;
+/// Pings per pair before the pair is Failed — pion `maxBindingRequests = 7`
+/// (`defaultMaxBindingRequests`, fork `agent_config.go:39-40`), consumed at
+/// `agent.go:492-494`.
 pub const MAX_CHECK_ATTEMPTS: u8 = 7;
+
+/// Checking → Failed budget. pion fails an agent that has been in `Checking`
+/// for longer than `disconnectedTimeout + failedTimeout` (`agent.go:381-387`,
+/// "We have been in checking longer then Disconnect+Failed timeout, set the
+/// connection to Failed"); netbird overrides both timers to 6 s
+/// (`client/internal/peer/ice/agent.go:23-24`, applied `:58-59`), so the whole
+/// negotiation budget is 12 s measured from the moment the agent entered
+/// Checking — i.e. from our `IceSession::start`. This is the ONLY
+/// per-negotiation deadline upstream has; the 9 s negotiation teardown and the
+/// all-pairs-failed teardown this core used to have had no upstream analogue.
+pub const CHECKING_TIMEOUT_MS: u64 = DISCONNECTED_TIMEOUT_MS + FAILED_TIMEOUT_MS;
 
 // ---------------------------------------------------------------------------
 // STUN attributes used by connectivity checks (RFC 5389 §18.2, RFC 8445 §16.3)
@@ -861,7 +879,11 @@ pub struct IceSession {
     keepalives: Vec<(TransactionId, u64)>,
     emitted_disconnected: bool,
     emitted_failed: bool,
-    emitted_all_pairs_failed: bool,
+    /// Injected-clock instant this session entered Checking (the first pump
+    /// after [`IceSession::start`]). pion starts its `Checking` budget the same
+    /// way (`agent.go:378-387`: `checkingDuration = time.Now()` on the first
+    /// task-loop pass that finds the agent in `Checking`).
+    checking_since_ms: Option<u64>,
     /// Datagrams dropped on an OWNED socket because a non-STUN (WG) datagram has
     /// no per-session consumer any more (official-alignment stage 4: the WG data
     /// plane is fed by the mux's sink, never through this session). Counted,
@@ -937,7 +959,7 @@ impl IceSession {
             keepalives: Vec::new(),
             emitted_disconnected: false,
             emitted_failed: false,
-            emitted_all_pairs_failed: false,
+            checking_since_ms: None,
             data_dropped: 0,
             recv_cursor: 0,
             checks_sent: 0,
@@ -1202,9 +1224,15 @@ impl IceSession {
         self.pairs = next;
     }
 
-    /// Start connectivity checks: requires remote credentials, at least one
-    /// local candidate with a socket, and at least one pair. Thaws all
-    /// pairs Frozen → Waiting (single check list).
+    /// Start connectivity checks. Requires remote credentials and at least one
+    /// local candidate with a socket; a remote candidate and a pair are NOT
+    /// required — upstream's agent enters `Checking` unconditionally as soon as
+    /// `Dial`/`Accept` runs (`agent.go:328-351` `updateConnectionState(ConnectionStateChecking)`
+    /// immediately after `SetRemoteCredentials`), even with an empty checklist
+    /// ("Failed to ping without candidate pairs", `agent.go:480-483`); a
+    /// candidate trickled afterwards forms a pair that is born Running and is
+    /// probed (`rebuild_pairs`), all inside the same 12 s Checking budget. Thaws
+    /// all pairs Frozen → Waiting (single check list).
     pub fn start(&mut self) -> Result<(), ManagementError> {
         if self.stopped {
             return Err(ManagementError::Request { status: 0, message: "ice:session-closed".into() });
@@ -1214,12 +1242,6 @@ impl IceSession {
         }
         if self.local_socks.is_empty() {
             return Err(ManagementError::Request { status: 0, message: "ice:no-local-candidates".into() });
-        }
-        if self.remote_cands.is_empty() {
-            return Err(ManagementError::Request { status: 0, message: "ice:no-remote-candidates".into() });
-        }
-        if self.pairs.is_empty() {
-            return Err(ManagementError::Request { status: 0, message: "ice:no-pairs".into() });
         }
         for p in self.pairs.iter_mut() {
             if p.state == PairState::Frozen {
@@ -1238,6 +1260,9 @@ impl IceSession {
         if self.stopped || !self.started {
             return Ok(());
         }
+        // Entering Checking arms pion's one negotiation deadline
+        // (`agent.go:378-387`); `start()` is our `updateConnectionState(Checking)`.
+        self.checking_since_ms.get_or_insert(now_ms);
         self.pump_checks(now_ms)?;
         self.pump_keepalive(now_ms)?;
         self.pump_recv(now_ms)?;
@@ -1284,13 +1309,13 @@ impl IceSession {
 
         // start checks for ALL Waiting pairs concurrently (§6.5: the pion
         // `pingAllCandidates` shape) — the pre-fix serial pacing (one
-        // outstanding check globally) spent 3.5 s per dead pair
-        // (7 × 500ms RTO), so with 2 local interfaces × (host+srflx) remote
-        // candidates a dead pair ahead of the live one in priority order
-        // could eat the whole complementary-credentials window before the
-        // live pair was ever probed. Retransmission stays per-pair (each
-        // pair re-sends its own transaction id after CHECK_RTO_MS), so this
-        // changes only the FIRST round into a parallel burst; new pairs
+        // outstanding check globally) spent 1.4 s per dead pair
+        // (7 × 200ms, upstream's cadence), so with 2 local interfaces ×
+        // (host+srflx) remote candidates a dead pair ahead of the live one in
+        // priority order could eat the whole complementary-credentials window
+        // before the live pair was ever probed. Retransmission stays per-pair
+        // (each pair re-sends its own transaction id after CHECK_RTO_MS), so
+        // this changes only the FIRST round into a parallel burst; new pairs
         // formed by late trickle candidates are born Waiting (rebuild_pairs)
         // and get their probe on the next pump.
         for i in 0..self.pairs.len() {
@@ -1919,18 +1944,25 @@ impl IceSession {
     }
 
     fn pump_timeouts(&mut self, now: u64) {
-        // all pairs failed → session failed (RFC 8445 §7.2.5.2.3 + §8.1.2
-        // checklist Failed state)
+        // The ONE negotiation deadline upstream has: an agent that has been
+        // Checking for longer than disconnectedTimeout + failedTimeout is
+        // Failed (fork `agent.go:378-387`). Deliberately NOT driven by the pair
+        // state: pion marks a silent pair Failed after `maxBindingRequests`
+        // pings and then keeps the agent Checking (`agent.go:477-494`) — a pair
+        // that failed is never retried, and a candidate trickled later forms a
+        // new pair that is probed in the remaining budget.
         if self.selected.is_none()
-            && !self.pairs.is_empty()
-            && self.pairs.iter().all(|p| p.state == PairState::Failed)
-            && !self.emitted_all_pairs_failed
+            && !self.emitted_failed
+            && self
+                .checking_since_ms
+                .is_some_and(|t| now.saturating_sub(t) >= CHECKING_TIMEOUT_MS)
         {
-            self.emitted_all_pairs_failed = true;
-            self.events.push_back(IceEvent::Failed("all-pairs-failed".into()));
+            self.emitted_failed = true;
+            self.events.push_back(IceEvent::Failed("checking-timeout".into()));
         }
-        // keepalive/disconnect timers (upstream agent.go:22-24 semantics):
-        // 6s without valid inbound → Disconnected; 6s more → Failed.
+        // keepalive/disconnect timers for an ESTABLISHED pair (upstream
+        // agent.go:553-579 `validateSelectedPair`): 6s without valid inbound →
+        // Disconnected; 6s more → Failed.
         if let Some(last) = self.last_inbound_ms {
             if now.saturating_sub(last) >= DISCONNECTED_TIMEOUT_MS && !self.emitted_disconnected {
                 self.emitted_disconnected = true;
@@ -1957,6 +1989,13 @@ impl IceSession {
             .iter()
             .position(|p| p.key(&self.local_socks, &self.remote_cands) == key)?;
         Some(self.pair_candidates(pi))
+    }
+
+    /// The injected-clock instant the agent entered `Checking` (armed on the
+    /// first pump after [`IceSession::start`]) — the anchor of pion's one
+    /// negotiation budget (`agent.go:378-387`). Observability/tests only.
+    pub fn checking_since_ms(&self) -> Option<u64> {
+        self.checking_since_ms
     }
 
     /// N11: the selected pair's LOCAL socket fd (our dup) — the orchestrator
@@ -2365,7 +2404,7 @@ mod tests {
     /// the pre-fix shape: `rebuild_pairs` formed every pair `Frozen`,
     /// `start()` is the only thaw and runs once, so a candidate arriving
     /// after the first one sat Frozen forever — health `pairs=0/0/0/2/2`
-    /// ("2 Failed + 2 Frozen") and `all-pairs-failed` could never fire.
+    /// ("2 Failed + 2 Frozen") and the session never got a probe out at all.
     ///
     /// Also pinned: a candidate added before `start()` stays Frozen and is
     /// never probed, and the already in-flight pair keeps its state /

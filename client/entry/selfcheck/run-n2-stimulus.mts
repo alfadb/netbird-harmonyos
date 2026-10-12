@@ -245,7 +245,8 @@ try {
     connector.includes('fn reset_peer_paths(&self) -> usize {'));
   check('R10 the ICE class drops its session and rearms negotiation',
     peerConn.includes('pub fn break_ice(&mut self, now_ms: u64) -> usize') &&
-    peerConn.includes('self.drop_session_rearm(idx, now_ms, "n2-stimulus-I");'));
+    peerConn.includes('self.drop_session(idx, PeerIceState::Failed, "n2-stimulus-I");') &&
+    peerConn.includes('self.guard_reset(idx, now_ms);'));
   check('R11 the only new syscall is the documented shutdown deviation',
     sysRs.includes('pub fn shutdown(fd: c_int, how: c_int) -> c_int;') &&
     sysRs.includes('pub const SHUT_RDWR: c_int = 2;'));

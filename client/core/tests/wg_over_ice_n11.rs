@@ -999,9 +999,8 @@ fn selected_connection_failure_recycles_fail_closed_then_renegotiates() {
     // Freeze B entirely (path death as seen from A): no pumps, no replies.
     let selected_at = now;
     let mut disconnected_at = None;
-    let mut failed_at = None;
     let mut reoffered = false;
-    while now <= selected_at + 20_000 {
+    while now <= selected_at + 16_000 {
         let _ = a.orch.run_once(now);
         deliver(&bus, now, &mut a, None); // B frozen: frames accumulate
         let _ = a.feed.with_device(|d| {
@@ -1022,16 +1021,16 @@ fn selected_connection_failure_recycles_fail_closed_then_renegotiates() {
             let snap = gated_config(a.feed.tunnel_ready(), &summary);
             assert!(!snap.default_route_allowed, "the gate must HOLD 0.0.0.0/0 through the failure");
         }
-        if failed_at.is_none() && st.state == PeerIceState::Failed && now > selected_at + 12_000 {
-            failed_at = Some(now);
-        }
-        // renegotiation armed: a FRESH offer appears after the Failed cooldown
-        if failed_at.is_some() && !reoffered {
+        // guard re-offer at ~+6.8 s (800 ms ticker after the disconnect):
+        // the SAME stable credentials. The session was closed at Disconnected
+        // (closeAgent, worker_ice.go:591-600), so there is no +12 s Failed
+        // transition — renegotiation is the guard's job (guard.go:148-153).
+        if !reoffered && disconnected_at.is_some() {
             reoffered = bus.seen().iter().rev().take(8).any(|f| {
-                f.from == key_a && f.kind == PeerSignalKind::Offer && f.payload != first_offer_payload
+                f.from == key_a && f.kind == PeerSignalKind::Offer && f.payload == first_offer_payload
             });
         }
-        if reoffered && now > selected_at + 16_000 {
+        if reoffered && now > selected_at + 10_000 {
             break;
         }
     }
@@ -1041,13 +1040,15 @@ fn selected_connection_failure_recycles_fail_closed_then_renegotiates() {
         "Disconnected at ~+6 s (got +{} ms)",
         d - selected_at
     );
-    let f = failed_at.expect("Failed must land at ~+12 s of silence");
-    assert!(
-        (selected_at + 12_000..=selected_at + 13_000).contains(&f),
-        "Failed at ~+12 s (got +{} ms)",
-        f - selected_at
+    assert_ne!(
+        a.status_of(&key_b).state,
+        PeerIceState::Failed,
+        "closeAgent at Disconnected: no +12 s Failed transition follows"
     );
-    assert!(reoffered, "a fresh negotiation must be armed after Failed");
+    assert!(
+        reoffered,
+        "the guard re-offers the SAME stable credentials after the disconnect"
+    );
 
     // Unfreeze B: its frozen session times out immediately (Failed →
     // session dropped → endpoint recycled), then A's queued fresh offer

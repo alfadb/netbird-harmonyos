@@ -89,7 +89,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use crate::backoff::{ExponentialBackoff, MonotonicClock, OsRandom};
+use crate::backoff::{ExponentialBackoff, MonotonicClock, OsRandom, Rng};
 use crate::connector::{ErrorClass, WgPeerApplier};
 use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::GrpcTransport;
@@ -103,8 +103,60 @@ use crate::mgmtsock::ManagementSocketProvider;
 use crate::signal::{SignalClient, SignalLoopEvent, SignalMessage, SignalOutgoing, SignalSession};
 use crate::util::jnum;
 
-/// 发起/应答失败后的重试冷却（注入时钟衡量；避免熵/收集失败时热循环）。
-pub const RETRY_COOLDOWN_MS: u64 = 2000;
+// ---------------------------------------------------------------------------
+// 重连节拍（上游 `client/internal/peer/guard/guard.go`）
+// ---------------------------------------------------------------------------
+
+/// 首次（未 Connected）重连节拍的起始间隔：上游
+/// `guard.initialTicker` 的 `InitialInterval: 3 * time.Second`
+/// （`guard.go:188-190`）。
+pub const GUARD_INITIAL_MS: u64 = 3000;
+
+/// 断连事件（ICE disconnected / relay 断连 / signal+relay 重连 / 网络变化）
+/// 之后重建节拍的起始间隔：上游 `guard.newReconnectTicker` 的
+/// `InitialInterval: 800 * time.Millisecond`（`guard.go:200-208`），且它把
+/// 新 ticker 的**立即首跳**消费掉（`guard.go:211`），因此下一次发起落在
+/// 事件后约 800 ms（±10%）。
+pub const GUARD_RECONNECT_MS: u64 = 800;
+
+/// 每跳间隔的抖动比例：上游 `RandomizationFactor: 0.1`（`guard.go:190`、`:202`）。
+const GUARD_RANDOMIZATION: f64 = 0.1;
+/// 间隔增长倍率：上游 `Multiplier: 2`（`guard.go:191`、`:203`）。
+const GUARD_MULTIPLIER: f64 = 2.0;
+
+/// 每个 peer 的重连节拍上限（= 该 peer 的 `ConnConfig.Timeout`）：
+/// 上游 `engine.go:91-92` `PeerConnectionTimeoutMin/Max` 30 s / 45 s，
+/// 逐 peer 随机（`engine.go:2010-2011`
+/// `rand.Intn(Max-Min) + Min`），再作为 guard 的 `MaxInterval`
+/// （`guard.go:192`、`:205`）。故上限落在 **[30 s, 45 s)**，且每个 peer
+/// 在 worker 创建时抽定一次、终身不变。
+pub const PEER_TIMEOUT_MIN_MS: u64 = 30_000;
+pub const PEER_TIMEOUT_MAX_MS: u64 = 45_000;
+
+/// 抽一个 [30 s, 45 s) 的 per-peer 超时（`engine.go:2010-2011` 的同一算术）。
+fn draw_peer_timeout_ms(rng: &mut dyn Rng) -> u64 {
+    let span = (PEER_TIMEOUT_MAX_MS - PEER_TIMEOUT_MIN_MS) as f64;
+    PEER_TIMEOUT_MIN_MS + (rng.next_uniform() * span) as u64
+}
+
+/// [`std::time::Duration`] → 注入时钟的毫秒（`ExponentialBackoff` 的出参）。
+fn delay_ms(d: std::time::Duration) -> u64 {
+    d.as_millis().min(u64::MAX as u128) as u64
+}
+
+/// guard 的退避策略（`guard.go:188-195` / `:201-208` 逐字段对应）：
+/// `InitialInterval = initial_ms`、`RandomizationFactor = 0.1`、
+/// `Multiplier = 2`、`MaxInterval = 本 peer 的 timeout`、`Stop = backoff.Stop`
+/// 而 `MaxElapsedTime == 0`（永不停）。
+fn guard_backoff(initial_ms: u64, timeout_ms: u64) -> ExponentialBackoff {
+    ExponentialBackoff::new(
+        std::time::Duration::from_millis(initial_ms),
+        GUARD_RANDOMIZATION,
+        GUARD_MULTIPLIER,
+        std::time::Duration::from_millis(timeout_ms),
+        None,
+    )
+}
 
 /// 一个接口 round 的收集线程的栈大小：round 的调用链很浅（`getifaddrs` /
 /// `poll` / 格式化一行日志），但一个 23 peer × 2 接口的现场会有 ~46 个短命
@@ -184,107 +236,8 @@ impl GatherExec for InlineGatherExec {
 /// 挡住了」的下限——正是真机报告要求可验证的那个量。
 pub const TICK_SLOW_LOG_MS: u64 = 200;
 
-/// 握手重发周期（注入时钟衡量）：signal 服务端对未注册目的地的转发是
-/// best-effort 丢弃（signal.go forwardMessageToPeer 的 not-connected
-/// 路径，"todo respond to the sender?"），先发方的 OFFER/候选可能在
-/// 对端注册前被丢掉且**无任何错误面**。会话未 Connected 前周期性把已
-/// 发帧重新入队——上游 handshaker 对握手的重试职责（handshaker 会
-/// 重发 OFFER 直到 ICE Connected / 失败重启）。
-pub const HANDSHAKE_RETRY_MS: u64 = 3000;
-
-/// 谈判启动超时（注入时钟衡量）：会话已建、本地候选已发，但 `start()`
-/// 前置（远端凭证/候选）在 `3 * HANDSHAKE_RETRY_MS` 内始终没有凑齐——
-/// 典型场景：对端仍持有旧会话（自认 Connected）而不再发 Offer/Answer，
-/// 本端若不拆除这个永不 start 的「僵尸谈判」就永久沉默（真机
-/// AUTH-DIAG-DEVICE-VALIDATION-20260913-0001 的 H3 形态）。到期即拆除
-/// 会话、冷却后以**全新凭证**重新发起（上游 handshaker 超时重启语义，
-/// worker_ice.go:584-593 / conn.go:495-534）。已 `start()` 的会话不适用
-/// ——其死亡由 keepalive/断连/全对失败事件驱动，不由此超时判定。
-pub const START_DEADLINE_MS: u64 = 3 * HANDSHAKE_RETRY_MS;
-
-/// Checking 看门狗（注入时钟衡量）：会话已 `start()` 进入 Checking 后，
-/// 这么长时间内没有任何检查成功（无 selected pair、无 [`IceEvent::
-/// CheckSucceeded`]）即判 failed、拆除会话并允许全新协商。
-///
-/// 为什么需要它（ICE-DIRECT-FAILURE-ANALYSIS §2.3，真机 2026-10-05）：
-/// `all-pairs-failed` 会被"新候选持续流入 → 新 pair 进 Waiting"永久掩盖，
-/// `Disconnected` 只在收到过有效入站后才可能触发 —— start 后永不成功的
-/// 会话没有任何终态信号，能僵死数小时（对端显示我们一直 Connecting）。
-pub const CHECKING_WATCHDOG_MS: u64 = 18_000;
-
 /// 周期性健康摘要的间隔（每个有会话的 peer 一行，§5 item 5）。
 pub const HEALTH_SUMMARY_MS: u64 = 10_000;
-
-/// 「远端静默」退避的触发门槛（0051 §7 item 2）：连续这么多次
-/// `negotiation-start-timeout`、且**期间从未**收到该 peer 任何信令
-/// （offer/answer/candidate），才认为对端真的不应答，开始拉长下一次发起。
-/// 真机 0051：`TrBfURPG`/`ai4IGfaf` 各 12 次超时、两侧 0 条 `signal-rx`，
-/// 每 ~11 s（[`START_DEADLINE_MS`] + [`RETRY_COOLDOWN_MS`]）重发起一轮，
-/// 4 min 内 24 次全是同样的空转。
-pub const INITIATE_BACKOFF_MIN_MISSES: u32 = 3;
-
-/// 退避的基数 = 第一次进入退避时下一次发起前的延迟（9 s，与
-/// [`START_DEADLINE_MS`] 同量级）：延迟序列 9 s → 18 s → 36 s → … →
-/// [`INITIATE_BACKOFF_MAX_MS`]。实际发起间隔 = 谈判截止期（9 s，到期才判
-/// 「静默」）+ 本延迟。
-pub const INITIATE_BACKOFF_BASE_MS: u64 = START_DEADLINE_MS;
-
-/// 退避延迟上限（5 min）：静默 peer 的重发起频率不高于每 ~5 min 一次；
-/// 一旦收到该 peer 任何信令或网络切换/重连事件立即复位（见
-/// [`PeerIceOrchestrator::reset_initiate_backoff`]）。
-pub const INITIATE_BACKOFF_MAX_MS: u64 = 300_000;
-
-/// 第 `misses`（≥ [`INITIATE_BACKOFF_MIN_MISSES`]）次静默超时对应的下一次
-/// 发起延迟：指数增长、封顶 [`INITIATE_BACKOFF_MAX_MS`]。纯函数，供日志与
-/// 单测共用同一份算术。
-pub fn initiate_backoff_ms(misses: u32) -> u64 {
-    let steps = misses.saturating_sub(INITIATE_BACKOFF_MIN_MISSES).min(32);
-    INITIATE_BACKOFF_BASE_MS
-        .saturating_mul(1u64 << steps)
-        .min(INITIATE_BACKOFF_MAX_MS)
-}
-
-/// 退避进入/升级行（进入时与每次升级各一行；升级间隔本身按指数增长，
-/// 无需额外限频）。字段顺序即格式：`peer=|misses=|next_ms=`。
-fn initiate_backoff_line(peer: &str, misses: u32, next_ms: u64) -> String {
-    format!("N5c_ICE|initiate-backoff|peer={peer}|misses={misses}|next_ms={next_ms}")
-}
-
-/// 退避复位行（每个活动退避周期至多一行，复位即清零，天然限频）。
-fn backoff_reset_line(peer: &str, reason: &str) -> String {
-    format!("N5c_ICE|backoff-reset|peer={peer}|reason={reason}")
-}
-
-/// 记一次 [`START_DEADLINE_MS`] 静默超时（`drop_session_rearm` 在
-/// `reason=negotiation-start-timeout` 时调用）：累计「连续静默」次数并按
-/// [`initiate_backoff_ms`] 把冷却拉长；返回需要输出的
-/// `initiate-backoff` 行参数 `(misses, next_ms)`（进入退避与每次升级各一行，
-/// 其余 `None`）。
-///
-/// 连续性的判据是 `rx_since_timeout`：上一拍超时之后收到过该 peer **任何**
-/// 信令（offer/answer/candidate，一条 candidate 也算远端还活着）就不是连续
-/// 静默，计数从零起算。收到 Offer 的应答路径从不经过这里。
-fn note_silent_timeout(peer: &mut PeerConn, now_ms: u64) -> Option<(u32, u64)> {
-    if peer.rx_since_timeout {
-        peer.backoff_misses = 0;
-        peer.backoff_logged_misses = 0;
-    } else {
-        peer.backoff_misses = peer.backoff_misses.saturating_add(1);
-    }
-    peer.rx_since_timeout = false;
-    if peer.backoff_misses < INITIATE_BACKOFF_MIN_MISSES {
-        return None;
-    }
-    let next_ms = initiate_backoff_ms(peer.backoff_misses);
-    peer.cooldown_until = now_ms.saturating_add(next_ms);
-    peer.backoff_active = true;
-    if peer.backoff_misses > peer.backoff_logged_misses {
-        peer.backoff_logged_misses = peer.backoff_misses;
-        Some((peer.backoff_misses, next_ms))
-    } else {
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 状态模型
@@ -702,9 +655,9 @@ impl IceCandidateEndpoint {
 /// - 检查 RTT：会话与 pair 都不保留它（只随 [`IceEvent::CheckSucceeded`] /
 ///   [`IceEvent::SelectedPair`] 瞬时出现并被日志消费），要展示须先在会话/
 ///   编排里如实留存；
-/// - 状态变更时刻：没有这样的既有字段（`session_at_ms` 是会话建立时刻，
-///   `checking_since_ms` 是 Checking 看门狗的计时起点、每次检查成功都滑动
-///   重置），两者都不是「上一次状态变更」。
+/// - 状态变更时刻：没有这样的既有字段（`session_at_ms` 是会话建立时刻、
+///   `guard_next_at_ms` 是下一跳重连节拍的到期时刻），两者都不是「上一次
+///   状态变更」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIceDetail {
     /// 远端 peer 的 base64 WG 公钥（公开材料）。
@@ -876,18 +829,21 @@ struct PeerConn {
     key: String,
     state: PeerIceState,
     session: Option<IceSession>,
-    /// 本地凭证（会话创建即生成，OFFER/ANSWER 发出）。
-    creds: Option<IceCredentials>,
+    /// 本 peer 的**本地 ICE 凭证**：`ufrag`/`pwd` 在第一次会话创建时抽定一次，
+    /// 之后**终身复用**，跨会话重建不变——上游 `WorkerICE.localUfrag/localPwd`
+    /// 在 `NewWorkerICE` 里 `GenerateICECredentials()` 一次
+    /// （`client/internal/peer/worker_ice.go:91-97`、`client/internal/peer/ice/agent.go:111-122`），
+    /// 每次 `reCreateAgent` 都传同一对凭证（`worker_ice.go:220-226`），
+    /// 所以重发 OFFER/ANSWER 与重建 agent 都不改变对外凭证。
+    local_creds: Option<IceCredentials>,
     /// 发起策略（默认 true = 主动发 OFFER，controlling 起始；false = 纯
     /// 应答方，等对端 OFFER）。glare（双方都发起）由 tie-breaker 收敛。
     initiator: bool,
-    /// 我们是发起方（已/将发 OFFER，controlling 起始）。
-    initiated: bool,
-    /// 已绑定进会话的本地候选数（观测 + fail-closed 判断）。
+    /// 已绑定进会话的本地候选数（观测）。
     locals_signaled: usize,
-    /// N11：当前会话的远端凭证（新协商检测：不同凭证的 Offer = 对端新会话）。
+    /// 当前会话的远端凭证（Offer/Answer 携带的 `"ufrag:pwd"`）。
     remote_creds: Option<IceCredentials>,
-    /// 远端候选入列次数（含重复；仅用于 start 前置判断）。
+    /// 远端候选入列次数（含重复；观测与 start 前置判断）。
     remote_cands_seen: usize,
     /// 会话已 start（进入 Checking）。
     started: bool,
@@ -902,34 +858,21 @@ struct PeerConn {
     selected_remote: Option<([u8; 4], u16)>,
     endpoint_applied: bool,
     last_error: Option<ErrorClass>,
-    cooldown_until: u64,
-    /// 已成功送进 signal seam 的帧（offer/候选/answer），供握手重发
-    /// （见 [`HANDSHAKE_RETRY_MS`]：对端未注册时服务端按 best-effort
-    /// 丢弃转发，重发直到 Connected 是上游 handshaker 的职责）。
-    signaled: Vec<(PeerSignalKind, String)>,
-    /// 下一次握手重发的时刻（0 = 尚无已发帧）。
-    retry_at_ms: u64,
-    /// 当前会话的创建时刻（注入时钟；0 = 无会话）。[`START_DEADLINE_MS`]
-    /// 的计时起点：创建后始终未 `start()` 的谈判到期拆除重发起。
+    /// 当前会话的创建时刻（注入时钟；0 = 无会话）。**纯观测**（日志
+    /// `round=`）：曾经的 9 s 截止期起点已随 `START_DEADLINE_MS`（已删除）
+    /// 退场。
     session_at_ms: u64,
-    /// 连续「远端静默」的 [`START_DEADLINE_MS`] 超时次数（0051 §7 item 2）：
-    /// 期间收到该 peer 任何信令即清零；达到
-    /// [`INITIATE_BACKOFF_MIN_MISSES`] 后按 [`initiate_backoff_ms`] 退避。
-    backoff_misses: u32,
-    /// 上一次超时之后是否收到过该 peer 的信令（连续静默的判据：一条
-    /// candidate 也算「远端还活着」，不能算静默）。
-    rx_since_timeout: bool,
-    /// 当前是否处于退避（`backoff-reset` 行的去重标志：只在活动退避上记
-    /// 一行复位，绝不因每帧信令刷屏）。
-    backoff_active: bool,
-    /// 已按哪个 `misses` 值记过 `initiate-backoff` 行（进入 + 每次升级各
-    /// 一行；升级间隔按指数增长）。
-    backoff_logged_misses: u32,
-    /// Checking 看门狗的计时起点（注入时钟；0 = 未在计时，即会话未 start
-    /// 或已终态）。[`CHECKING_WATCHDOG_MS`] 内没有任何检查成功（无
-    /// [`IceEvent::CheckSucceeded`]/selected pair）→ 判 failed 重协商；
-    /// 每次检查成功滑动重置。会话拆除/回滚时清零。
-    checking_since_ms: u64,
+    /// 本 peer 的重连上限（`ConnConfig.Timeout`）：[30 s, 45 s) 随机抽定，
+    /// 终身不变（`engine.go:2010-2011`）。guard 退避的 `MaxInterval`。
+    timeout_ms: u64,
+    /// guard 重连节拍（`guard.go:187-198` / `:200-213` 的
+    /// `cenkalti/backoff` ExponentialBackOff，`crate::backoff` 同形复刻）：
+    /// `current_interval` 从 [`GUARD_INITIAL_MS`] 或 [`GUARD_RECONNECT_MS`]
+    /// 起，每次 `next_delay` 先抖动 ±10% 再 ×2、封顶 `timeout_ms`。
+    guard: ExponentialBackoff,
+    /// 下一跳的时刻（注入时钟；0 = 立即到期）。对应上游 ticker 的
+    /// **保证首跳**（`NewTicker` 创建即发一次，`guard.go:101`/`:211`）。
+    guard_next_at_ms: u64,
     /// 上一次输出健康摘要行的时刻（0 = 尚未输出过；见
     /// [`HEALTH_SUMMARY_MS`]）。
     last_health_ms: u64,
@@ -938,14 +881,17 @@ struct PeerConn {
 }
 
 impl PeerConn {
-    fn new(key: String) -> Self {
+    /// `rng` 抽本 peer 的 `ConnConfig.Timeout`（[`PEER_TIMEOUT_MIN_MS`]..
+    /// [`PEER_TIMEOUT_MAX_MS`]），与上游 `engine.go:2010-2011` 同序：
+    /// 超时先抽定，再交给 guard 当 `MaxInterval`（`guard.go:192`）。
+    fn new(key: String, rng: &mut dyn Rng) -> Self {
+        let timeout_ms = draw_peer_timeout_ms(rng);
         PeerConn {
             key,
             state: PeerIceState::Idle,
             session: None,
-            creds: None,
+            local_creds: None,
             initiator: true,
-            initiated: false,
             locals_signaled: 0,
             remote_creds: None,
             remote_cands_seen: 0,
@@ -957,26 +903,15 @@ impl PeerConn {
             selected_remote: None,
             endpoint_applied: false,
             last_error: None,
-            cooldown_until: 0,
-            signaled: Vec::new(),
-            retry_at_ms: 0,
             session_at_ms: 0,
-            backoff_misses: 0,
-            rx_since_timeout: false,
-            backoff_active: false,
-            backoff_logged_misses: 0,
-            checking_since_ms: 0,
+            timeout_ms,
+            guard: guard_backoff(GUARD_INITIAL_MS, timeout_ms),
+            // 上游 `NewTicker` 保证创建即发一次首跳（`guard.go:101`）：0 =
+            // 本 peer 的第一拍就可以发起。
+            guard_next_at_ms: 0,
             last_health_ms: 0,
             gather: None,
         }
-    }
-
-    /// [`START_DEADLINE_MS`] 判据使用的「龄期」：从 `session_at_ms` 起算。
-    ///
-    /// STAGE 2：不再扣「等受保护 socket 补给」的时长 —— 那个等待态随壳层
-    /// socket 池一起退出了 ICE 平面（host 候选当拍就算出来，没有任何池可饿）。
-    fn negotiation_age_ms(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_sub(self.session_at_ms)
     }
 
     fn status(&self) -> PeerIceStatus {
@@ -1088,9 +1023,14 @@ pub struct PeerIceOrchestrator {
     blacklist: Vec<&'static str>,
     peers: Vec<PeerConn>,
     signal_ready: bool,
-    /// signal 流 false→true 的重连边沿（0051 §7 item 2）：下一拍 `run_once`
-    /// 复位全部 peer 的「远端静默」退避后清除。
+    /// signal 流 false→true 的**重连**边沿（guard 的 `srReconnectedChan`，
+    /// `guard.go:155-160`）：下一拍 `run_once` 为每个 peer 重建 800 ms 起跳的
+    /// `newReconnectTicker` 后清除。**首次就绪不算**：那是初始连接，上游的
+    /// 初始 OFFER 由 guard `initialTicker` 的立即首跳发出（`NewTicker` 创建
+    /// 即发一次），不该被推迟 800 ms。
     signal_reconnected: bool,
+    /// 是否曾经就绪过（区分「首次就绪」与「重连边沿」）。
+    signal_ever_ready: bool,
     /// 非网络图 peer 的 signal 帧计数（观测，不作为错误）。STAGE 1 起**只**有
     /// 这一支会计数：无会话的 ANSWER 不再丢弃、改为开启一轮协商（官方语义，
     /// 见 `handle_signal`），因此它不再是「迟到 ANSWER 被丢」的指示器。
@@ -1119,6 +1059,11 @@ pub struct PeerIceOrchestrator {
     /// 受保护 socket 就地建（[`PeerIceOrchestrator::arm_mux`]）——两条路都只有这一
     /// 枚，绝不每 peer 每接口一枚。
     mux: IceMuxSlot,
+    /// 熵源：每 peer 的超时抽定（[`PeerConn::new`]）与 guard 每跳的 ±10% 抖动
+    /// （[`PeerIceOrchestrator::guard_tick`]）。生产 = [`OsRandom`]；注入时钟的
+    /// harness 用 [`PeerIceOrchestrator::set_guard_rng`] 换成定序样本，才能逐值
+    /// 断言 3/6/12/24 s 序列。
+    guard_rng: Box<dyn Rng + Send>,
 }
 
 impl PeerIceOrchestrator {
@@ -1134,13 +1079,22 @@ impl PeerIceOrchestrator {
             peers: Vec::new(),
             signal_ready: false,
             signal_reconnected: false,
+            signal_ever_ready: false,
             unknown_signal: 0,
             fixed_local_port: deps.fixed_local_port,
             advertised_candidates: deps.advertised_candidates,
             local_key: None,
             exec: Arc::new(ThreadGatherExec),
             mux: Arc::new(Mutex::new(None)),
+            guard_rng: Box::new(OsRandom),
         }
+    }
+
+    /// 换 guard 的熵源（注入缝）。生产从不调用（默认 [`OsRandom`]）；注入
+    /// 时钟的 harness 在 `set_peers` **之前**装定序样本，才能同时钉住每 peer
+    /// 的超时抽定与逐跳抖动（[`PeerConn::new`] 是超时的唯一抽取点）。
+    pub fn set_guard_rng(&mut self, rng: Box<dyn Rng + Send>) {
+        self.guard_rng = rng;
     }
 
     /// 换本地候选收集的执行者（STAGE 1 的注入缝）。生产从不调用：默认就是
@@ -1263,7 +1217,7 @@ impl PeerIceOrchestrator {
     /// STAGE 2：把骑着一枚**已被替换**的 mux 的会话整段拆掉重协商。壳层在
     /// 物理网络切换（recreate + 重新 protect）之后会重新 feed 一枚 mux，
     /// 旧会话的候选端口在新 mux 上不存在，留着就是永久沉默的死路径。
-    fn drop_stale_mux_sessions(&mut self, now_ms: u64) {
+    fn drop_stale_mux_sessions(&mut self, _now_ms: u64) {
         let current = self.ice_mux().map(|m| Arc::as_ptr(&m));
         let stale: Vec<usize> = self
             .peers
@@ -1275,7 +1229,7 @@ impl PeerIceOrchestrator {
             })
             .collect();
         for idx in stale {
-            self.drop_session_rearm(idx, now_ms, "ice-mux-replaced");
+            self.drop_session(idx, PeerIceState::Failed, "ice-mux-replaced");
         }
     }
 
@@ -1320,17 +1274,24 @@ impl PeerIceOrchestrator {
             if self.peers.iter().any(|p| &p.key == key) {
                 continue;
             }
-            self.peers.push(PeerConn::new(key.clone()));
+            // 每个新条目抽定自己的 `ConnConfig.Timeout`（[30,45)s，
+            // `engine.go:2010-2011`）；rng 从 `guard_rng` 借出（与 `peers`
+            // 是不同字段，编译器按字段拆分借用）。
+            let rng = &mut *self.guard_rng;
+            self.peers.push(PeerConn::new(key.clone(), rng));
         }
     }
 
     /// signal 流就绪（connector 持有注册好的 signal 流后置位；置位前
-    /// `run_once` 不发起任何东西）。0051 §7 item 2：false→true 的重连边沿
-    /// 记一个待复位标志，由 `run_once`（有注入时钟）在下一拍复位「远端静默」
-    /// 退避——断流期间的静默可能是本端收不到帧，不是对端不应答。
+    /// `run_once` 不发起任何东西）。**重连**边沿（曾经就绪过之后再就绪）
+    /// 记一个待复位标志，由 `run_once` 在下一拍重建 guard 节拍（800 ms 起
+    /// 跳）；首次就绪不记——初始 OFFER 走 guard 首跳的立即拍。
     pub fn set_signal_ready(&mut self, ready: bool) {
         if ready && !self.signal_ready {
-            self.signal_reconnected = true;
+            if self.signal_ever_ready {
+                self.signal_reconnected = true;
+            }
+            self.signal_ever_ready = true;
         }
         self.signal_ready = ready;
     }
@@ -1447,34 +1408,31 @@ impl PeerIceOrchestrator {
         match kind {
             PeerSignalKind::Offer => {
                 let creds = parse_ufrag_pwd(payload)?;
-                // N11：本地会话处于 Disconnected（旧路径已死、endpoint 已
-                // 回收）时收到的 Offer = 对端重启了协商（上游按新
-                // session-id recreate agent 的形态，worker_ice.go:105-130）：
-                // 拆除死会话，走全新应答流程（新凭证、新候选、新选择）。
-                // 同理，Connected 状态下收到**不同凭证**的 Offer 也是新
-                // 协商（凭证是每会话随机生成，同会话的重发必然同值 = 幂等
-                // 去重，不会误触发）。Failed 会话已在事件处理中拆掉
-                //（session=None），天然落入全新应答路径。
+                // 已有会话时收到 Offer：官方 `WorkerICE.OnNewOffer`
+                //（worker_ice.go:100-157）只按 **session id** 决定是否重建
+                // agent；重建时本地凭证不变（`localUfrag/localPwd` 是 per-peer
+                // 的），只是 `reCreateAgent` + 重新 dial + 重新收集。本端没有
+                // 线上 session id（本仓 signal 帧不带 `Body.sessionId`），用
+                // **远端凭证变化**作等价判据：凭证同样 per-peer 稳定后，它只
+                // 在「对端换了实现/换了 peer worker」时触发；本端 Disconnected
+                // 时已按上游 closeAgent 语义拆掉会话（见 `drain_events`），
+                // 天然落入下面的全新应答路径。Failed 会话已在事件处理中拆掉
+                //（session=None），同理。
                 let renegotiate = self.peers[idx].session.is_some()
-                    && (self.peers[idx].state == PeerIceState::Disconnected
-                        || (self.peers[idx].state == PeerIceState::Connected
-                            && self.peers[idx].remote_creds.as_ref() != Some(&creds)));
+                    && self.peers[idx].state == PeerIceState::Connected
+                    && self.peers[idx].remote_creds.as_ref() != Some(&creds);
                 if renegotiate {
                     let peer = &mut self.peers[idx];
                     peer.session = None;
                     // 在跑的收集属于**旧**协商：丢接收端 = 丢掉旧一轮的候选
-                    // （worker 自己收尾并关闭它的 socket），绝不让旧候选落进
-                    // 新会话。
+                    // （worker 自己收尾并关闭它的 dup socket），绝不让旧候选
+                    // 落进新会话。本地凭证不在此列：它终身复用。
                     peer.gather = None;
-                    peer.creds = None;
                     peer.locals_done = false;
                     peer.started = false;
                     peer.remote_cands_seen = 0;
                     peer.pending_remote.clear();
-                    peer.signaled.clear();
-                    peer.retry_at_ms = 0;
                     peer.session_at_ms = 0;
-                    peer.checking_since_ms = 0; // 新会话的看门狗从零起算
                     peer.last_health_ms = 0;
                 }
                 let had_session = self.peers[idx].session.is_some();
@@ -1500,16 +1458,18 @@ impl PeerIceOrchestrator {
                         // 补 ANSWER。
                         Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
                         Err(e) => {
+                            // 收集失败 = 上游 `connect()` 里 `GatherCandidates`
+                            // 报错后的 `closeAgent`（worker_ice.go:257-261）：
+                            // agent 随会话一起拆掉，不留半成品。重谈判由 guard
+                            // 节拍驱动（对端也会继续发 OFFER）。
                             let peer = &mut self.peers[idx];
                             peer.last_error = Some(ErrorClass::from_management(&e));
-                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            // 应答方收集失败同样不得静默：`answer_owed` 仍在，
-                            // `want_locals` 冷却后会重试补 ANSWER。
                             crate::hilog::emit(&format!(
                                 "N5c_ICE|locals-failed|peer={}|round={}|phase=answer|reason={e}",
                                 peer_short(&peer.key),
                                 peer.session_at_ms
                             ));
+                            self.drop_session(idx, PeerIceState::Failed, "gather-failed");
                         }
                     }
                     // 内联执行者（host harness）在同一拍里跑完 round：立刻取件，
@@ -1525,11 +1485,11 @@ impl PeerIceOrchestrator {
                     //   时两侧同 controlling，pion 静默丢弃全部冲突检查且
                     //   不回 487 → 永久死锁，H1 根因）；
                     // ②每个收到的 Offer 都要回 ANSWER（handshaker.Listen
-                    //   无条件 sendAnswer）—— 修复前 glare 分支不回
-                    //   ANSWER，对端挂起的 Dial 永远等不到应答；
-                    // ③对端换了凭证（其 agent 重启，凭证每会话随机）→
-                    //   采纳新凭证；官方 worker 重启 agent 时本地凭证
-                    //   （localUfrag/localPwd）不变，我方同理保持本地
+                    //   无条件 sendAnswer）：官方对**同一 session id** 的重复
+                    //   Offer 也照样回 ANSWER，只是不重建 agent
+                    //   （worker_ice.go:105-114 + handshaker.go:136）；
+                    // ③对端换了凭证 → 采纳新凭证；官方 worker 重启 agent 时
+                    //   本地凭证（localUfrag/localPwd）不变，我方同理保持本地
                     //   凭证/候选/端口，重发本地候选让对端新 agent 配对。
                     let same_creds =
                         self.peers[idx].remote_creds.as_ref() == Some(&creds);
@@ -1571,13 +1531,12 @@ impl PeerIceOrchestrator {
                             },
                         ));
                     }
-                    // 回 ANSWER（幂等：`signaled` 母本按内容去重，重复
-                    // Offer 只会把同一 ANSWER 重新入列）。本地候选未就绪
-                    // （`answer_owed` 仍欠着）时跳过 —— `on_locals_ready`
-                    // 首次拿到候选时统一补发。
-                    if self.peers[idx].locals_done && self.peers[idx].creds.is_some() {
+                    // 回 ANSWER（上游 `sendAnswer` 对每个 Offer 无条件执行）。
+                    // 本地候选未就绪（`answer_owed` 仍欠着）时跳过 ——
+                    // `on_locals_ready` 首次拿到候选时统一补发。
+                    if self.peers[idx].locals_done && self.peers[idx].local_creds.is_some() {
                         let (ufrag, pwd) = {
-                            let c = self.peers[idx].creds.as_ref().expect("checked");
+                            let c = self.peers[idx].local_creds.as_ref().expect("checked");
                             (c.ufrag.clone(), c.pwd.clone())
                         };
                         let peer = &mut self.peers[idx];
@@ -1586,30 +1545,29 @@ impl PeerIceOrchestrator {
                             format!("{}:{}", ufrag, pwd),
                         ));
                     }
-                    // Offer 使命已完成（对端凭证在手 + ANSWER 已回）：
-                    // 停止重发 OFFER，避免周期性重摆对端状态（§2.4 的
-                    // 160 次/8 min offer 风暴的 glare 半边）。
-                    self.peers[idx].signaled.retain(|(k, _)| *k != PeerSignalKind::Offer);
                 }
             }
             PeerSignalKind::Answer => {
                 let creds = parse_ufrag_pwd(payload)?;
                 if self.peers[idx].session.is_none() {
                     // 无会话的 ANSWER = 对端应答了**已被拆掉**的那次 OFFER
-                    // （僵尸拆除与 ANSWER 到达只差半拍）。
+                    // （拆会话与 ANSWER 到达只差半拍）。
                     //
                     // 官方语义：**没有「丢帧」这一支**。signal 引擎对任何
                     // 目的地都先 `ActivatePeer` 再派发（engine.go:2088-2097），
                     // handshaker 把 Offer 与 Answer 一并交给 ICE worker
-                    // （handshaker.go:150-156），worker 用收到的这一帧**新建
+                    // （handshaker.go:140-156），worker 用收到的这一帧**新建
                     // agent** 并 Dial/Accept（worker_ice.go:100-155）——迟到
                     // ANSWER 会直接开启一轮协商，而不是被丢掉（审计 §1.1 E5）。
-                    // 因此这里不再计数、不再记 `signal-no-session`（上游没有
-                    // 对应行），而是照做：采纳该 ANSWER 的远端凭证、立即以全新
-                    // 本地凭证重新发起（`initiated = true`）——对端的新凭证
-                    // OFFER 会让它的 worker 重建 agent（同 worker_ice.go:105-130
-                    // 的 recreate 形态），双方收敛；否则本端要白等一个
-                    // [`START_DEADLINE_MS`] 才重发起。
+                    //
+                    // 关键：**它不回 OFFER**。`handshaker.Listen` 只在
+                    // `remoteOffersCh` 分支 `sendAnswer()`（:136），
+                    // `remoteAnswerCh` 分支（:140-156）只把 OfferAnswer 交给
+                    // ICE worker；`connect` 里是 `Dial`/`Accept`（:607-613），
+                    // 不是 `SendOffer`。凭证 per-peer 稳定之后，本端也不需要
+                    // 「换一套新凭证重新发起」这个自造绕道：对端手上有本端
+                    // 未变的 `ufrag:pwd`，本端直接进 Checking，候选照 trickle，
+                    // 双方在对端 agent 上配对。
                     self.ensure_session(idx, now_ms, "answer-late")?;
                     self.peers[idx]
                         .session
@@ -1620,7 +1578,6 @@ impl PeerIceOrchestrator {
                         let peer = &mut self.peers[idx];
                         peer.remote_creds = Some(creds);
                         peer.state = PeerIceState::Gathering;
-                        peer.initiated = true; // 重新发起：OFFER 随候选就绪出列
                         peer.answer_owed = false;
                     }
                     match self.start_locals(idx, now_ms, pass_start_ms, "answer-late") {
@@ -1628,16 +1585,12 @@ impl PeerIceOrchestrator {
                         Err(e) => {
                             let peer = &mut self.peers[idx];
                             peer.last_error = Some(ErrorClass::from_management(&e));
-                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            peer.initiated = false;
-                            peer.session = None;
-                            peer.gather = None;
-                            peer.creds = None;
                             crate::hilog::emit(&format!(
                                 "N5c_ICE|locals-failed|peer={}|round={}|phase=answer-late|reason={e}",
                                 peer_short(&peer.key),
                                 peer.session_at_ms
                             ));
+                            self.drop_session(idx, PeerIceState::Failed, "gather-failed");
                         }
                     }
                     let _ = self.pump_gather(idx, now_ms, pass_start_ms);
@@ -1645,12 +1598,6 @@ impl PeerIceOrchestrator {
                     let peer = &mut self.peers[idx];
                     peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
                     peer.remote_creds = Some(creds);
-                    // 对端已应答我方的 OFFER：停止重发 OFFER，只保留候选
-                    // trickle（任务 §6.4 —— 修复前 HANDSHAKE_RETRY_MS 把
-                    // OFFER 一并重发，8 min 发出 ~160 次，对端逐条幂等应答，
-                    // 每轮重摆 glare/凭证状态）。ANSWER/候选帧的重发语义
-                    // 不变（对端 answer 路径按 Offer 幂等）。
-                    peer.signaled.retain(|(k, _)| *k != PeerSignalKind::Offer);
                 }
             }
             PeerSignalKind::Candidate => {
@@ -1680,13 +1627,9 @@ impl PeerIceOrchestrator {
             peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
             peer.session_at_ms,
         ));
-        // 0051 §7 item 2：收到该 peer 任何信令（offer/answer/candidate）＝远端
-        // 不是静默的 → 退避立即复位、回到正常节奏；`rx_since_timeout` 同时
-        // 打断「连续静默」计数（一条 candidate 也算远端还活着）。应答路径
-        // 从不经过退避（上面的会话建立/收集是即时的），退避只影响**下一次
-        // 主动发起**的时刻。
-        self.peers[idx].rx_since_timeout = true;
-        self.reset_initiate_backoff(idx, now_ms, "signal");
+        // 收到该 peer 的信令 = 远端不静默：不再有「连续静默」计数（那套自造
+        // 退避随 guard 节拍一起删除）。重谈判的节奏只由 guard 决定，而
+        // guard 的复位条件是断连/网络事件（`guard.go:141-177`），不是收帧。
         Ok(())
     }
 
@@ -1706,12 +1649,14 @@ impl PeerIceOrchestrator {
         // 刷屏，所以只记**慢拍**（≥ [`TICK_SLOW_LOG_MS`]）：健康拍长 0~1 ms，
         // 慢拍恰好是"有东西阻塞了泵"的现场。
         let pass_start_ms = crate::sys::mono_ms();
-        // signal 流重连（false→true 的边沿）：断流期间的「远端静默」推断作废
-        // ——本端可能只是收不到帧。带注入时钟复位，避免退避延迟继续生效。
+        // signal 流重连（false→true 的边沿）= 上游 guard 的 sr-reconnect 事件
+        // （`guard.go:155-160` `srReconnectedChan`：signal/relay 重连 → 新
+        // `newReconnectTicker`，800 ms 起跳，立即首跳被消费）。断流期间本端
+        // 可能只是收不到帧，重连后立刻给每个 peer 一次快速重发起的机会。
         if self.signal_reconnected {
             self.signal_reconnected = false;
             for idx in 0..self.peers.len() {
-                self.reset_initiate_backoff(idx, now_ms, "signal-reconnect");
+                self.guard_reset(idx, now_ms);
             }
         }
         let mut first_err: Option<ManagementError> = None;
@@ -1749,143 +1694,20 @@ impl PeerIceOrchestrator {
                     first_err = Some(e);
                 }
             }
-            if self.signal_ready {
-                // 发起（仅 signal 就绪后；每 peer 冷却后重试；纯应答方不发起）。
-                // **没有预算、没有游标**：每个 peer 起自己那一轮收集，互不排队
-                // ——ea8ede1 的「每拍最多一个 peer 做阻塞收集 + 轮转游标」是
-                // 「收集挡住共享拍」的直接后果，收集离开 pump 后就没有东西
-                // 可配给（审计 §2.7 stage 1 的 E1/E2/I7 退休）。
-                let want_initiate = {
-                    let p = &self.peers[idx];
-                    p.initiator && p.session.is_none() && !p.initiated && now_ms >= p.cooldown_until
-                };
-                if want_initiate {
-                    self.peers[idx].initiated = true;
-                    match self.start_locals(idx, now_ms, pass_start_ms, "initiate") {
-                        // 固定端口（HOST-ONLY，N12a）路径当拍就位；OFFER 已由
-                        // `on_locals_ready` 按 `offer_owed` 入列（两条路径同一
-                        // 规则，避免重复入列）。
-                        Ok(LocalsRun::Gathered) => {}
-                        // srflx 交换已在 worker 上跑：host 候选与 OFFER 已经在
-                        // `start_locals` 里就位，`pump_gather` 只追加 srflx
-                        // 候选（trickle），本拍绝不等它。
-                        Ok(LocalsRun::InFlight) => {}
-                        Err(e) => {
-                            // 0048：收集只在会话已建后才可能失败（gather/绑定，
-                            // `take_owned` 队列空即 NoSocket；或一个允许接口都
-                            // 没有）。半成品会话必须整段回滚：`want_initiate`
-                            // 的门是 `session.is_none()`，留下 `session = Some`
-                            // 会让这次谈判永久沉默——`want_locals` 之后只补发
-                            // 候选、永不补发凭据，对端因缺远端凭证永不
-                            // `start()`。回滚后冷却期满重新走完整发起；期间对端
-                            // OFFER 到达则落入正常应答路径（`answer_owed` 语义
-                            // 不变，也不会出现「同时发 OFFER 又发 ANSWER」）。
-                            let peer = &mut self.peers[idx];
-                            let round = peer.session_at_ms;
-                            let peer_prefix = peer_short(&peer.key);
-                            peer.last_error = Some(ErrorClass::from_management(&e));
-                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            peer.initiated = false; // 冷却后重试
-                            peer.session = None; // Drop 关闭半成品会话的 dup socket
-                            peer.gather = None;
-                            peer.creds = None;
-                            peer.remote_creds = None;
-                            peer.locals_done = false;
-                            peer.started = false;
-                            peer.remote_cands_seen = 0;
-                            peer.pending_remote.clear();
-                            peer.signaled.clear();
-                            peer.outbox.clear(); // 半成品候选帧不得替死会话发出
-                            peer.retry_at_ms = 0;
-                            peer.answer_owed = false;
-                            peer.session_at_ms = 0;
-                            crate::hilog::emit(&format!(
-                                "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
-                            ));
-                            if first_err.is_none() {
-                                first_err = Some(e);
-                            }
-                        }
-                    }
-                    // 内联执行者（host harness）在同一拍里把 round 跑完了：立刻
-                    // 取件，保住「一拍内候选 + OFFER 就位」的既有语义。生产
-                    // （线程执行者）这里通常是空队列。
-                    if let Err(e) = self.pump_gather(idx, now_ms, pass_start_ms) {
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
-                    }
-                }
-                // 应答方/重试方的本地候选收集（幂等；已在跑 = 什么都不做）
-                let want_locals = {
-                    let p = &self.peers[idx];
-                    p.session.is_some() && !p.locals_done && now_ms >= p.cooldown_until
-                };
-                if want_locals {
-                    match self.start_locals(idx, now_ms, pass_start_ms, "retry") {
-                        Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
-                        Err(e) => {
-                            let peer = &mut self.peers[idx];
-                            peer.last_error = Some(ErrorClass::from_management(&e));
-                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            // 失败分支的观测面（0048：这条路径此前完全无日志）。
-                            crate::hilog::emit(&format!(
-                                "N5c_ICE|locals-failed|peer={}|round={}|phase=retry|reason={e}",
-                                peer_short(&peer.key),
-                                peer.session_at_ms
-                            ));
-                            if first_err.is_none() {
-                                first_err = Some(e);
-                            }
-                        }
-                    }
-                    if let Err(e) = self.pump_gather(idx, now_ms, pass_start_ms) {
-                        if first_err.is_none() {
-                            first_err = Some(e);
-                        }
-                    }
-                }
-                // 握手重发（HANDSHAKE_RETRY_MS 周期，注入时钟）：会话未
-                // Connected 前，把已送进 seam 的帧（OFFER/候选/ANSWER）
-                // 重新入队——对端未注册时服务端会静默丢弃转发，若不重发
-                // 握手就永久卡死（round-6 现场归因）。对端已就绪时这些
-                // 重复帧是幂等的（凭证采纳为 no-op、候选按 (addr,port)
-                // 去重）。
-                let needs_retry = {
-                    let p = &self.peers[idx];
-                    !p.signaled.is_empty()
-                        && p.state != PeerIceState::Connected
-                        && p.retry_at_ms != 0
-                        && now_ms >= p.retry_at_ms
-                };
-                if needs_retry {
-                    let p = &mut self.peers[idx];
-                    p.retry_at_ms = now_ms + HANDSHAKE_RETRY_MS;
-                    for frame in p.signaled.clone() {
-                        p.outbox.push_back(frame);
-                    }
-                }
-                if let Err(e) = self.flush_outbox(idx) {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-                {
-                    let peer = &mut self.peers[idx];
-                    if peer.retry_at_ms == 0 && !peer.signaled.is_empty() {
-                        peer.retry_at_ms = now_ms + HANDSHAKE_RETRY_MS;
-                    }
+            // 重连节拍（上游 guard，`guard.go:97-184`）：本拍到期就按状态决定
+            // 要不要重新发起，并把下一跳排到 backoff 之后。**没有预算、没有游标**
+            // ——每个 peer 一条自己的节拍，互不排队（审计 §2.7 stage 1 的
+            // E1/E2/I7 随阻塞收集一起退休）。
+            if let Err(e) = self.guard_tick(idx, now_ms, pass_start_ms) {
+                if first_err.is_none() {
+                    first_err = Some(e);
                 }
             }
-            // 僵尸谈判拆除（H3）：会话已建但始终未 start（对端持旧会话、
-            // 不再应答）——到期拆除，冷却后重新发起。signal 无关的本地
-            // 策略，不受断流影响。
-            self.expire_dead_negotiation(idx, now_ms);
-            // Checking 看门狗（§6.3）：start 后 [`CHECKING_WATCHDOG_MS`]
-            // 无任何检查成功 → 判 failed、拆除、冷却后全新协商。覆盖
-            // "all-pairs-failed 被持续流入的候选掩盖、Disconnected 永不
-            // 触发"的僵尸 Checking（真机 2026-10-05 形态）。
-            self.expire_dead_checking(idx, now_ms);
+            if let Err(e) = self.flush_outbox(idx) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
             // 会话泵（无条件）：收包/检查/keepalive/超时不依赖 signal 流。
             {
                 let peer = &mut self.peers[idx];
@@ -1921,8 +1743,159 @@ impl PeerIceOrchestrator {
         }
     }
 
-    /// 开始本地候选收集 + 会话绑定（发起方、应答方、重试方共用；幂等：
-    /// `locals_done` 已置位 = `Gathered`，本轮已在跑 = `InFlight`）。
+    // -----------------------------------------------------------------------
+    // 上游 guard：重连节拍（`client/internal/peer/guard/guard.go:97-213`）
+    // -----------------------------------------------------------------------
+
+    /// 复位重连节拍 = 上游 `newReconnectTicker`（`guard.go:200-213`）：
+    /// **新建**一个 `InitialInterval = 800ms` 的 backoff，并消费掉它创建时
+    /// 的立即首跳（`guard.go:211` `<-ticker.C`），因此下一次发起落在
+    /// 事件后一个（±10% 抖动的）800 ms。触发条件与上游一一对应：
+    ///
+    /// - ICE 断连：`onICEStateDisconnected` → `guard.SetICEConnDisconnected()`
+    ///   （`conn.go:537-540`，且只在**状态真的从 Connected 变过去**时才发，
+    ///   `conn.go:535-539`）→ `guard.go:148-153`；
+    /// - signal（+relay）重连：`SRWatcher.onReconnected`（`sr_watcher.go:76-86`）
+    ///   → `guard.go:155-160`；
+    /// - 物理网络变化：`NetworkWatcher.Changed()` → `guard.go:162-177`；
+    /// - relay 断连：`conn.go:663-667` → `guard.go:141-146`——本核心的 ICE
+    ///   平面尚无 relay 传输（relay 行为本轮不动），故无对应调用点。
+    fn guard_reset(&mut self, idx: usize, now_ms: u64) {
+        let timeout = self.peers[idx].timeout_ms;
+        let mut bo = guard_backoff(GUARD_RECONNECT_MS, timeout);
+        let delay = bo
+            .next_delay(&MonotonicClock, &mut *self.guard_rng)
+            .map(delay_ms)
+            .unwrap_or(GUARD_RECONNECT_MS);
+        let peer = &mut self.peers[idx];
+        peer.guard = bo;
+        peer.guard_next_at_ms = now_ms.saturating_add(delay);
+    }
+
+    /// 一拍的重连节拍（上游 `Guard.reconnectLoopWithRetry` 的 tick 分支，
+    /// `guard.go:118-139`）：到点即**先推进**下一跳（ticker 每跳都前进，与
+    /// 回调是否真的发起无关），再按连接状态决定要不要发起。
+    ///
+    /// 状态判定是上游 `isConnectedOnAllWay`（`conn.go:834-848` → `evalConnStatus`）
+    /// 在本架构的对应物：
+    ///
+    /// - **Connected**（`guard.go:127-128`）：ICE 已选中 pair → 什么都不做；
+    /// - **进行中**：上游 `iceInProgress = workerICE.InProgress()`
+    ///   （`conn.go:840-845`）= `agentConnecting`（`worker_ice.go:194-199`），
+    ///   即「agent 已建、尚未连上」→ 也不发起。本架构的 agent 在**拿到远端
+    ///   凭证**时才等价诞生（上游 `OnNewOffer` → `reCreateAgent` → `Dial`/`Accept`），
+    ///   所以「有会话但还没有远端凭证」正是上游的「没有 agent」→ 继续发起；
+    /// - **Disconnected**（`guard.go:129-130`）→ 回调 `conn.onGuardEvent`
+    ///   （`conn.go:688-692`）→ `handshaker.SendOffer()`：重新广播本 peer 的
+    ///   OFFER（凭证 per-peer 稳定，`handshaker.go:232-237`）。
+    ///
+    /// `PartiallyConnected` 的「3 次后转每小时」（`guard.go:131-138`）只适用于
+    /// 「relay 通、ICE 不通」，本核心无 relay 传输，故整支不搬。
+    ///
+    /// 发起失败（收集无 mux / 无可绑定候选）按既有错误面照常上报：上游的
+    /// `connect()` 失败只 `closeAgent` + 日志（goroutine 无调用方可返回），
+    /// 本仓的 pump 错误面是对等物（connector 记日志），重试由节拍的下一跳
+    /// 负责（`worker_ice.go:257-261` 的 closeAgent 语义）。
+    fn guard_tick(&mut self, idx: usize, now_ms: u64, pass_start_ms: u64) -> Result<(), ManagementError> {
+        if now_ms < self.peers[idx].guard_next_at_ms {
+            return Ok(());
+        }
+        // 每跳都推进（上游 ticker 的 send → NextBackOff 顺序，`ticker.go`）。
+        let delay = self.peers[idx]
+            .guard
+            .next_delay(&MonotonicClock, &mut *self.guard_rng);
+        if let Some(d) = delay {
+            let at = now_ms.saturating_add(delay_ms(d));
+            self.peers[idx].guard_next_at_ms = at;
+        }
+        // 上游 `SendOffer` 在 signal 未就绪时直接 `ErrSignalIsNotReady`
+        // （`handshaker.go:207-209`）：这一跳照样被消费掉，帧不发。本架构把
+        // 未就绪的帧留在 outbox（显式失败，不静默丢），但节拍照样前进。
+        if !self.signal_ready {
+            return Ok(());
+        }
+        let connected = self.peers[idx].state == PeerIceState::Connected;
+        // 上游 `InProgress()`：agent 存在且尚未连上。
+        let in_progress = self.peers[idx].session.is_some()
+            && self.peers[idx].remote_creds.is_some();
+        if connected || in_progress {
+            return Ok(());
+        }
+        // 本架构的纯应答方（`initiator=false`，仅测试用来钉住确定性角色划分）
+        // 不主动发起——上游没有这个开关，两侧都会在未连上时发 OFFER。
+        if !self.peers[idx].initiator {
+            return Ok(());
+        }
+        self.guard_offer(idx, now_ms, pass_start_ms)
+    }
+
+    /// guard 的回调体（`conn.go:688-692` → `handshaker.SendOffer`）：
+    ///
+    /// - **没有会话** = 上游「没有 agent」：走完整发起（建会话 + 收集本地候选
+    ///   + OFFER），这正是上游 `SendOffer` 之后对端回来 `OnNewOffer` 的起点；
+    /// - **有会话但还没有远端凭证** = 上游「没有 agent、offer 还在路上」：
+    ///   只**重发**本 peer 的 OFFER + 本会话已收集的候选。上游 `SendOffer`
+    ///   只带凭证，因为它的 agent（连同候选 trickle）只在收到对端 Offer/Answer
+    ///   时才诞生（`OnNewOffer` → `reCreateAgent` → `GatherCandidates`，
+    ///   `worker_ice.go:100-157`）；本架构的 agent 在发起时就诞生、候选也已
+    ///   收集，所以「等价的重广播」把同一批候选一起带上——否则对端在长时间
+    ///   静默后第一次收到 OFFER 时手里仍没有本端候选，只能靠 prflx 回退。
+    ///   凭证本身**不变**：它是 per-peer 的（`worker_ice.go:91-97`）。
+    fn guard_offer(&mut self, idx: usize, now_ms: u64, pass_start_ms: u64) -> Result<(), ManagementError> {
+        if self.peers[idx].session.is_none() {
+            if let Err(e) = self.start_locals(idx, now_ms, pass_start_ms, "initiate") {
+                // 收集失败 = 本次发起失败：半成品会话整段回滚（`session=None`），
+                // 下一跳 guard 节拍再试（上游 `connect()` 的
+                // `GatherCandidates` 出错 → `closeAgent`，`worker_ice.go:257-261`）。
+                let peer = &mut self.peers[idx];
+                let round = peer.session_at_ms;
+                let peer_prefix = peer_short(&peer.key);
+                peer.last_error = Some(ErrorClass::from_management(&e));
+                crate::hilog::emit(&format!(
+                    "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
+                ));
+                self.drop_session(idx, PeerIceState::Failed, "gather-failed");
+                return Err(e);
+            } else {
+                // 内联执行者（host harness）在同一拍里跑完 round：立刻取件，
+                // 保住「一拍内候选 + OFFER 就位」的既有语义。
+                let _ = self.pump_gather(idx, now_ms, pass_start_ms);
+            }
+            return Ok(());
+        }
+        self.readvertise(idx);
+        Ok(())
+    }
+
+    /// 重发本 peer 的 OFFER 与本会话已收集的本地候选（`outbox` 里去重：同一帧
+    /// 还在排队时不再入列，避免 signal 未注册期间同一 OFFER 堆叠）。
+    fn readvertise(&mut self, idx: usize) {
+        if !self.peers[idx].locals_done {
+            // 本地候选还没就绪：`on_locals_ready` 会把 OFFER 一起入列，这里不抢。
+            return;
+        }
+        let Some(creds) = self.peers[idx].local_creds.clone() else { return };
+        let cands: Vec<String> = self.peers[idx]
+            .session
+            .as_ref()
+            .map(|s| s.local_candidates().iter().map(|c| c.marshal()).collect())
+            .unwrap_or_default();
+        let peer = &mut self.peers[idx];
+        let offer = (PeerSignalKind::Offer, format!("{}:{}", creds.ufrag, creds.pwd));
+        if !peer.outbox.contains(&offer) {
+            peer.outbox.push_back(offer);
+        }
+        for payload in cands {
+            let frame = (PeerSignalKind::Candidate, payload);
+            if !peer.outbox.contains(&frame) {
+                peer.outbox.push_back(frame);
+            }
+        }
+    }
+
+
+    /// 开始本地候选收集 + 会话绑定（发起、应答、迟到 ANSWER 三条路径共用；
+    /// 幂等：`locals_done` 已置位 = `Gathered`，本轮已在跑 = `InFlight`）。
     ///
     /// STAGE 2（官方对齐审计 §2.7）：本地 host 候选**当拍就算出来交给会话**，
     /// 不再取任何 socket、不再等 STUN —— 上游
@@ -1965,7 +1938,10 @@ impl PeerIceOrchestrator {
             return Err(ManagementError::Network("ice:no-bindable-local-candidate".into()));
         }
         // host 候选：接口地址 × mux 端口，立刻交给会话并立刻 trickle 出去。
-        let offer_owed = matches!(phase, "initiate" | "answer-late");
+        // 只有**主动发起**这一条路径欠 OFFER：迟到 ANSWER 只是上游
+        // `OnNewOffer(answer)`（`worker_ice.go:100-157` 的 Dial/Accept），它
+        // **不回** OFFER（见 `handle_signal` 的 Answer 分支）。
+        let offer_owed = phase == "initiate";
         let port = mux.local_port();
         let hosts = crate::ice::mux_host_candidates(&ifaces, port);
         let mut added = 0usize;
@@ -2046,7 +2022,13 @@ impl PeerIceOrchestrator {
     }
 
     /// 建会话（三条路径共用：收到 OFFER 应答、主动发起、迟到 ANSWER 采纳）。
-    /// 纯内存：`IceSession::new` + 凭证生成，不取 socket、不发 STUN。
+    /// 纯内存：`IceSession::new` + 凭证（**每 peer 一次**），不取 socket、不发 STUN。
+    ///
+    /// 凭证是 per-peer 的：第一次建会话时抽定后写进
+    /// [`PeerConn::local_creds`]，此后每次重建会话都复用同一对——上游
+    /// `WorkerICE.localUfrag/localPwd` 在 worker 构造时生成一次
+    /// （`worker_ice.go:91-97`），`reCreateAgent` 每次都用它
+    /// （`worker_ice.go:220-226`）。
     fn ensure_session(
         &mut self,
         idx: usize,
@@ -2056,7 +2038,14 @@ impl PeerIceOrchestrator {
         if self.peers[idx].session.is_some() {
             return Ok(());
         }
-        let creds = IceCredentials::generate()?;
+        let creds = match self.peers[idx].local_creds.clone() {
+            Some(c) => c,
+            None => {
+                let c = IceCredentials::generate()?;
+                self.peers[idx].local_creds = Some(c.clone());
+                c
+            }
+        };
         // 角色按官方 isController 公钥比较确定，与 Offer/Answer 方向无关；
         // 本端公钥未注入时回退旧规则（发起方 controlling、应答方 controlled）。
         let fallback = match phase {
@@ -2083,10 +2072,8 @@ impl PeerIceOrchestrator {
         // N2 v4.1 P7: the session's outer-source receipts name THIS peer.
         session.set_peer_label(&peer_short(&self.peers[idx].key));
         let peer = &mut self.peers[idx];
-        peer.creds = Some(creds);
         peer.session = Some(session);
         peer.session_at_ms = now_ms;
-        peer.checking_since_ms = 0;
         Ok(())
     }
 
@@ -2232,22 +2219,21 @@ impl PeerIceOrchestrator {
                 self.advertised_candidates.len(),
                 bound_addrs.join(","),
             ));
-            // 发起方（主动发起；或迟到 ANSWER 采纳后重新发起）：候选就绪即
-            // 入列 OFFER——上游 `GatherCandidates()` 后立刻 dial 的等价物。
-            // 用 `offer_owed`（发起时记录）而不是 `peer.initiated`：后者在
-            // 一次成功发起后会一直为真，拿它当判据会在这之后的**应答**会话
-            // （对端新 OFFER 触发的重建）里多发一个 OFFER = 上游没有的 glare。
+            // 主动发起：候选就绪即入列 OFFER——上游 `GatherCandidates()` 后
+            // 立刻 dial 的等价物（`worker_ice.go:255-266`）。判据是**本次收集
+            // 的 phase**（`offer_owed`），不是「本 peer 曾经发起过」：应答会话
+            // （对端 OFFER 触发的建会话）不能多发 OFFER。
             if offer_owed {
-                if let Some(creds) = peer.creds.as_ref() {
+                if let Some(creds) = peer.local_creds.as_ref() {
                     let payload = format!("{}:{}", creds.ufrag, creds.pwd);
                     peer.outbox.push_back((PeerSignalKind::Offer, payload));
                 }
             }
             // 应答方（收到 OFFER 建立会话）：候选就绪即补 ANSWER——上游
             // handshaker 收到 Offer 后无条件 `sendAnswer()`（handshaker.go:
-            // 150-156），与候选收集无关。
+            // 136），与候选收集无关。
             if peer.answer_owed {
-                if let Some(creds) = peer.creds.as_ref() {
+                if let Some(creds) = peer.local_creds.as_ref() {
                     let payload = format!("{}:{}", creds.ufrag, creds.pwd);
                     peer.outbox.push_back((PeerSignalKind::Answer, payload));
                 }
@@ -2286,8 +2272,10 @@ impl PeerIceOrchestrator {
         None
     }
 
-    /// outbox FIFO 刷给 signal seam；失败即停（剩余帧下一拍重试）。
-    /// 成功送出的帧记入 `signaled`（握手重发的母本，去重）。
+    /// outbox FIFO 刷给 signal seam；失败即停（剩余帧下一拍重试——上游
+    /// `SendOffer` 的 `ErrSignalIsNotReady` 会把这一跳的 OFFER 直接丢掉
+    /// （`handshaker.go:207-209`），本架构显式失败并把帧留在队列里，重发
+    /// 由 guard 的下一跳负责）。
     fn flush_outbox(&mut self, idx: usize) -> Result<(), ManagementError> {
         loop {
             let (kind, payload, key) = {
@@ -2298,26 +2286,24 @@ impl PeerIceOrchestrator {
                 }
             };
             self.signal.send(&key, kind, &payload, 0)?;
-            {
-                let peer = &mut self.peers[idx];
-                peer.outbox.pop_front();
-                if !peer.signaled.contains(&(kind, payload.clone())) {
-                    peer.signaled.push((kind, payload));
-                }
-            }
+            self.peers[idx].outbox.pop_front();
         }
     }
 
-    /// 会话启动前置：远端凭证 + 本地候选 + 至少一个远端候选。
-    /// `now_ms`（注入时钟）用于武装 Checking 看门狗（[`CHECKING_WATCHDOG_MS`]）。
-    fn maybe_start(&mut self, idx: usize, now_ms: u64) {
+    /// 会话启动前置：远端凭证 + 本地候选。
+    ///
+    /// **不需要远端候选**：上游的 agent 拿到远端凭证就进 Checking
+    /// （`agent.go:328-351`），哪怕 checklist 是空的（`agent.go:480-483`
+    /// "Failed to ping without candidate pairs"）；迟到 trickle 的远端候选会形成
+    /// 新 pair 并在同一段 Checking 预算里被探测。这个「等一个远端候选才敢 start」
+    /// 的门曾经让「对端已应答但零候选」的会话永远不 start、没有任何终态信号
+    /// （真机 round-230622244），也正是曾经的 9 s `START_DEADLINE_MS`
+    /// （已删除）当初被造出来的原因；上游没有这个门，所以这里也不留。
+    fn maybe_start(&mut self, idx: usize, _now_ms: u64) {
         if self.peers[idx].started || self.peers[idx].session.is_none() {
             return;
         }
-        if self.peers[idx].remote_creds.is_none()
-            || !self.peers[idx].locals_done
-            || self.peers[idx].remote_cands_seen == 0
-        {
+        if self.peers[idx].remote_creds.is_none() || !self.peers[idx].locals_done {
             return;
         }
         {
@@ -2350,14 +2336,9 @@ impl PeerIceOrchestrator {
                 PeerIceState::Idle | PeerIceState::Gathering | PeerIceState::Failed
             )
         {
-            // Failed→Checking：拆除后的重谈判也要如实回到 Checking——
-            // 否则状态永远停在上一会话的 Failed（观测面失真），且
-            // Checking 看门狗（`expire_dead_checking`）永远不再覆盖
-            // 重谈判出来的会话。
+            // Failed→Checking：拆除后的重谈判也要如实回到 Checking，
+            // 否则状态永远停在上一会话的 Failed（观测面失真）。
             self.peers[idx].state = PeerIceState::Checking;
-        }
-        if self.peers[idx].started && self.peers[idx].checking_since_ms == 0 {
-            self.peers[idx].checking_since_ms = now_ms;
         }
     }
 
@@ -2433,29 +2414,41 @@ impl PeerIceOrchestrator {
                     // `RemoveEndpointAddress`，conn.go:531）：设备从此无路径
                     // 可发（fail-closed），绝不静默沿用旧路径；恢复连接须经
                     // 新一轮协商（重选 pair 后重新 attach + 落配）。
+                    //
+                    // 会话本身也随之拆掉：上游 pion 报 Disconnected 时
+                    // `onConnectionStateChange` 立刻 `closeAgent`
+                    // （worker_ice.go:591-600，`agentConnecting` 随之清零），
+                    // 紧接着 `onICEStateDisconnected` 复位 guard 节拍——但只在
+                    // **真的从 Connected 变过来**时（conn.go:535-539
+                    // `changed := conn.statusICE.Get() != StatusDisconnected`），
+                    // 于是事件后约 800 ms 的那一跳就会重新发 OFFER
+                    // （`guard.go:148-153` → `:129-130` → `conn.go:688-692`）。
+                    let from_connected =
+                        self.peers[idx].state == PeerIceState::Connected;
                     let peer = &mut self.peers[idx];
                     peer.state = PeerIceState::Disconnected;
                     peer.endpoint_applied = false;
                     self.wg.recycle_endpoint(&peer.key);
                     crate::hilog::emit("N11_ICE|disconnected|endpoint-recycled");
+                    drop(peer);
+                    self.drop_session(idx, PeerIceState::Disconnected, "ice-disconnected");
+                    if from_connected {
+                        self.guard_reset(idx, now_ms);
+                    }
                 }
                 IceEvent::Failed(reason) => {
                     // 无 relay 的本增量：Failed → peer 不可达（绝不静默
                     // 当作可用；默认路由闸经 summary().reachable 生效）。
                     // N11：回收 WG 端点与 egress，并拆除死会话（关闭其
-                    // socket dup = 死路径 fail-closed）+ 冷却后重新发起
-                    // （上游：agent Failed → closeAgent → handshaker 重启
-                    // 协商，worker_ice.go:584-593 / conn.go:495-534）。
-                    self.drop_session_rearm(idx, now_ms, &reason);
+                    // socket dup = 死路径 fail-closed）；重谈判由 guard 节拍
+                    // 驱动（上游 agent Failed → closeAgent，worker_ice.go:591-600）。
+                    self.drop_session(idx, PeerIceState::Failed, &reason);
                 }
                 IceEvent::Closed => {}
                 IceEvent::CheckSucceeded { remote, rtt_ms, .. } => {
                     // 修复前这里是 `=> {}`（§1.3：最大的观测盲区——整份真机
-                    // 日志无法区分"检查从未发出"还是"发出未回应"）。一行
-                    // 简摘 + 滑动重置 Checking 看门狗（有检查在成功 = 会话
-                    // 没有僵死，不能按看门狗拆）。
+                    // 日志无法区分"检查从未发出"还是"发出未回应"）。
                     let peer = &mut self.peers[idx];
-                    peer.checking_since_ms = now_ms;
                     crate::hilog::emit(&format!(
                         "N5c_ICE|check-ok|peer={}|round={}|remote={}:{}|rtt_ms={rtt_ms}",
                         peer_short(&peer.key),
@@ -2471,148 +2464,44 @@ impl PeerIceOrchestrator {
         }
     }
 
-    /// 拆除当前会话并重新武装谈判（`IceEvent::Failed` 与僵尸谈判超时
-    /// [`Self::expire_dead_negotiation`] 共用）：peer 不可达、回收 WG
-    /// 端点与 egress、Drop 关闭会话全部 dup socket、清空在途信令状态、
-    /// 冷却后允许重新发起。`reason` 只进日志（公开诊断材料）。
-    fn drop_session_rearm(&mut self, idx: usize, now_ms: u64, reason: &str) {
+    /// 拆掉当前会话（上游 `closeAgent`）：peer 不可达、回收 WG 端点与 egress、
+    /// Drop 关闭会话的全部 dup socket、清空在途信令状态。
+    ///
+    /// 对应上游 `WorkerICE.closeAgent`（`worker_ice.go:354-373`）的调用点：
+    /// `connect` 里 gather/dial 失败（`:257-261`、`:270-275`）、
+    /// `onConnectionStateChange` 的 Failed/Disconnected/Closed
+    /// （`:591-600`）。**本地凭证不在拆除范围**：`localUfrag/localPwd` 是 per-peer
+    /// 的（`worker_ice.go:91-97`），会话重建后照旧广播同一对。
+    ///
+    /// `state` 由调用方给出：路径死了（Disconnected）还是谈判失败了（Failed）——
+    /// 两者对 `summary()/status()` 都意味着不可达，但观测面上不同。
+    /// `reason` 只进日志（公开诊断材料）。
+    fn drop_session(&mut self, idx: usize, state: PeerIceState, reason: &str) {
         let peer = &mut self.peers[idx];
         let round = peer.session_at_ms;
-        let peer_prefix = peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>();
-        peer.state = PeerIceState::Failed;
+        let peer_prefix = peer_short(&peer.key);
+        peer.state = state;
         peer.endpoint_applied = false;
         peer.selected_remote = None;
         self.wg.recycle_endpoint(&peer.key);
         peer.session = None; // Drop 关闭该会话全部 dup socket
-        // 在跑的收集属于这个死会话：丢接收端（worker 收尾时自关其 socket），
+        // 在跑的收集属于这个死会话：丢接收端（worker 收尾时自关其 dup），
         // 免得它的候选落进下一次协商。
         peer.gather = None;
-        peer.creds = None;
         peer.remote_creds = None;
         peer.locals_done = false;
         peer.started = false;
         peer.remote_cands_seen = 0;
         peer.pending_remote.clear();
-        peer.signaled.clear();
         peer.outbox.clear();
-        peer.retry_at_ms = 0;
-        peer.initiated = false;
-        peer.answer_owed = false; // 死会话不欠 ANSWER：重发起走 Offer 路径
+        peer.answer_owed = false;
         peer.session_at_ms = 0;
-        peer.checking_since_ms = 0; // 看门狗随会话作废
         peer.last_health_ms = 0;
-        peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-        // 0051 §7 item 2：连续的「远端静默」超时→指数退避拉长下一次发起。
-        // 只统计 `negotiation-start-timeout`（会话已建、本地候选已发、远端
-        // 凭证/候选从未到达）：Failed 事件、网络切换、诊断断链都不是「对端
-        // 静默」的证据，不得计入。
-        let enter_backoff = if reason == "negotiation-start-timeout" {
-            note_silent_timeout(peer, now_ms)
-        } else {
-            None
-        };
         // The payload carries WHY the session died — device run 3
         // needed exactly this and the marker alone said nothing.
         crate::hilog::emit(&format!(
             "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}|peer={peer_prefix}|round={round}"
         ));
-        if let Some((misses, next_ms)) = enter_backoff {
-            crate::hilog::emit(&initiate_backoff_line(&peer_prefix, misses, next_ms));
-        }
-    }
-
-    /// 复位「远端静默」退避（0051 §7 item 2）：收到该 peer 任何信令或网络
-    /// 切换/重连事件时调用。`backoff-reset` 行只在**活动**退避上记一行
-    /// （复位即清零，天然限频）；有活动退避时把冷却拉回正常节奏
-    /// （至多 `RETRY_COOLDOWN_MS`），否则不动既有的短冷却。
-    fn reset_initiate_backoff(&mut self, idx: usize, now_ms: u64, reason: &str) {
-        let peer = &mut self.peers[idx];
-        if !peer.backoff_active && peer.backoff_misses == 0 && peer.backoff_logged_misses == 0 {
-            return;
-        }
-        let was_active = peer.backoff_active;
-        peer.backoff_misses = 0;
-        peer.backoff_active = false;
-        peer.backoff_logged_misses = 0;
-        if was_active {
-            peer.cooldown_until =
-                peer.cooldown_until.min(now_ms.saturating_add(RETRY_COOLDOWN_MS));
-            let peer_prefix = peer_short(&peer.key);
-            crate::hilog::emit(&backoff_reset_line(&peer_prefix, reason));
-        }
-    }
-
-    /// 僵尸谈判拆除（H3 修复，[`START_DEADLINE_MS`]）：会话已建、本地
-    /// 候选已发，但 `start()` 始终没有发生 —— 判据只认「未 start」，
-    /// **不再区分远端有没有应答**：
-    ///
-    /// - 远端从未应答（`remote_creds` 为空）：典型是对端仍持有旧会话、
-    ///   自认 Connected、不再发 Offer/Answer；0048 形态：对端只 trickle
-    ///   候选、从不发凭据（本端候选照收、凭证为零，`maybe_start` 永远不
-    ///   满足）。
-    /// - **远端已应答但零候选**（`remote_creds` 有、`remote_cands_seen == 0`）：
-    ///   `maybe_start` 还要求 ≥1 个远端候选，于是会话永远停在
-    ///   `session = Some && started == false`，`IceSession::run_once` 因
-    ///   `!started` 立即返回、永不收包，socket 被永久占住。真机
-    ///   round-230622244：手机 07:09:03 发本地候选、07:09:04 收到 Answer、
-    ///   此后零候选，9 min 内没有任何重试。修复前的 `remote_creds.is_none()`
-    ///   守卫把「已应答」误当成健康，正是这条停摆。
-    ///
-    /// 两种情况都没有事件面可拆会话（`want_initiate` 要 `session.is_none()`，
-    /// `want_locals` 要 `!locals_done`），到期即拆除重武装：冷却后以全新
-    /// 凭证重新发起，对端会把新凭证的 Offer 采纳为新谈判并应答 + trickle
-    /// 候选。已 start 的会话不适用——其死亡由 keepalive/断连/全对失败/
-    /// [`CHECKING_WATCHDOG_MS`] 诚实驱动。
-    ///
-    /// 计时用 [`PeerConn::negotiation_age_ms`] 而不是裸的
-    /// `now - session_at_ms`（0050 §8 item 3）：等受保护 socket 补给的
-    /// 时间不算「对端不应答」，不能拿它去拆会话。
-    ///
-    /// 退避口径不变：`drop_session_rearm` 按
-    /// `reason=negotiation-start-timeout` 调用 `note_silent_timeout`，而
-    /// 后者只在**期间没有收到任何信令**（`rx_since_timeout` 为假）时才累计
-    /// 「远端静默」——已应答过的 peer 收到过 Answer，不计入退避，只走既有的
-    /// [`RETRY_COOLDOWN_MS`] 节奏。
-    fn expire_dead_negotiation(&mut self, idx: usize, now_ms: u64) {
-        let zombie = {
-            let p = &self.peers[idx];
-            p.session.is_some()
-                && !p.started
-                && p.session_at_ms != 0
-                && p.negotiation_age_ms(now_ms) >= START_DEADLINE_MS
-        };
-        if zombie {
-            self.drop_session_rearm(idx, now_ms, "negotiation-start-timeout");
-        }
-    }
-
-    /// Checking 看门狗（§6.3，[`CHECKING_WATCHDOG_MS`]）：会话已 start、
-    /// 处于 Checking，但自 `checking_since_ms` 起没有任何检查成功——
-    /// 判 failed、拆除会话（`drop_session_rearm` → 冷却后全新协商）。
-    ///
-    /// 为什么 start 后的会话也需要拆除器（真机 2026-10-05，§2.3）：
-    /// - `all-pairs-failed` 要求**所有** pair 同时 Failed，而远端候选
-    ///   持续流入会不断产生新的 Waiting pair + 入站有效检查会把 Failed
-    ///   回暖为 Waiting —— 在线对端的会话**永不** all-failed；
-    /// - `Disconnected` 只在收到过有效入站后才可能触发
-    ///  （`last_inbound_ms = None` 时整个定时器块被跳过）；
-    /// - 于是 start 后永不成功的会话没有任何终态信号，只能靠外因
-    ///   （网络切换）拆除 —— 对端看到我们永远 "Connecting"。
-    ///
-    /// 每次检查成功（[`IceEvent::CheckSucceeded`]）滑动重置计时
-    /// （`drain_events`）：还在取得进展的慢会话不会被误杀。
-    fn expire_dead_checking(&mut self, idx: usize, now_ms: u64) {
-        let dead = {
-            let p = &self.peers[idx];
-            p.session.is_some()
-                && p.started
-                && p.state == PeerIceState::Checking
-                && p.checking_since_ms != 0
-                && now_ms.saturating_sub(p.checking_since_ms) >= CHECKING_WATCHDOG_MS
-        };
-        if dead {
-            self.drop_session_rearm(idx, now_ms, "checking-timeout");
-        }
     }
 
     /// 周期性健康摘要（§5 item 5，[`HEALTH_SUMMARY_MS`]）：一行包含
@@ -2662,24 +2551,25 @@ impl PeerIceOrchestrator {
         ));
     }
 
-    /// Force fresh ICE credentials, candidates and protected sockets after an
-    /// outer-network change; the next pump renegotiates each known peer.
+    /// 物理网络变化（外层 socket 重建 + 重新 protect/feed）：拆掉所有还骑着
+    /// 旧路径的会话，并把每个 peer 的重连节拍复位到上游的 `newReconnectTicker`
+    /// —— `guard.go:162-177` 的 netChanged 分支（`netWatcher.Changed()`：
+    /// 「network is back, reset reconnection ticker」→ 800 ms 起跳）；于是下一次
+    /// 发起落在切换后约 800 ms，而不是等当前退避档走完。
     ///
-    /// 0051 §7 item 2：网络切换同样复位「远端静默」退避——切换后旧的静默
-    /// 推断作废（本端接口/端口全变，对端也没机会应答），必须立刻回到正常
-    /// 节奏重新尝试。
+    /// 会话本身必须拆：本端接口/端口全变，旧会话的候选端口已经不存在。
+    /// 本地凭证**不变**（per-peer，`worker_ice.go:91-97`）。
     pub fn restart_for_network_change(&mut self, now_ms: u64) {
         for idx in 0..self.peers.len() {
-            self.drop_session_rearm(idx, now_ms, "physical-network-change");
-            self.peers[idx].cooldown_until = now_ms;
-            self.reset_initiate_backoff(idx, now_ms, "network-change");
+            self.drop_session(idx, PeerIceState::Failed, "physical-network-change");
+            self.guard_reset(idx, now_ms);
         }
     }
 
     /// N2 T5a（§4 B 列 I 行）：端点定向断链。每个有会话/已选端点的 peer 都被
-    /// 拆除当前会话（`drop_session_rearm`：`peer.session = None` 由 `IceSession`
-    /// 的 `Drop` 关闭其全部 dup socket），并清掉冷却，使下一次 pump 立即重新
-    /// gather/check/signal —— 即冻结的「关闭该 ICE 外层 socket 触发重建」。
+    /// 拆除当前会话（`drop_session`：`peer.session = None` 由 `IceSession`
+    /// 的 `Drop` 关闭其全部 dup socket），并把重连节拍复位到 800 ms，使断开后
+    /// 约 800 ms 就重新发起（guard 的 ICE-disconnected 语义）。
     /// 返回实际被处理的 peer 数（0 = 无可断的会话 → `no-target`）。
     pub fn break_ice(&mut self, now_ms: u64) -> usize {
         let mut acted = 0;
@@ -2688,8 +2578,8 @@ impl PeerIceOrchestrator {
             if !live {
                 continue;
             }
-            self.drop_session_rearm(idx, now_ms, "n2-stimulus-I");
-            self.peers[idx].cooldown_until = now_ms;
+            self.drop_session(idx, PeerIceState::Failed, "n2-stimulus-I");
+            self.guard_reset(idx, now_ms);
             acted += 1;
         }
         acted
@@ -2764,6 +2654,25 @@ mod tests {
         let mut orch = PeerIceOrchestrator::new(deps);
         orch.set_gather_exec(Arc::new(InlineGatherExec));
         orch
+    }
+
+    /// guard 节拍的定序熵源：恒返回构造时的样本。`0.5` 让 ±10% 抖动恰好取
+    /// **裸间隔**（cenkalti/backoff `getRandomValueFromInterval`：delay =
+    /// current×(1+f×(2r−1))），guard 序列因此可逐值断言 3 s / 6 s / 12 s /
+    /// 24 s → 封顶（封顶值 = 该 peer 抽定的 timeout，`0.5` 时为 37.5 s）。
+    /// 生产从不装它（默认 [`OsRandom`]）。
+    struct GuardRng(f64);
+    impl Rng for GuardRng {
+        fn next_uniform(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    /// 装定序熵源——必须在 [`PeerIceOrchestrator::set_peers`]**之前**调用：
+    /// `set_peers` 是每 peer timeout 的唯一抽取点（每个新 `PeerConn` 消耗
+    /// 一个样本）。
+    fn seed_guard(orch: &mut PeerIceOrchestrator) {
+        orch.set_guard_rng(Box::new(GuardRng(0.5)));
     }
     struct NullWg;
     impl WgPeerApplier for NullWg {
@@ -2898,11 +2807,13 @@ mod tests {
     }
 
     #[test]
-    fn handshake_is_re_signaled_periodically_until_connected() {
-        // round-6 归因的回归钉子：OFFER/候选在信号 seam 交付成功后，若对端
-        // 一直没有回音（典型：对端尚未注册，服务端 best-effort 丢弃转发，
-        // 无任何错误面），编排层必须按 HANDSHAKE_RETRY_MS 周期重发已发帧，
-        // 直到该 peer Connected；重发不得无限增长 signaled 母本。
+    fn guard_reoffers_a_silent_peer_on_the_backoff_until_connected() {
+        // round-6 归因的回归钉子（guard 形态）：OFFER/候选交付成功后，对端
+        // 一直没有回音（典型：对端尚未注册，signal 服务端 best-effort 丢弃
+        // 转发、无任何错误面）时，编排层按 guard 节拍重发 OFFER（guard.go:
+        // 129-130 Disconnected → conn.go:688-692 onGuardEvent → handshaker
+        // SendOffer），直到该 peer Connected。凭证 per-peer 稳定
+        // （worker_ice.go:91-97），所以每一跳重发的都是同一对凭证。
         #[derive(Default)]
         struct RecordingSignal {
             frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
@@ -2947,36 +2858,51 @@ mod tests {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        seed_guard(&mut orch);
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
 
-        let sent = || signal.frames.lock().expect("frames").len();
-        // 拍 1（t=1000）：发起 → gather → OFFER + 候选交付 seam
+        let offers = |signal: &Arc<RecordingSignal>| -> Vec<String> {
+            signal
+                .frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
+                .map(|(_, _, p)| p.clone())
+                .collect()
+        };
+        // 拍 1（t=1000）：guard 的保证首跳（guard_next=0，NewTicker 创建即发
+        // 一次）——完整发起：会话 + 本地候选 + OFFER 交付 seam。
         orch.run_once(1000).expect("first beat converges the send");
-        let first = sent();
-        assert!(first >= 2, "offer + candidates must be delivered, got {first}");
-        // 首发后重发定时器已武装：冷却窗口内（<1000+3000）无重发
-        orch.run_once(2000).expect("beat 2");
-        orch.run_once(3999).expect("beat 3");
-        assert_eq!(sent(), first, "no re-signal before HANDSHAKE_RETRY_MS");
-        // 到点：重发同一批帧（offer + 候选），且母本不增长（去重）
-        orch.run_once(4000).expect("beat 4 fires the retry");
-        assert!(sent() >= first * 2, "re-signal must re-deliver the frames");
-        {
-            let p = &orch.peers[0];
-            assert_eq!(
-                p.signaled.len(),
-                first,
-                "signaled store stays deduplicated ({} vs {})",
-                p.signaled.len(),
-                first
-            );
-        }
-        // 继续周期重发（t=7000 再到点）
-        orch.run_once(6999).expect("beat 5");
-        assert_eq!(sent(), first * 2, "still inside the retry window");
-        orch.run_once(7000).expect("beat 6 fires the second retry");
-        assert!(sent() >= first * 3, "periodic re-signal continues until Connected");
+        let first = offers(&signal);
+        assert_eq!(first.len(), 1, "exactly one OFFER on the first hop");
+        assert!(
+            signal.frames.lock().expect("frames").iter().any(|(_, k, _)| *k == PeerSignalKind::Candidate),
+            "the first hop carries the local candidates"
+        );
+        assert_eq!(orch.peers[0].timeout_ms, 37_500, "GuardRng(0.5) draws 30 s + 0.5×15 s");
+        // 首跳的下一跳 = 裸间隔 3 s（GuardRng(0.5) → 抖动取裸间隔）。
+        orch.run_once(3999).expect("beat 2");
+        assert_eq!(offers(&signal).len(), 1, "no re-offer before the 3 s hop");
+        orch.run_once(4000).expect("beat 3 fires the hop");
+        assert_eq!(offers(&signal).len(), 2, "the guard hop re-offers");
+        // 节拍按 ×2 增长：下一跳在 4000+6000。
+        orch.run_once(9999).expect("beat 4");
+        assert_eq!(offers(&signal).len(), 2, "no re-offer before the 6 s hop");
+        orch.run_once(10_000).expect("beat 5 fires the second hop");
+        assert_eq!(offers(&signal).len(), 3);
+        // 12 s 之后的第三跳。
+        orch.run_once(21_999).expect("beat 6");
+        assert_eq!(offers(&signal).len(), 3, "no re-offer before the 12 s hop");
+        orch.run_once(22_000).expect("beat 7 fires the third hop");
+        assert_eq!(offers(&signal).len(), 4);
+        // 每一跳重发的都是同一对凭证（per-peer 稳定，worker_ice.go:91-97）。
+        let all = offers(&signal);
+        assert!(
+            all.windows(2).all(|w| w[0] == w[1]),
+            "every re-offer carries the SAME stable credentials: {all:?}"
+        );
     }
 
     #[test]
@@ -3067,8 +2993,9 @@ mod tests {
         let st = orch.peer_status("P").expect("peer");
         assert_eq!(st.last_error, Some(ErrorClass::Network), "fail-closed is an error class");
         assert!(!ice_ready_for_default_route(&orch.summary()), "unreachable peer must not arm the gate");
-        // 冷却后重试仍走同一条 fail-closed 路径（绝不静默换成无保护 socket）。
-        now += RETRY_COOLDOWN_MS;
+        // guard 下一跳的失败重试仍走同一条 fail-closed 路径（绝不静默换成
+        // 无保护 socket；收集失败不重置节拍——首跳的 3 s backoff 走完才再试）。
+        now += GUARD_INITIAL_MS + 1_000;
         assert!(orch.run_once(now).is_err(), "still no mux, still fail-closed");
         assert_eq!(socks.taken(), 0);
     }
@@ -3248,9 +3175,10 @@ mod tests {
     /// - **ANSWER**：上游**没有「丢帧」这一支**——引擎先 `ActivatePeer`
     ///   （engine.go:2088-2097），handshaker 把 Offer/Answer 一并交给 ICE
     ///   worker，worker 用这一帧新建 agent 并 Dial/Accept
-    ///   （handshaker.go:150-156 / worker_ice.go:100-155）。因此这里**开启一轮
-    ///   协商**（建会话 + 采纳远端凭证 + 以全新本地凭证重新发起 OFFER），
-    ///   而不是丢弃计数；`signal-no-session` 行随之删除（上游没有对应行）。
+    ///   （handshaker.go:140-156 / worker_ice.go:100-155）。因此这里**开启一轮
+    ///   协商**（建会话 + 采纳远端凭证 + 收集本地候选进 Checking），**不回
+    ///   OFFER**（remoteAnswerCh 分支没有 sendOffer），而不是丢弃计数；
+    ///   `signal-no-session` 行随之删除（上游没有对应行）。
     #[test]
     fn signal_without_an_active_session_starts_negotiation_like_upstream() {
         #[derive(Default)]
@@ -3300,12 +3228,15 @@ mod tests {
         assert_eq!(orch.peer_status("P").expect("peer").state, PeerIceState::Idle);
         assert!(orch.peers[0].session.is_none(), "a candidate alone must not open a session");
         assert_eq!(orch.peers[0].pending_remote.len(), 1, "the early candidate is held, not lost");
-        // 无会话的 ANSWER：开启新协商（采纳凭证 + 重新发起），不计入 unknown_signal
+        // 无会话的 ANSWER：开启新协商（采纳凭证 + 收集本地候选），不计入
+        // unknown_signal；**不回 OFFER**——上游 remoteAnswerCh 分支只把帧交给
+        // ICE worker 去 Dial/Accept（handshaker.go:140-156），对端手里已有
+        // 本端稳定的 ufrag:pwd（per-peer 凭证），无需任何「换新凭证重新
+        // 发起」的自造绕道。
         orch.handle_signal("P", PeerSignalKind::Answer, "abcd:0123456789012345678901", 20)
             .expect("answer accepted");
         assert_eq!(orch.unknown_signal(), 0, "upstream has no drop-on-no-session branch");
         assert!(orch.peers[0].session.is_some(), "the late ANSWER starts a negotiation");
-        assert!(orch.peers[0].initiated, "and re-offers with fresh local credentials");
         assert!(
             orch.peers[0].started,
             "the held candidate plus the answer credentials start the checks"
@@ -3314,8 +3245,12 @@ mod tests {
         orch.run_once(21).expect("beat");
         let frames = signal.frames.lock().expect("frames");
         assert!(
-            frames.iter().any(|(k, kind, _)| k == "P" && *kind == PeerSignalKind::Offer),
-            "the re-offer goes out: {frames:?}"
+            frames.iter().any(|(k, kind, _)| k == "P" && *kind == PeerSignalKind::Candidate),
+            "the local candidates trickle out: {frames:?}"
+        );
+        assert!(
+            !frames.iter().any(|(k, kind, _)| k == "P" && *kind == PeerSignalKind::Offer),
+            "an ANSWER is never answered with an OFFER (no re-offer workaround): {frames:?}"
         );
     }
 
@@ -3469,7 +3404,8 @@ mod tests {
             signal.frames.lock().expect("frames").is_empty(),
             "no frame may leave without a bound candidate"
         );
-        assert_eq!(orch.peer_status("P").expect("peer").state, PeerIceState::Idle);
+        // closeAgent 语义：半成品会话整段拆掉，观测面 = Failed（不是 Idle）。
+        assert_eq!(orch.peer_status("P").expect("peer").state, PeerIceState::Failed);
         unsafe { sys::close(holder) };
     }
 
@@ -3847,10 +3783,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 0051 §7 item 2：无回应 peer 的指数退避
+    // guard 重连节拍（`client/internal/peer/guard/guard.go:97-213`）
     // -----------------------------------------------------------------------
 
-    /// 单接口（need=2）+ 指定深度 socket 池的编排器，一个静默 peer。
+    /// 单接口 + 指定深度 socket 池的编排器，一个静默 peer（定序 guard 熵源）。
     fn silent_peer_orch(pool: usize) -> PeerIceOrchestrator {
         let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         for _ in 0..pool {
@@ -3871,142 +3807,129 @@ mod tests {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        seed_guard(&mut orch);
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
         orch
     }
 
-    /// 把静默 peer 驱动到 `target` 次 `negotiation-start-timeout`；返回最后
-    /// 一拍的注入时刻。返回每次静默超时后「本轮设置的下一次发起延迟」。
-    fn drive_silent_timeouts(
-        orch: &mut PeerIceOrchestrator,
-        start_now: u64,
-        target: u32,
-    ) -> (u64, Vec<(u32, u64)>) {
-        const TICK: u64 = 250;
-        let mut now = start_now;
-        let mut last_misses = orch.peers[0].backoff_misses;
-        let mut delays: Vec<(u32, u64)> = Vec::new();
-        while orch.peers[0].backoff_misses < target {
-            now += TICK;
-            assert!(now < 10_000_000, "the silent peer never timed out (misses={})", orch.peers[0].backoff_misses);
-            orch.run_once(now).expect("a silent beat is not an error");
-            let misses = orch.peers[0].backoff_misses;
-            if misses > last_misses {
-                delays.push((misses, orch.peers[0].cooldown_until.saturating_sub(now)));
-                last_misses = misses;
-            }
+    /// guard 参数与每 peer 超时抽定的算术：3 s 起跳、×2、±10% 抖动、封顶 =
+    /// 本 peer 的 `ConnConfig.Timeout` ∈ [30 s, 45 s)（`guard.go:188-195`、
+    /// `engine.go:91-92`、`engine.go:2010-2011`）。
+    #[test]
+    fn guard_backoff_arithmetic_and_peer_timeout_bounds_are_frozen() {
+        assert_eq!(GUARD_INITIAL_MS, 3_000, "guard.initialTicker InitialInterval (guard.go:188-190)");
+        assert_eq!(GUARD_RECONNECT_MS, 800, "newReconnectTicker InitialInterval (guard.go:200-208)");
+        assert_eq!(GUARD_RANDOMIZATION, 0.1, "RandomizationFactor (guard.go:190/:202)");
+        assert_eq!(GUARD_MULTIPLIER, 2.0, "Multiplier (guard.go:191/:203)");
+        assert_eq!(PEER_TIMEOUT_MIN_MS, 30_000, "PeerConnectionTimeoutMin (engine.go:91)");
+        assert_eq!(PEER_TIMEOUT_MAX_MS, 45_000, "PeerConnectionTimeoutMax (engine.go:92)");
+        // `rand.Intn(Max-Min)+Min` 的镜像：draw ∈ [30 s, 45 s)。
+        let mut rng = GuardRng(0.0);
+        assert_eq!(draw_peer_timeout_ms(&mut rng), 30_000, "sample 0 → the Min bound");
+        let mut rng = GuardRng(1.0 - f64::EPSILON);
+        let top = draw_peer_timeout_ms(&mut rng);
+        assert!(top >= 30_000 && top < 45_000, "sample →1 must stay below Max, got {top}");
+        // 抖动包络：±10%（GuardRng(0.0) 取下端、GuardRng(0.5) 取裸间隔）。
+        let mut bo = guard_backoff(GUARD_INITIAL_MS, 45_000);
+        let mut rng = GuardRng(0.0);
+        assert_eq!(
+            bo.next_delay(&MonotonicClock, &mut rng).map(delay_ms),
+            Some(2_700),
+            "sample 0 → current×(1−0.1)"
+        );
+        let mut bo = guard_backoff(GUARD_INITIAL_MS, 45_000);
+        let mut rng = GuardRng(0.5);
+        assert_eq!(
+            bo.next_delay(&MonotonicClock, &mut rng).map(delay_ms),
+            Some(3_000),
+            "sample 0.5 → the bare interval"
+        );
+    }
+
+    /// 静默 peer 的 guard 节拍逐值冻结：3 s → 6 s → 12 s → 24 s → 封顶（封顶
+    /// 值 = 本 peer 抽定的 timeout，GuardRng(0.5) 时 37.5 s ∈ [30,45) s），
+    /// 并从此停在封顶上。`START_DEADLINE_MS`（9 s 拆除）没有对应物：会话
+    /// 留下、guard 每一跳重发同一对凭证（`guard.go:129-130`）。
+    #[test]
+    fn silent_remote_reoffers_on_the_guard_sequence_capped_at_the_peer_timeout() {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..64 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
         }
-        (now, delays)
-    }
+        let signal = Arc::new(FrameLog::default());
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        seed_guard(&mut orch);
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
 
-    /// 0051 §7 item 2 的算术与格式：延迟序列 9 s → 18 s → 36 s → … 封顶
-    /// 5 min；两行日志逐字冻结（真机判读依赖这两个 token）。
-    #[test]
-    fn initiate_backoff_arithmetic_and_lines_are_frozen() {
-        assert_eq!(INITIATE_BACKOFF_MIN_MISSES, 3);
-        assert_eq!(INITIATE_BACKOFF_BASE_MS, 9_000);
-        assert_eq!(INITIATE_BACKOFF_MAX_MS, 300_000);
-        assert_eq!(initiate_backoff_ms(3), 9_000);
-        assert_eq!(initiate_backoff_ms(4), 18_000);
-        assert_eq!(initiate_backoff_ms(5), 36_000);
-        assert_eq!(initiate_backoff_ms(6), 72_000);
-        assert_eq!(initiate_backoff_ms(8), 288_000);
-        assert_eq!(initiate_backoff_ms(9), 300_000, "9 s << 6 = 576 s is capped");
-        assert_eq!(initiate_backoff_ms(40), 300_000, "the cap also holds for absurd counts");
-        assert_eq!(initiate_backoff_ms(u32::MAX), 300_000, "no shift overflow at the extremes");
-        assert_eq!(
-            initiate_backoff_line("TrBfURPG", 3, 9_000),
-            "N5c_ICE|initiate-backoff|peer=TrBfURPG|misses=3|next_ms=9000"
-        );
-        assert_eq!(
-            backoff_reset_line("TrBfURPG", "signal"),
-            "N5c_ICE|backoff-reset|peer=TrBfURPG|reason=signal"
-        );
-    }
-
-    /// 远端静默 → 协商超时按退避增长：前两次仍是既有节奏
-    /// （[`RETRY_COOLDOWN_MS`]），第 3 次起延迟 9 s / 18 s / 36 s / 72 s，
-    /// 且实际发起间隔逐档变长；上限由 [`initiate_backoff_ms`] 钉住。
-    #[test]
-    fn silent_remote_grows_the_initiate_interval_up_to_the_cap() {
-        let mut orch = silent_peer_orch(64);
-        let mut initiate_at: Vec<u64> = Vec::new();
-        let (_, delays) = {
-            // 记录发起时刻：session_at_ms 每次发起被置为该拍注入时钟
-            const TICK: u64 = 250;
-            let mut now = 1_000u64;
-            let mut last_session = 0u64;
-            let mut delays: Vec<(u32, u64)> = Vec::new();
-            let mut last_misses = 0u32;
-            while orch.peers[0].backoff_misses < 6 {
-                now += TICK;
-                assert!(now < 10_000_000, "silent peer never timed out");
-                orch.run_once(now).expect("a silent beat is not an error");
-                let session = orch.peers[0].session_at_ms;
-                if session != 0 && session != last_session {
-                    initiate_at.push(session);
-                    last_session = session;
-                } else if session == 0 {
-                    last_session = 0;
-                }
-                let misses = orch.peers[0].backoff_misses;
-                if misses != last_misses {
-                    delays.push((misses, orch.peers[0].cooldown_until.saturating_sub(now)));
-                    last_misses = misses;
-                }
-            }
-            (now, delays)
+        let offer_count = |signal: &Arc<FrameLog>| -> u64 {
+            signal
+                .frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
+                .count() as u64
         };
-        assert_eq!(
-            delays,
-            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000), (4, 18_000),
-                 (5, 36_000), (6, 72_000)],
-            "the first 3 timeouts keep the normal pace, then 9/18/36/72 s"
-        );
-        assert!(orch.peers[0].backoff_active, "the 6th silent timeout is in backoff");
-        assert_eq!(orch.peers[0].backoff_misses, 6);
-        // 实际发起间隔：前几拍是既有的 ~11 s（9 s 截止期 + 2 s 冷却），进入
-        // 退避后逐档变长（9/18/36/72 s 的延迟叠加在 9 s 截止期上）。
-        assert!(initiate_at.len() >= 5, "expected several initiations, got {initiate_at:?}");
-        let gaps: Vec<u64> = initiate_at.windows(2).map(|w| w[1] - w[0]).collect();
-        let normal = START_DEADLINE_MS + RETRY_COOLDOWN_MS + 2 * 250;
-        assert!(gaps[0] <= normal && gaps[1] <= normal, "no backoff before the 3rd miss: {gaps:?}");
-        for pair in gaps.windows(2).skip(1) {
-            assert!(pair[1] > pair[0], "the interval must grow in backoff: {gaps:?}");
+        let mut offer_ticks: Vec<u64> = Vec::new();
+        let mut prev = 0u64;
+        let mut now = 1_000u64;
+        while now <= 130_000 {
+            orch.run_once(now).expect("a silent beat is not an error");
+            let n = offer_count(&signal);
+            if n > prev {
+                offer_ticks.push(now);
+                prev = n;
+            }
+            now += 250;
         }
-        assert!(
-            gaps[gaps.len() - 1] >= 45_000,
-            "the last interval must carry the 36 s delay of miss 5 (9 s deadline + 36 s): {gaps:?}"
+        // 首跳立即（guard_next=0），后续 3/6/12/24 s，然后停在 37.5 s 封顶。
+        assert_eq!(
+            offer_ticks,
+            vec![1_000, 4_000, 10_000, 22_000, 46_000, 83_500, 121_000],
+            "guard hops: +3 s, +6 s, +12 s, +24 s, then the cap (37.5 s) forever"
+        );
+        assert_eq!(orch.peers[0].timeout_ms, 37_500, "the cap IS the drawn peer timeout");
+        // 贯穿全程没有会话被拆过：guard 只重发，从不 teardown（没有 9 s
+        // 僵尸拆除；会话自首次发起起一直在）。
+        assert!(orch.peers[0].session.is_some(), "no START_DEADLINE_MS style teardown exists");
+        let creds = orch.peers[0].local_creds.clone().expect("stable creds");
+        let payloads: std::collections::HashSet<String> = signal
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
+            .map(|(_, _, p)| p.clone())
+            .collect();
+        assert_eq!(
+            payloads,
+            std::collections::HashSet::from([format!("{}:{}", creds.ufrag, creds.pwd)]),
+            "every hop re-offers the SAME per-peer credentials"
         );
     }
 
-    /// 收到该 peer 任何信令 → 退避立即复位、回到正常节奏，且**应答不受退避
-    /// 影响**：Offer 到手当拍即建会话、收集本地候选并欠下 ANSWER，下一拍就
-    /// 把 ANSWER 发出去（0051 的静默 peer 从不发 Offer，但这条语义必须钉死，
-    /// 否则退避会变成「对端终于说话了也不理」）。
+    /// 退避中途到达的对端 Offer：**当拍被应答**（建会话 + 收集 + ANSWER 入列，
+    /// 下一拍发出），且 guard 节拍**不**因收帧复位——上游的复位条件只有
+    /// 断连/网络事件（`guard.go:141-177`），收帧从不重置 ticker。
     #[test]
-    fn remote_signal_resets_backoff_and_is_answered_immediately() {
-        #[derive(Default)]
-        struct RecordingSignal {
-            frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
-        }
-        impl SignalExchange for RecordingSignal {
-            fn send(
-                &self,
-                to_key: &str,
-                kind: PeerSignalKind,
-                payload: &str,
-                _port: u32,
-            ) -> Result<(), ManagementError> {
-                self.frames
-                    .lock()
-                    .expect("frames")
-                    .push((to_key.to_string(), kind, payload.to_string()));
-                Ok(())
-            }
-        }
-        let signal = Arc::new(RecordingSignal::default());
+    fn remote_offer_mid_backoff_is_answered_immediately_and_does_not_rearm() {
+        let signal = Arc::new(FrameLog::default());
         let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         for _ in 0..64 {
             let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
@@ -4026,84 +3949,77 @@ mod tests {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        seed_guard(&mut orch);
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
-        let (now, delays) = drive_silent_timeouts(&mut orch, 1_000, 4);
-        assert_eq!(
-            delays,
-            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000), (4, 18_000)]
-        );
-        assert!(orch.peers[0].backoff_active, "the 4th silent timeout is in backoff");
-        let armed_until = orch.peers[0].cooldown_until;
-        assert!(armed_until > now + 10_000, "the next initiate is held off by the backoff");
 
-        // 远端 Offer 到达（退避期内）：立即建会话 + 收集 + 欠 ANSWER，退避复位
-        let answer_at = now + 1;
+        // 首跳发起（t=1000），下一跳 4000。
+        orch.run_once(1_000).expect("first hop");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 4_000, "the next hop is 3 s out");
+
+        // 对端 Offer 在两跳之间到达（退避期内）：当拍建会话 + 欠 ANSWER。
+        let answer_at = 2_500u64;
         orch.handle_signal("P", PeerSignalKind::Offer, "abcd:0123456789012345678901", answer_at)
             .expect("offer accepted");
-        assert!(!orch.peers[0].backoff_active, "any remote signal resets the backoff");
-        assert_eq!(orch.peers[0].backoff_misses, 0);
         assert!(orch.peers[0].session.is_some(), "the offer is answered in the same beat");
         assert!(
             orch.peers[0].outbox.iter().any(|(kind, _)| *kind == PeerSignalKind::Answer),
             "the ANSWER is queued in the same beat the offer arrived"
         );
-        assert!(
-            orch.peers[0].cooldown_until <= answer_at + RETRY_COOLDOWN_MS,
-            "the backoff delay is replaced by the normal cooldown"
+        // guard 节拍不被收帧复位：下一跳仍在 4000（guard.go 的复位只在
+        // relay/ICE 断连、sr 重连与网络变化分支）。
+        assert_eq!(
+            orch.peers[0].guard_next_at_ms, 4_000,
+            "a received signal never re-arms the guard ticker"
         );
-        // 下一拍：ANSWER 照常发出（退避从未挡住应答路径）
+        // 下一拍：ANSWER 照常发出。
         orch.run_once(answer_at + 2).expect("beat");
         let frames = signal.frames.lock().expect("frames");
         assert!(
             frames.iter().any(|(k, kind, _)| k == "P" && *kind == PeerSignalKind::Answer),
             "the ANSWER must go out on the next beat: {frames:?}"
         );
-        drop(frames);
-
-        // 反向：一条 candidate 也打断「连续静默」——新的静默 peer 攒到 2 次
-        // 超时后插一条 candidate，再超时时计数从零重新起算（要再走 3 次才
-        // 进入退避），因此不会把「远端只 trickle 候选」误判成离线。
-        let mut fresh = silent_peer_orch(64);
-        let (now2, first) = drive_silent_timeouts(&mut fresh, 1_000, 2);
-        assert_eq!(first, vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS)]);
-        assert_eq!(fresh.peers[0].backoff_misses, 2);
-        fresh
-            .handle_signal(
-                "P",
-                PeerSignalKind::Candidate,
-                "candidate:1 1 udp 1 127.0.0.1 9 typ host",
-                now2 + 1,
-            )
-            .expect("candidate accepted");
-        let (_, after) = drive_silent_timeouts(&mut fresh, now2 + 1, 3);
-        assert_eq!(
-            after,
-            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000)],
-            "a candidate between timeouts restarts the silent streak"
-        );
     }
 
-    /// 网络切换与 signal 流重连（false→true 边沿）同样复位退避：切换后的静默
-    /// 推断作废，立即回到正常节奏。
+    /// guard 的两个复位事件，各落在 **800 ms** 的下一跳（`newReconnectTicker`
+    /// 消费立即首跳后的第一个 backoff 间隔，`guard.go:200-213`）：
+    /// - 物理网络变化（`restart_for_network_change` → guard.go:162-177）；
+    /// - signal 流重连的 false→true 边沿（`set_signal_ready` →
+    ///   `srReconnectedChan`，guard.go:155-160）。
+    /// 会话随网络变化整段拆掉（旧候选端口已不存在），本地凭证不变。
     #[test]
-    fn network_change_and_signal_reconnect_reset_backoff() {
+    fn network_change_and_signal_reconnect_rearm_at_the_800ms_ticker() {
         let mut orch = silent_peer_orch(64);
-        let (now, _) = drive_silent_timeouts(&mut orch, 1_000, 3);
-        assert!(orch.peers[0].backoff_active);
-        orch.restart_for_network_change(now + 1_000);
-        assert!(!orch.peers[0].backoff_active, "a network change clears the backoff");
-        assert_eq!(orch.peers[0].backoff_misses, 0);
-        assert_eq!(orch.peers[0].cooldown_until, now + 1_000, "normal pace restored");
-        // signal 重连边沿：先重新攒到退避，再 false→true，复位落在下一拍
-        let (now, _) = drive_silent_timeouts(&mut orch, now + 1_000, 3);
-        assert!(orch.peers[0].backoff_active);
-        assert!(orch.peers[0].cooldown_until > now + 5_000, "backoff armed before the reconnect");
+        // 首跳发起，之后节拍走到 4000。
+        orch.run_once(1_000).expect("first hop");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 4_000);
+        assert!(orch.peers[0].session.is_some(), "precondition: the session exists");
+
+        // 物理网络变化：会话拆掉、节拍复位到 800 ms、凭证保持。
+        let creds_before = orch.peers[0].local_creds.clone();
+        orch.restart_for_network_change(5_000);
+        assert!(orch.peers[0].session.is_none(), "the stale-path session is dropped");
+        assert_eq!(orch.peers[0].state, PeerIceState::Failed);
+        assert_eq!(
+            orch.peers[0].local_creds.as_ref(),
+            creds_before.as_ref(),
+            "local credentials survive the recreation (per-peer, worker_ice.go:91-97)"
+        );
+        assert_eq!(orch.peers[0].guard_next_at_ms, 5_800, "reset to now+800 ms (bare interval)");
+        // 800 ms 内不到点；到点即重新发起（同一对凭证的 OFFER）。
+        orch.run_once(5_799).expect("pre-hop beat");
+        assert!(orch.peers[0].session.is_none(), "no initiate before the 800 ms hop");
+        orch.run_once(5_800).expect("the 800 ms hop initiates");
+        assert!(orch.peers[0].session.is_some(), "the hop re-initiates");
+
+        // signal 重连边沿（false→true）：下一拍复位到 800 ms。
         orch.set_signal_ready(false);
         orch.set_signal_ready(true);
-        orch.run_once(now + 1).expect("the reconnect beat resets the backoff");
-        assert!(!orch.peers[0].backoff_active, "a signal reconnect clears the backoff");
-        assert_eq!(orch.peers[0].backoff_misses, 0);
+        orch.run_once(6_000).expect("the reconnect beat");
+        assert_eq!(
+            orch.peers[0].guard_next_at_ms, 6_800,
+            "the sr-reconnect edge re-arms the ticker at +800 ms"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -4158,6 +4074,9 @@ mod tests {
         if let Some(k) = local_key {
             orch.set_local_key(k.to_string());
         }
+        // guard 节拍的定序熵源（±10% 抖动取裸间隔）：set_peers 之前装定，
+        // 每 peer 的 timeout 抽定（GuardRng(0.5) → 37.5 s）与逐跳间隔都确定。
+        seed_guard(&mut orch);
         orch.set_peers(&[peer.to_string()]);
         orch.set_signal_ready(true);
         (orch, signal)
@@ -4219,23 +4138,17 @@ mod tests {
         );
     }
 
-    /// glare 死锁修复（H1）核心行为：我方已发起（Offer 已发）后收到对端
-    /// Offer —— ①必须回 ANSWER（修复前 glare 分支不回，对端 Dial 永久
-    /// 挂起）；②角色不变（公钥比较在创建时定死）；③对端换了凭证时采纳
-    /// 新凭证并重发本地候选；④此后停止重发 OFFER（§2.4 offer 风暴），
-    /// 只保留候选/ANSWER 重发。
+    /// glare（官方 isController 公钥比较）+ guard 安静语义：我方已发起（Offer
+    /// 已发）后收到对端 Offer —— ①必须回 ANSWER（官方 handshaker.Listen 对
+    /// 每个 Offer 无条件 sendAnswer，handshaker.go:136）；②角色不变（公钥
+    /// 比较在创建时定死）；③对端换了凭证时采纳新凭证并重发本地候选（对端
+    /// 新 agent 的候选缓存已死）；④采纳后本端「agent 进行中」，guard 不再
+    /// 重发 OFFER——上游 guard 只在 Disconnected 状态才回调（guard.go:127-130），
+    /// offer 风暴（§2.4）由这个安静面终结。
     #[test]
-    fn glare_offer_is_answered_and_offer_resend_stops() {
+    fn glare_offer_is_answered_and_the_guard_goes_quiet() {
         let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
         orch.run_once(1000).expect("initiate beat sends offer+candidates");
-        {
-            let p = &orch.peers[0];
-            assert!(
-                p.signaled.iter().any(|(k, _)| *k == PeerSignalKind::Offer),
-                "precondition: our OFFER was signaled"
-            );
-            assert!(p.session.as_ref().expect("session").is_controlling());
-        }
         let offers_before = signal
             .frames
             .lock()
@@ -4243,7 +4156,7 @@ mod tests {
             .iter()
             .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
             .count();
-        assert_eq!(offers_before, 1);
+        assert_eq!(offers_before, 1, "precondition: exactly our OFFER was signaled");
 
         // 对端 Offer 到达（新凭证 = 其 agent 重启）：glare 分支。
         orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678902", 1100)
@@ -4251,20 +4164,16 @@ mod tests {
         {
             let p = &orch.peers[0];
             // ① ANSWER 已入列（本地凭证不变）
-            assert!(
-                p.outbox.iter().any(|(k, _)| *k == PeerSignalKind::Answer),
-                "the glare branch MUST queue an ANSWER (official: sendAnswer per offer)"
-            );
             let answer_payload = &p
                 .outbox
                 .iter()
                 .find(|(k, _)| *k == PeerSignalKind::Answer)
-                .expect("answer queued")
+                .expect("the glare branch MUST queue an ANSWER (official: sendAnswer per offer)")
                 .1;
             let creds = parse_ufrag_pwd(answer_payload).expect("answer is ufrag:pwd");
             assert_eq!(
                 creds,
-                p.creds.as_ref().expect("local creds").clone(),
+                p.local_creds.as_ref().expect("local creds").clone(),
                 "the answer carries OUR (unchanged) local credentials"
             );
             // ② 角色不变（公钥比较在创建时确定，不随 Offer 方向摆动）
@@ -4276,108 +4185,82 @@ mod tests {
                 p.outbox.iter().any(|(k, _)| *k == PeerSignalKind::Candidate),
                 "local candidates must be re-trickled for the peer's fresh agent"
             );
-            // ④ OFFER 不再重发（从重发母本移除）
-            assert!(
-                !p.signaled.iter().any(|(k, _)| *k == PeerSignalKind::Offer),
-                "the OFFER must leave the re-signal set once answered"
-            );
         }
-        // 刷出 ANSWER，再走过两个重发周期：零新 OFFER、ANSWER/候选照常。
+        // ④ 刷出 ANSWER，再走过两个 guard 跳（4000、10000，定序熵源）：
+        //    零新 OFFER——远端凭证在手 = InProgress，guard 不回调。
         orch.run_once(1200).expect("flush the answer");
-        for t in [1200 + HANDSHAKE_RETRY_MS, 1200 + 2 * HANDSHAKE_RETRY_MS] {
-            orch.run_once(t).expect("retry beat");
+        for t in [4_000u64, 10_000] {
+            orch.run_once(t).expect("guard hop");
         }
         let frames = signal.frames.lock().expect("frames").clone();
         let offers_total = frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Offer).count();
-        assert_eq!(offers_total, 1, "no OFFER re-send after the glare answer");
+        assert_eq!(offers_total, 1, "no OFFER re-send after the glare answer (guard quiet)");
         assert!(
             frames.iter().any(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Answer),
             "the ANSWER must have left"
         );
 
         // 对端重发同一 Offer（同凭证，幂等）：再次应答、仍零新 OFFER。
-        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678902", 1200 + 3 * HANDSHAKE_RETRY_MS)
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678902", 10_001)
             .expect("duplicate offer");
-        orch.run_once(1200 + 3 * HANDSHAKE_RETRY_MS).expect("flush");
-        let offers_total = signal
-            .frames
-            .lock()
-            .expect("frames")
-            .iter()
-            .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
-            .count();
+        orch.run_once(10_001).expect("flush");
+        let frames = signal.frames.lock().expect("frames").clone();
+        let offers_total = frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Offer).count();
         assert_eq!(offers_total, 1, "duplicate offer re-answers but never re-offers");
+        assert!(
+            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Answer).count() >= 2,
+            "both the glare offer and the duplicate were answered"
+        );
     }
 
-    /// 对端 ANSWER 到达（正常应答路径，非 glare）：OFFER 停止重发、候选
-    /// trickle 保持（§6.4 —— 修复前 3 s 周期把 OFFER 一并重发，8 min ~160
-    /// 次、对端逐条应答、每轮重摆 glare/凭证状态）。
+    /// 对端 ANSWER 到达（正常应答路径，非 glare）：远端凭证 + 本地候选就位即
+    /// start（**不需要远端候选**——上游的 agent 拿到远端凭证就进 Checking，
+    /// 空检查清单也一样，`agent.go:328-351`/`:480-483`）；此后 guard 安静
+    /// （InProgress），候选零重发——上游 SendOffer 只在 Disconnected 时发生。
     #[test]
-    fn answer_receipt_stops_offer_resend_but_keeps_candidates() {
+    fn answer_receipt_starts_checks_and_goes_quiet_on_the_guard() {
         let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
         orch.run_once(1000).expect("offer + candidates out");
-        // 对端 ANSWER 到达
+        // 对端 ANSWER 到达（零远端候选）。
         orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1100)
             .expect("answer");
-        assert!(
-            !orch.peers[0]
-                .signaled
-                .iter()
-                .any(|(k, _)| *k == PeerSignalKind::Offer),
-            "the ANSWER retires the OFFER from the re-signal set"
-        );
-        assert!(
-            orch.peers[0]
-                .signaled
-                .iter()
-                .any(|(k, _)| *k == PeerSignalKind::Candidate),
-            "candidate frames keep trickling on retry"
-        );
-        for t in [1100 + HANDSHAKE_RETRY_MS, 1100 + 2 * HANDSHAKE_RETRY_MS] {
-            orch.run_once(t).expect("retry beat");
+        {
+            let p = &orch.peers[0];
+            assert!(p.started, "credentials alone start the checks (empty checklist)");
+            assert_eq!(p.state, PeerIceState::Checking);
+            assert_eq!(p.remote_cands_seen, 0, "no candidate ever followed");
         }
-        // 截止期前 1 ms：谈判仍在（Answer 不是候选），候选继续重发——本用例的
-        // 原意全在这个窗口内（修复前 3 s 周期把 OFFER 也一并重发）。
-        let edge = 1000 + START_DEADLINE_MS - 1;
-        orch.run_once(edge).expect("pre-deadline edge beat");
-        assert!(
-            orch.peers[0].session.is_some() && !orch.peers[0].started,
-            "1 ms before the deadline the answered negotiation still waits for a candidate"
-        );
+        // 走过两个 guard 跳（4000、10000，定序熵源）：零帧外出。
+        for t in [4_000u64, 10_000] {
+            orch.run_once(t).expect("guard hop");
+        }
         let frames = signal.frames.lock().expect("frames").clone();
         assert_eq!(
             frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Offer).count(),
             1,
-            "exactly the ONE original offer, no re-sends after the answer"
+            "exactly the ONE original offer, no re-sends once the answer arrived"
         );
-        assert!(
-            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Candidate).count() > 1,
-            "candidates continue to be re-signaled until Connected or the start deadline"
+        assert_eq!(
+            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Candidate).count(),
+            1,
+            "no candidate re-signaling while the agent is in progress"
         );
-        // 到截止期：这个「已应答但零候选」的谈判同样被拆除（round-230622244
-        // 停摆修复）——修复前它会永远占着会话与 socket、不再重试。
-        orch.run_once(1000 + START_DEADLINE_MS).expect("deadline beat");
-        assert!(
-            orch.peers[0].session.is_none(),
-            "an ANSWER without any candidate is still bounded by the start deadline"
-        );
-        assert_eq!(orch.peers[0].state, PeerIceState::Failed);
     }
 
-    /// 真机 round-230622244 停摆回归：手机 07:09:03 发出本地候选、07:09:04
-    /// 收到 Answer，此后**零远端候选**、9 min 内没有任何重试。`maybe_start`
-    /// 要求「远端凭证 + 本地候选 + ≥1 远端候选」，Answer 只给凭证，于是
-    /// `started` 永远 false；修复前 [`PeerConn::expire_dead_negotiation`] 的
-    /// `remote_creds.is_none()` 守卫把「已应答」当成健康，会话永不拆除 ——
-    /// socket 被占住且 `IceSession::run_once` 因 `!started` 立即返回、永不收包。
+    /// 真机 round-230622244 停摆回归（guard/pion 形态重述）：Answer 到达但
+    /// **零远端候选**。上游没有「等一个候选才敢 start」的门——agent 拿到
+    /// 远端凭证就进 Checking，空检查清单照样起跳（`agent.go:328-351`、
+    /// `:480-483`）；pion 对 Checking 的唯一预算是 disconnected+failed
+    /// （netbird 各 6 s，`peer/ice/agent.go:23-24`）= start 后 12 s 判 Failed
+    /// （`agent.go:381-387`）。Failed → `closeAgent`（`worker_ice.go:591-600`）
+    /// 拆掉会话，guard 节拍的下一跳**以同一对凭证**重新发起
+    /// （`worker_ice.go:91-97`：localUfrag/localPwd 是 per-peer 的）。
     ///
-    /// 修复后 [`START_DEADLINE_MS`] 约束**所有**未 start 的谈判：到期即
-    /// [`PeerIceOrchestrator::drop_session_rearm`]（Drop 关闭全部 dup socket、
-    /// 回收 WG 端点、按既有冷却重新武装），冷却期满以全新凭证重新发起；
-    /// 远端随后补齐候选即正常 start（恢复路径没被堵死）。远端**应答过**，
-    /// 因此不计入「远端静默」退避（`note_silent_timeout` 的 `rx_since_timeout`）。
+    /// 即本用例同时钉住两件事：①pion 的 12 s Checking 预算驱动重谈判；
+    /// ②**凭证跨会话重建稳定**——重发起不换凭证（曾经的自造「全新凭证
+    /// 重发起」绕道已删，对端手里永远有本端有效的 ufrag:pwd）。
     #[test]
-    fn answered_but_candidateless_negotiation_still_expires_and_recovers() {
+    fn answered_but_candidateless_times_out_at_the_pion_budget_and_reoffers_stable_creds() {
         #[derive(Default)]
         struct RecyclingWg {
             recycled: Mutex<Vec<String>>,
@@ -4413,6 +4296,7 @@ mod tests {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        seed_guard(&mut orch);
         orch.set_local_key("ZZZZlocal".to_string());
         orch.set_peers(&["PPPPpeer".to_string()]);
         orch.set_signal_ready(true);
@@ -4421,37 +4305,38 @@ mod tests {
         orch.run_once(T0).expect("offer + local candidates out");
         assert!(orch.peers[0].session.is_some(), "precondition: the negotiation exists");
         assert!(orch.peers[0].locals_done, "precondition: local candidates gathered");
+        let creds = orch.peers[0].local_creds.clone().expect("stable creds");
+        let first_offer = format!("{}:{}", creds.ufrag, creds.pwd);
 
-        // Answer 到达（远端凭证在手）但零远端候选——真机 round-230622244 形态。
+        // Answer 到达（远端凭证在手）但零远端候选——round-230622244 形态。
+        // start 不再等候选：凭证即 Checking。
         orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1100)
             .expect("answer");
         {
             let p = &orch.peers[0];
-            assert!(p.remote_creds.is_some(), "the answer delivered remote credentials");
+            assert!(p.started, "credentials alone start the checks (empty checklist)");
+            assert_eq!(p.state, PeerIceState::Checking);
             assert_eq!(p.remote_cands_seen, 0, "and no candidate ever followed");
-            assert!(!p.started, "credentials without a candidate can never start");
         }
+        // 会话的 Checking 预算从 start（首个泵拍）起算。次拍把它泵进 Checking。
+        orch.run_once(1101).expect("pump the started session");
+        assert_eq!(
+            orch.peers[0].session.as_ref().expect("session").checking_since_ms(),
+            Some(1101),
+            "pion arms the Checking budget on the first task-loop pass (agent.go:378-387)"
+        );
 
-        // 截止前 1 ms：仍在等待，不拆除、不置错。
-        orch.run_once(T0 + START_DEADLINE_MS - 1).expect("pre-deadline beat");
+        // 12 s 预算内：活；到点：Failed → 拆除 + WG 端点回收。
+        orch.run_once(1101 + crate::ice_session::CHECKING_TIMEOUT_MS - 1)
+            .expect("inside the budget");
+        assert!(orch.peers[0].session.is_some(), "alive for the whole disconnected+failed budget");
+        orch.run_once(1101 + crate::ice_session::CHECKING_TIMEOUT_MS).expect("budget exhausted");
         {
             let p = &orch.peers[0];
-            assert!(p.session.is_some(), "1 ms before the deadline the negotiation is still alive");
-            assert!(!p.started, "still waiting for the first remote candidate");
-            assert_ne!(p.state, PeerIceState::Failed, "no teardown before the deadline");
-        }
-
-        // 到截止期：拆除 + 资源回收 + 冷却重武装。
-        let deadline = T0 + START_DEADLINE_MS;
-        orch.run_once(deadline).expect("deadline beat");
-        {
-            let p = &orch.peers[0];
-            assert!(p.session.is_none(), "the answered-but-stalled session must be torn down");
-            assert_eq!(p.state, PeerIceState::Failed, "the teardown is observable as Failed");
-            assert_eq!(p.remote_creds, None, "the dead negotiation's credentials are void");
-            assert!(!p.started && !p.locals_done, "the negotiation state is fully re-armed");
-            assert_eq!(p.cooldown_until, deadline + RETRY_COOLDOWN_MS, "re-armed after the cooldown");
-            assert_eq!(p.backoff_misses, 0, "an ANSWERED peer is not a silent remote (no backoff)");
+            assert!(p.session.is_none(), "the Checking budget tears the session down");
+            assert_eq!(p.state, PeerIceState::Failed, "observable as Failed");
+            assert_eq!(p.remote_creds, None, "the dead negotiation's remote side is void");
+            assert!(p.local_creds.is_some(), "local credentials are NOT part of the teardown");
         }
         assert_eq!(
             wg.recycled.lock().expect("recycled").clone(),
@@ -4459,15 +4344,14 @@ mod tests {
             "the WG endpoint/egress of the dead negotiation must be recycled"
         );
 
-        // 冷却期满：全新凭证重新发起（自愈，无需对端重启）。
-        let restart = deadline + RETRY_COOLDOWN_MS;
-        orch.run_once(restart).expect("re-initiate after cooldown");
+        // guard 下一跳（首跳 1000 → 4000/10000/22000 都在预算内被 InProgress
+        // 吞掉；12000 拆除后的下一跳是 22000）：**同一对凭证**重新发起。
+        orch.run_once(22_000).expect("the guard hop re-initiates");
         {
             let p = &orch.peers[0];
-            assert!(p.session.is_some(), "a fresh negotiation must be armed");
-            assert!(!p.started, "the fresh negotiation is not started yet");
-            assert!(p.creds.is_some() && p.remote_creds.is_none(), "fresh credentials, no remote yet");
-            assert_eq!(p.session_at_ms, restart, "the fresh session starts its own deadline");
+            assert!(p.session.is_some(), "a fresh session is armed by the guard hop");
+            assert_eq!(p.local_creds.as_ref().expect("same creds").clone(), creds,
+                "the re-initiation reuses the SAME per-peer credentials");
         }
         let offers: Vec<String> = signal
             .frames
@@ -4477,29 +4361,28 @@ mod tests {
             .filter(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Offer)
             .map(|(_, _, payload)| payload.clone())
             .collect();
-        assert_eq!(offers.len(), 2, "the retry offers again: {offers:?}");
-        assert_ne!(offers[0], offers[1], "the re-initiation carries NEW credentials");
+        assert_eq!(offers.len(), 2, "the guard hop offers again: {offers:?}");
+        assert_eq!(offers[0], offers[1], "both offers carry the SAME stable credentials");
+        assert_eq!(offers[1], first_offer);
 
-        // 重试后远端补齐「凭证 + 候选」：正常 start（恢复路径没被堵死）。
+        // 远端随后补齐「凭证 + 候选」（对端 guard 同样在重发，凭证同样稳定）：
+        // 正常 start（恢复路径没被堵死）。
         let cand = Candidate::host_candidate([127, 0, 0, 1], 51820);
-        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "abcd:0123456789012345678903", restart)
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 22_001)
             .expect("fresh answer");
-        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &cand.marshal(), restart)
-            .expect("fresh candidate");
-        {
-            let p = &orch.peers[0];
-            assert!(p.started, "credentials + a candidate start the fresh negotiation");
-            assert_eq!(p.state, PeerIceState::Checking, "start moves the peer to Checking");
-        }
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &cand.marshal(), 22_001)
+            .expect("late candidate");
+        orch.run_once(22_002).expect("pump");
+        assert!(
+            orch.peers[0].started && orch.peers[0].state == PeerIceState::Checking,
+            "credentials + candidate start the fresh session inside its own budget"
+        );
     }
 
-    /// 正常路径不受新边界影响：Answer **和**候选都在截止期前到达 → 照常
-    /// start（进入 Checking）。已 start 的会话不归 [`START_DEADLINE_MS`] 管，
-    /// 其生死由 [`CHECKING_WATCHDOG_MS`] 与 N5b 事件诚实驱动——
-    /// `checking_watchdog_fails_stalled_session_and_renegotiates` 用已 start
-    /// 的会话走满 18 s 窗口即其证据。
+    /// 正常路径：Answer **和**候选都在 12 s 预算内到达 → 照常 start（进入
+    /// Checking）。
     #[test]
-    fn answer_with_candidate_before_deadline_starts_normally() {
+    fn answer_with_candidate_starts_checks_normally() {
         let (mut orch, _signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
         const T0: u64 = 1000;
         orch.run_once(T0).expect("offer + local candidates out");
@@ -4512,114 +4395,75 @@ mod tests {
         assert!(p.started, "credentials + a candidate start the negotiation");
         assert_eq!(p.state, PeerIceState::Checking);
         assert!(p.session.is_some());
-        assert_eq!(
-            p.checking_since_ms, 1100,
-            "the STARTED session is now governed by the Checking watchdog, not the start deadline"
-        );
     }
 
-    /// Checking 看门狗：start 后 [`CHECKING_WATCHDOG_MS`] 无任何检查成功
-    /// → 判 failed、拆除会话、冷却后**全新协商**（重新发起 Offer）。
-    /// 覆盖 §2.3 的"僵尸 Checking"（all-pairs-failed 被候选流入掩盖、
-    /// Disconnected 永不触发 → 无终态信号）。
+    /// pion 的 Checking 预算（netbird 把 disconnected/failed 各覆盖成 6 s，
+    /// 起点 = 进入 Checking 的首个泵拍，`agent.go:378-387`）：预算内永不拆；
+    /// 到点判 Failed → closeAgent 拆掉会话（`worker_ice.go:591-600`）+ 回收
+    /// WG 端点；重谈判由 guard 的下一跳**以同一对凭证**发起。
+    ///
+    /// 场景 = 曾被 all-pairs-failed 掩盖的僵尸 Checking：pair 存在但检查永不
+    /// 成功（黑洞端口）——pion 把静默 pair 判 Failed 后**永不重试**、agent 仍
+    /// Checking（`agent.go:477-494`），直到预算到点。预算是**固定窗口**：
+    /// 上游没有「检查成功滑动重置」——成功的会话早已离开 Checking（曾经
+    /// 的滑动看门狗 `CHECKING_WATCHDOG_MS` 是自造机制，随本轮删除）。
     #[test]
-    fn checking_watchdog_fails_stalled_session_and_renegotiates() {
+    fn pion_checking_budget_fails_stalled_session_and_guard_reoffers_stable_creds() {
         let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 8);
         const T0: u64 = 1000;
-        // 直接注入一个已 start、处于 Checking 的会话（字段级构造，同
-        // `starved_session_does_not_burn_the_negotiation_deadline` 的手法）：
-        // 远端候选指向一个无人监听的端口 → 检查永远无响应，也永不成功。
-        {
-            let p = &mut orch.peers[0];
-            let creds = IceCredentials::generate().expect("creds");
-            let mut session = IceSession::new(creds.clone(), true, Some(7)).expect("session");
-            session
-                .set_remote_credentials(IceCredentials {
-                    ufrag: "wxyz".into(),
-                    pwd: "0123456789012345678901".into(),
-                })
-                .expect("remote creds");
-            session.add_remote_candidate(Candidate::host_candidate([127, 0, 0, 1], 1));
-            p.session = Some(session);
-            p.creds = Some(creds);
-            p.remote_creds = Some(IceCredentials {
-                ufrag: "wxyz".into(),
-                pwd: "0123456789012345678901".into(),
-            });
-            p.state = PeerIceState::Checking;
-            p.started = true;
-            p.locals_done = true;
-            p.session_at_ms = T0;
-            p.checking_since_ms = T0;
-        }
+        // 真实发起（guard 首跳）：会话 + 本地候选就位。
+        orch.run_once(T0).expect("initiate hop");
+        let creds = orch.peers[0].local_creds.clone().expect("stable creds");
+        // 远端黑洞候选 + 凭证：pair 存在、检查永远无响应。
+        let dead = Candidate::host_candidate([127, 0, 0, 1], 1);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &dead.marshal(), T0 + 1)
+            .expect("dead candidate");
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", T0 + 1)
+            .expect("answer");
+        assert!(
+            orch.peers[0].started && orch.peers[0].state == PeerIceState::Checking,
+            "the stalled session is really in Checking"
+        );
+        // 首个泵拍武装 pion 预算（T0+2）。
+        orch.run_once(T0 + 2).expect("arm beat");
+        assert_eq!(
+            orch.peers[0].session.as_ref().expect("session").checking_since_ms(),
+            Some(T0 + 2),
+            "the budget arms on the first pump after start (agent.go:378-387)"
+        );
+        let deadline = T0 + 2 + crate::ice_session::CHECKING_TIMEOUT_MS;
         // 截止前 1 ms：绝不拆。
-        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS - 1).is_ok());
+        assert!(orch.run_once(deadline - 1).is_ok());
         assert!(
             orch.peers[0].session.is_some(),
-            "a Checking session within the watchdog window must not be torn down"
+            "a Checking session lives for the whole disconnected+failed budget"
         );
-        // 到点：拆除 + Failed。
-        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS).is_ok());
+        // 到点：Failed 事件 → 拆除 + WG 端点回收。
+        assert!(orch.run_once(deadline).is_ok());
         assert!(
             orch.peers[0].session.is_none(),
-            "the stalled Checking session must be dropped at the watchdog deadline"
+            "the stalled Checking session is dropped at the pion budget"
         );
         assert_eq!(orch.peer_status("PPPPpeer").expect("peer").state, PeerIceState::Failed);
-        // 冷却期满：全新协商（Offer 路径重新发起）。
-        assert!(
-            orch.peers[0].cooldown_until <= T0 + CHECKING_WATCHDOG_MS + RETRY_COOLDOWN_MS,
-            "the watchdog drop arms the normal renegotiation cooldown"
-        );
-        orch.run_once(T0 + CHECKING_WATCHDOG_MS + RETRY_COOLDOWN_MS + 1).expect("re-initiate");
-        assert!(
-            orch.peers[0].session.is_some(),
-            "after the cooldown a FRESH negotiation must start"
-        );
-        assert!(
-            orch.peers[0].initiated,
-            "the re-negotiation goes through the offer path"
-        );
+        // guard 下一跳（定序熵源：T0 + 3 s / 6 s / 12 s）以同一对凭证重新
+        // 发起——凭证跨会话重建稳定（worker_ice.go:91-97）。
+        orch.run_once(T0 + 21_000).expect("the guard hop re-initiates");
+        {
+            let p = &orch.peers[0];
+            assert!(p.session.is_some(), "a fresh session is armed by the guard hop");
+            assert_eq!(p.local_creds.as_ref().expect("same creds").clone(), creds,
+                "the re-negotiation reuses the SAME per-peer credentials");
+        }
         assert!(
             signal
                 .frames
                 .lock()
                 .expect("frames")
                 .iter()
-                .any(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Offer),
-            "the fresh negotiation signals an OFFER"
-        );
-    }
-
-    /// 看门狗的滑动重置：检查成功（[`IceEvent::CheckSucceeded`]）把计时
-    /// 起点推到成功时刻 —— 还在取得进展的慢会话不会被误杀。
-    #[test]
-    fn checking_watchdog_slides_on_check_success() {
-        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
-        const T0: u64 = 1000;
-        {
-            let p = &mut orch.peers[0];
-            let creds = IceCredentials::generate().expect("creds");
-            p.session = Some(IceSession::new(creds.clone(), true, Some(7)).expect("session"));
-            p.creds = Some(creds);
-            p.state = PeerIceState::Checking;
-            p.started = true;
-            p.locals_done = true;
-            p.session_at_ms = T0;
-            p.checking_since_ms = T0;
-        }
-        // T0+5000 检查成功（直接模拟 drain_events 的滑动重置）。
-        orch.peers[0].checking_since_ms = T0 + 5000;
-        // 原截止点（T0+WATCHDOG）：不拆（计时已被成功滑走）。
-        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS).is_ok());
-        assert!(
-            orch.peers[0].session.is_some(),
-            "a session with recent check progress must survive the old deadline"
-        );
-        // 滑动后的截止点（成功时刻 + WATCHDOG）：拆除。
-        assert!(orch.run_once(T0 + 5000 + CHECKING_WATCHDOG_MS).is_ok());
-        assert!(
-            orch.peers[0].session.is_none(),
-            "the watchdog fires from the LAST check success, not from start"
+                .any(|(to, k, payload)| to == "PPPPpeer"
+                    && *k == PeerSignalKind::Offer
+                    && *payload == format!("{}:{}", creds.ufrag, creds.pwd)),
+            "the fresh negotiation signals an OFFER with the stable credentials"
         );
     }
 

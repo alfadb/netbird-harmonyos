@@ -326,8 +326,13 @@ fn disconnected_then_failed_on_the_injected_clock() {
 }
 
 /// Silent peer during the CHECK phase: 7 attempts of the SAME transaction
-/// id, 500ms apart, then the pair and the session fail — and Disconnected
-/// never fires (there was never any inbound to measure silence from).
+/// id at the pion check cadence (200 ms, `defaultCheckInterval`, fork
+/// `agent_config.go:17-18`), then the PAIR fails (`maxBindingRequests = 7`)
+/// — but the AGENT stays Checking: pion has no all-pairs-failed teardown
+/// (`agent.go:477-494`; a failed pair is never retried). The session's ONE
+/// negotiation deadline is the 12 s checking budget (`agent.go:378-387`,
+/// netbird's 6 s + 6 s overrides), and Disconnected never fires (there was
+/// never any inbound to measure silence from).
 #[test]
 fn silent_peer_fails_after_seven_attempts() {
     let mut a = TestPeer::new(creds(A), true, 0x1111);
@@ -364,19 +369,33 @@ fn silent_peer_fails_after_seven_attempts() {
     let pending = a.session.take_events();
     assert!(pending.is_empty(), "no failure before attempt exhaustion: {pending:?}");
 
-    // One more RTO ticks the attempts counter past 7 → pair Failed →
-    // session Failed (all pairs failed).
+    // One more RTO ticks the attempts counter past 7 → the PAIR is Failed —
+    // but the agent stays Checking (pion never tears down on failed pairs;
+    // a candidate trickled later would form a fresh pair in the budget).
     a.session.run_once(t).unwrap();
     a.session.run_once(t + CHECK_RTO_MS).unwrap();
     assert_eq!(a.session.pair_snapshots()[0].state, PairState::Failed);
     let events = a.session.take_events();
     assert!(
-        matches!(events.iter().find(|e| matches!(e, IceEvent::Failed(_))), Some(IceEvent::Failed(r)) if r.contains("all-pairs")),
-        "session Failed with all-pairs reason: {events:?}"
+        !events.iter().any(|e| matches!(e, IceEvent::Failed(_))),
+        "a failed pair does NOT fail the agent: {events:?}"
     );
     assert!(
         !events.iter().any(|e| matches!(e, IceEvent::Disconnected)),
         "Disconnected requires prior valid inbound; there was none"
+    );
+
+    // The ONE negotiation deadline: 12 s after the agent entered Checking
+    // (start armed it at t=1000) → Failed("checking-timeout").
+    a.session.run_once(13_000).unwrap();
+    let events = a.session.take_events();
+    assert!(
+        matches!(events.iter().find(|e| matches!(e, IceEvent::Failed(_))), Some(IceEvent::Failed(r)) if r.contains("checking-timeout")),
+        "session Failed with the checking-budget reason: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, IceEvent::Disconnected)),
+        "Disconnected still requires prior valid inbound; there was none"
     );
 }
 

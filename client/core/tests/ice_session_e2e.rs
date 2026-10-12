@@ -320,13 +320,24 @@ fn wrong_password_requests_are_rejected() {
     b.session.start().expect("B start");
 
     let mut now = 1000u64;
-    let failed = pump_until(&mut a.session, &mut b.session, &mut now, 10_000, |a, _| {
+    let failed = pump_until(&mut a.session, &mut b.session, &mut now, 4_000, |a, _| {
         a.pair_snapshots().iter().all(|s| s.state == PairState::Failed)
     });
     assert!(failed, "A's pairs must fail fast on the 401");
 
-    let a_events = a.session.take_events();
-    assert!(a_events.iter().any(|e| matches!(e, IceEvent::Failed(_))), "A must fail: {a_events:?}");
+    // pion 形态：pair 失败**不**拆 agent（没有 all-pairs-failed 事件）；会话
+    // 级 Failed 只来自 12 s 的 Checking 预算（start+12 s，agent.go:378-387）。
+    let mut a_failed = false;
+    while now <= 14_000 {
+        a.session.run_once(now).expect("A pump");
+        b.session.run_once(now).expect("B pump");
+        now += 10;
+        if a.session.take_events().iter().any(|e| matches!(e, IceEvent::Failed(_))) {
+            a_failed = true;
+            break;
+        }
+    }
+    assert!(a_failed, "A's session must fail at the 12 s checking budget");
     assert!(a.session.selected_pair().is_none());
 
     // B's OWN checks (keyed with A's correct pwd) legitimately succeed in
@@ -386,13 +397,22 @@ fn wrong_password_responses_are_rejected() {
     let forged = build_success_response(req_txn, (fip, fport), "XXCDEFGHIJKLMNOPQRSTUVWXYZghijkl");
     fake.send_to(&forged, a.addr()).expect("send forged response");
 
-    // A must NOT accept: pump through the full retransmit schedule.
+    // A must NOT accept: pump through the retransmit schedule AND past the
+    // 12 s Checking budget — the forged response kills the PAIR (rto
+    // exhaustion, maxBindingRequests), while the session-level Failed comes
+    // only from the budget (agent.go:378-387; no all-pairs-failed event).
     let mut now = 1010u64;
-    while now <= 5000 {
+    let mut events = Vec::new();
+    let mut a_failed = false;
+    while now <= 14_000 {
         a.session.run_once(now).expect("pump");
         now += 50;
+        events.extend(a.session.take_events());
+        if events.iter().any(|e| matches!(e, IceEvent::Failed(_))) {
+            a_failed = true;
+            break;
+        }
     }
-    let events = a.session.take_events();
     assert!(
         !events
             .iter()
@@ -400,8 +420,8 @@ fn wrong_password_responses_are_rejected() {
         "forged response must be rejected: {events:?}"
     );
     assert!(
-        events.iter().any(|e| matches!(e, IceEvent::Failed(_))),
-        "transaction exhaustion must fail the session: {events:?}"
+        a_failed,
+        "transaction exhaustion + the checking budget must fail the session: {events:?}"
     );
     assert!(a.session.pair_snapshots().iter().all(|s| s.state == PairState::Failed));
     a.session.stop();
