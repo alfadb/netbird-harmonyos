@@ -21,10 +21,10 @@
 //!   still pinned as a bounded tick.
 //!
 //! Bound arithmetic (device half) — a BOUND, not a measured throughput:
-//!   baseline 100 ms,  8 pkt/tick :    80 pkt/s × 1420 B =  113 600 B/s ≈ 0.91 Mbit/s
-//!   desired  100 ms, 32 pkt/tick :   320 pkt/s × 1420 B =  454 400 B/s ≈ 3.64 Mbit/s
-//!   desired  100 ms, 64 pkt/tick :   640 pkt/s × 1420 B =  908 800 B/s ≈ 7.27 Mbit/s
-//!   landed    10 ms, 64 pkt/tick : 6 400 pkt/s × 1420 B = 9 088 000 B/s ≈ 72.7 Mbit/s
+//!   baseline 100 ms,  8 pkt/tick :    80 pkt/s × 1280 B =  102 400 B/s ≈ 0.82 Mbit/s
+//!   desired  100 ms, 32 pkt/tick :   320 pkt/s × 1280 B =  409 600 B/s ≈ 3.28 Mbit/s
+//!   desired  100 ms, 64 pkt/tick :   640 pkt/s × 1280 B =  819 200 B/s ≈ 6.55 Mbit/s
+//!   landed    10 ms, 64 pkt/tick : 6 400 pkt/s × 1280 B = 8 192 000 B/s ≈ 65.5 Mbit/s
 //!
 //! The TUN half uses the existing injectable seam (`TunFd` over an AF_UNIX
 //! SOCK_DGRAM socketpair, the tests/wg_e2e.rs pattern) and the existing

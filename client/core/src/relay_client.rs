@@ -120,8 +120,9 @@
 //! Transport frame adds 38B (2B header + 36B id), WS adds 2–4B + 4B mask,
 //! then TLS/TCP/IP — typical ≈44–46B per packet; the per-packet ceiling is
 //! [`MAX_TRANSPORT_PAYLOAD`] = 8782 (8820 − 38), refused typed as
-//! `FrameTooLarge` BEFORE any wire byte. WG MTUs 1280/1420 encapsulate to
-//! ≈1326/1466B — far inside the ceiling. The read side stays
+//! `FrameTooLarge` BEFORE any wire byte. The default WG MTU 1280 (upstream
+//! `iface.DefaultMTU`) encapsulates to ≈1326B, and even the largest MTU this
+//! platform accepts (1500 → ≈1546B) stays far inside the ceiling. The read side stays
 //! [`RelayClient::recv`] → `(sender PeerId, datagram)`; the connector's
 //! relay-carrier pump reverses the sender id to the WG public key and
 //! feeds the device through its carrier-ingress seam (the matching rule is
@@ -1693,7 +1694,8 @@ impl RelayClient {
 /// - [`RelayClientError::FrameTooLarge`]: payload > [`MAX_TRANSPORT_PAYLOAD`]
 ///   (8782B, spec §7.2 — the WG-over-relay MTU ceiling; encapsulation
 ///   overhead 38B frame + WS (2–4B + 4B mask) + TLS/TCP ⇒ ≈44–46B/packet
-///   typical, so 1280/1420 WG MTUs are safe);
+///   typical, so the default 1280 WG MTU — and every MTU up to the platform's
+///   1500 ceiling — is safe);
 /// - [`RelayClientError::NotReady`]: session not Ready (reconnecting /
 ///   stopped) — the device counts and moves on (WG retransmits);
 /// - [`RelayClientError::PeerOffline`] / [`RelayClientError::Backpressured`]:

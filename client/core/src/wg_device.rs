@@ -199,8 +199,9 @@
 //!   ⇒ 典型每包 ≈ 44–46B。`send_to_peer` 单包上限 **8782B**
 //!   （8820 − 38）；设备侧报文物理上限 [`WG_BUF`] = 2048B，恒在限内——
 //!   超限载荷只能在载体句柄处出现，且被 `RelayClientError::FrameTooLarge`
-//!   类型化拒绝（见 `relay_client` 模块文档）。对 MTU 的影响：1280/1420
-//!   的 WG MTU 均安全（1420 封装后 ≈ 1466B ≪ 8782）。
+//!   类型化拒绝（见 `relay_client` 模块文档）。对 MTU 的影响：本客户端默认
+//!   1280（上游 `iface.DefaultMTU`，`client/iface/iface.go:29`），即便管理面
+//!   通告的上限 1500 也安全（1500 封装后 ≈ 1546B ≪ 8782）。
 //! - **fd 合同（N13-D2 / N13 plan §4 重验项）**：relay 承载**不持有、不
 //!   close 任何平台 fd**——[`WgEgressCarrier`] 是纯 Rust 对象（relay
 //!   client 句柄），relay 的 WSS/TCP socket 是 native 自建（同 management
@@ -222,8 +223,8 @@ use crate::sys;
 use crate::tun::TunFd;
 use crate::wg::{Tunnel, OP_DONE, OP_ERROR, OP_NETWORK, OP_TUN_V4, OP_TUN_V6};
 
-/// One WG datagram / one TUN frame working buffer (probe BUF parity; >= MTU
-/// 1420 + transport overhead).
+/// One WG datagram / one TUN frame working buffer (probe BUF parity; >= the
+/// default MTU 1280 — upstream `iface.DefaultMTU` — + transport overhead).
 pub const WG_BUF: usize = 2048;
 /// Persistent-keepalive interval (device clock, ms). Default 25 s =
 /// upstream NetBird `defaultWgKeepAlive` (client/internal/peer/endpoint.go:14).
@@ -241,8 +242,8 @@ pub const DEFAULT_SESSION_MAX_MS: u64 = 540_000;
 /// `service_udp`), so one burst cannot starve the other half of the loop
 /// (same shape as the probe's FWD_TUN_DRAIN). Raised 8 → 64 together with the
 /// 100 ms → 10 ms pump tick: the old pair capped the TUN direction at
-/// ~80 pps (≈0.9 Mbps at 1400 MTU) because a non-blocking drain read at most
-/// 8 frames per 100 ms cycle regardless of how much was queued.
+/// ~80 pps (≈0.8 Mbps at the default 1280 MTU) because a non-blocking drain
+/// read at most 8 frames per 100 ms cycle regardless of how much was queued.
 const DRAIN_MAX: usize = 64;
 /// TUN write budget for decapsulated plaintext (bounded, slice-polled —
 /// `TunFd::write_frame_budget` contract).

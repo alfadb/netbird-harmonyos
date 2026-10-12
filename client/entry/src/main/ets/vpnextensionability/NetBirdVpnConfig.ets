@@ -19,6 +19,16 @@ import { ExcludedRouteEntry, mergeExcludedRouteEntries } from './NetBirdEndpoint
 // read entry point and the single replacement site once the control plane
 // (N3) is legally cleared to deliver per-client configuration. No control
 // plane protocol is implemented here.
+//
+// MTU (2026-10-12 upstream alignment): the value is the OFFICIAL client's
+// `iface.DefaultMTU = 1280` (`client/iface/iface.go:29` @67c2041), which is
+// also what the Android app hands to `VpnService.Builder.setMtu`
+// (`android-client tool/.../IFace.java:73`). Upstream precedence
+// (`client/internal/connect.go:740` `selectMTU`): a locally configured MTU
+// wins, else the management `PeerConfig.mtu`, else that default. This
+// deployment has no user-set local MTU — the constant below IS the default —
+// so an announced `PeerConfig.mtu` wins when it is usable; see
+// selectTunnelMtu.
 
 export interface VpnRouteConfig {
   destination: string;
@@ -52,13 +62,59 @@ export interface VpnTunnelConfig {
   // TODO(未验证): placeholder until the control plane supplies real values;
   // on-device DNS behavior never verified in a spike.
   dnsServers: string[];
-  // MTU in bytes, platform-accepted range [576,1500]; MR4 verified 1400.
+  // MTU in bytes, platform-accepted range [576,1500] (SDK VpnConfig.mtu,
+  // @since 11; a value outside it makes create() fail, device-verified
+  // 2026-09-15). The value is the official client's default 1280 — see the
+  // header, and selectTunnelMtu for the announced-MTU override.
   mtu: number;
   // WireGuard peer endpoint 'host:port'. Shell-side data only: it is logged
   // and reserved for the native data plane; the platform VpnConfig has no
   // endpoint field.
   // TODO(未验证): placeholder value; real endpoint arrives via control plane.
   peerEndpoint: string;
+}
+
+// ---------------------------------------------------------------------------
+// MTU selection (2026-10-12 upstream alignment)
+// ---------------------------------------------------------------------------
+
+// The OFFICIAL client's default WireGuard interface MTU:
+// `DefaultMTU = 1280` (`client/iface/iface.go:29` @67c2041) — the same value
+// the Android app sets on the VpnService builder (`IFace.java:73`
+// `builder.setMtu(mtu)` with the engine's MTU). It replaces this deployment's
+// former 1420/1400.
+export const DEFAULT_TUNNEL_MTU: number = 1280;
+// The envelope HarmonyOS accepts on `VpnConfig.mtu` (SDK
+// @ohos.net.vpnExtension.d.ts, @since 11, [576,1500]). A value outside it
+// makes the platform reject the WHOLE VpnConfig at create() (device-verified
+// 2026-09-15, NETMANAGER_EXT code 401), so an announced MTU is only usable
+// inside it. Same envelope the Rust core enforces (`config::MTU_MIN/MTU_MAX`).
+export const TUNNEL_MTU_MIN: number = 576;
+export const TUNNEL_MTU_MAX: number = 1500;
+
+// Upstream's MTU precedence (`client/internal/connect.go:740-752`
+// `selectMTU(localMTU, peerMTU)` @67c2041): a locally configured MTU wins,
+// otherwise the management peer config's `PeerConfig.mtu` (field 7),
+// otherwise `iface.DefaultMTU`. This deployment has no user-set local MTU —
+// the base template IS the default — so the announced value is selected when
+// it is present and usable, and the base default stands otherwise. The
+// announcement rides the core snapshot as `CoreNetworkConfig.mtu` (tail
+// field; `null`/absent = nothing usable announced, the official server's
+// normal answer — `toPeerConfig` never sets the field).
+//
+// Pure, never throws: a non-integer or out-of-envelope announcement falls
+// back to the base value instead of being handed to the platform.
+export function selectTunnelMtu(baseMtu: number, announced: number | undefined | null): number {
+  if (announced === undefined || announced === null) {
+    return baseMtu;
+  }
+  if (typeof announced !== 'number' || !Number.isInteger(announced)) {
+    return baseMtu;
+  }
+  if (announced < TUNNEL_MTU_MIN || announced > TUNNEL_MTU_MAX) {
+    return baseMtu;
+  }
+  return announced;
 }
 
 // MR4-verified default-route shape (e8e2cf9), expressed as configuration:
@@ -114,7 +170,7 @@ const DEFAULT_VPN_TUNNEL_CONFIG: VpnTunnelConfig = {
     }
   ],
   dnsServers: ['8.8.8.8'],
-  mtu: 1400,
+  mtu: DEFAULT_TUNNEL_MTU,
   peerEndpoint: '192.0.2.10:51820'
 };
 
@@ -138,7 +194,10 @@ export function loadVpnTunnelConfig(): VpnTunnelConfig {
 // the one field with a narrower fallback: an explicit snapshot whose effective
 // route list is empty does NOT restore the base 0.0.0.0/0 template entry (see
 // the route-disable safety note in the body) — it keeps only the base
-// exclusions and non-default entries.
+// exclusions and non-default entries. The MTU follows upstream's precedence
+// instead of "base always": an announced `PeerConfig.mtu` (snapshot tail field
+// `mtu`, usable only inside [576,1500]) replaces the base default — see
+// selectTunnelMtu.
 export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig): VpnTunnelConfig {
   const address: string =
     net.address !== undefined && net.address !== null && net.address.length > 0
@@ -212,7 +271,7 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
     interfaceName: base.interfaceName,
     routes: routes,
     dnsServers: dnsServers.length > 0 ? dnsServers : base.dnsServers,
-    mtu: base.mtu,
+    mtu: selectTunnelMtu(base.mtu, net.mtu),
     peerEndpoint: base.peerEndpoint
   };
 }

@@ -41,9 +41,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-/// One TUN frame read buffer (>= typical TUN MTU 1420; same value as the
-/// probe's BUF). A datagram longer than the buffer is truncated by read(2) —
-/// keep the buffer >= MTU.
+/// One TUN frame read buffer (>= the tunnel MTU 1280 — the official client's
+/// `iface.DefaultMTU`, `client/iface/iface.go:29`; same value as the probe's
+/// BUF). A datagram longer than the buffer is truncated by read(2) — keep the
+/// buffer >= MTU.
 pub const READ_BUF: usize = 2048;
 /// Largest frame accepted by the JSON write path (max IP packet).
 pub const WRITE_MAX: usize = 65535;

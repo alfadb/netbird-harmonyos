@@ -94,16 +94,34 @@
 //                                               four keys are declared HERE
 //                                               (GC_STAT_*) and never spelled out
 //                                               in the runtime module.
+//       hidebug.getAppMemoryLimit()           -> rss_limit_kb / vss_limit_kb /
+//                                               vm_heap_limit_kb (API 12
+//                                               MemoryLimit; KILOBYTES as the
+//                                               platform reports them, so no
+//                                               division — only the decimal
+//                                               validation of limitKiBText).
 //     WHY A THIRD LINE: with every field at its own bound the mem_detail set above
 //     plus these nine keys reaches ~695 chars (pid=42), past MAX_LINE_CHARS — so
 //     the host selfcheck pins both the split and the lengths: the widest
-//     mem_detail alone is 371 chars and the widest mem_vm alone is 381, while the
-//     two sets joined would be truncated. The new keys therefore get their OWN
-//     record instead of being cut away. Each of the three legs is guarded: an API
-//     that is missing / throws / answers a non-finite or negative number renders
-//     its own keys as `na` (never a fabricated 0) and the FIRST such failure of
-//     the run is said once (DIAG_DETAIL_UNAVAILABLE), exactly like the mem_detail
-//     legs. A non-detail tick emits no mem_vm record at all.
+//     mem_detail alone is 371 chars and the widest mem_vm alone is 487 (the nine
+//     above plus the three memory-limit keys below), while the two sets joined
+//     would be truncated. The new keys therefore get their OWN record instead of
+//     being cut away. Each of the three legs is guarded: an API that is missing /
+//     throws / answers a non-finite or negative number renders its own keys as
+//     `na` (never a fabricated 0) and the FIRST such failure of the run is said
+//     once (DIAG_DETAIL_UNAVAILABLE), exactly like the mem_detail legs. A
+//     non-detail tick emits no mem_vm record at all.
+//
+//   - the platform's OWN per-process memory limit (2026-10-12, the analysis
+//     report's extra measurement (a)): hidebug.getAppMemoryLimit() (API 12,
+//     MemoryLimit) answers rssLimit / vssLimit / vmHeapLimit in KiB — the
+//     platform memory manager's number, not RLIMIT_RSS. It is logged ONCE PER
+//     PROCESS START on the diag_start record (the run's first record, so the
+//     value is in the log from t=0) AND on every mem_vm record, so the limit
+//     can be read off the same series as the RSS. `vmTotalHeapSize` is not
+//     carried (a fourth key would push the widest mem_vm past MAX_LINE_CHARS).
+//     An absent/throwing API renders `na` in both places; the detail-tick leg
+//     reports it once (DIAG_DETAIL_UNAVAILABLE, stage `mem-limit`).
 //
 // MARKER FILE (single line): v=1 state=<open|clean> ts=<ISO> pid=<pid> role=<r>
 //   start() writes state=open; stop() writes state=clean ONLY from the real
@@ -472,7 +490,11 @@ export const INTERNAL_FIELD_KEYS: string[] = [
   // and the ArkTS GC cumulative counters — a third record, see the header
   'vm_total_heap_kb', 'vm_array_kb',
   'native_heap_kb', 'native_heap_alloc_kb', 'native_heap_free_kb',
-  'gc_count', 'gc_time_ms', 'gc_alloc_kb', 'gc_freed_kb'
+  'gc_count', 'gc_time_ms', 'gc_alloc_kb', 'gc_freed_kb',
+  // ... plus the platform's OWN per-process memory limit
+  // (hidebug.getAppMemoryLimit(), KiB): on the once-per-start diag_start record
+  // AND on every mem_vm record — see buildMemLimitFields
+  'rss_limit_kb', 'vss_limit_kb', 'vm_heap_limit_kb'
 ];
 
 const PUBLIC_FIELD_KEY_SET: Set<string> = new Set<string>(PUBLIC_FIELD_KEYS);
@@ -869,15 +891,23 @@ export function buildNativeMemFields(pssKb: string | null, privateDirtyKb: strin
 // ---------------------------------------------------------------------------
 //
 // A third record, right after mem_detail: the attribution readings for the
-// anonymous RSS. All three legs are SYNCHRONOUS platform calls made inside the
-// SAME single-flight runSample() detail branch (see the runtime header) — no
-// timer is added and the 1 s cadence does not change. See the core header for
-// why these nine keys do not fit on the mem_detail line.
+// anonymous RSS. All legs are SYNCHRONOUS platform calls made inside the SAME
+// single-flight runSample() detail branch (see the runtime header) — no timer
+// is added and the 1 s cadence does not change. See the core header for why
+// these nine keys do not fit on the mem_detail line, and for the three
+// memory-limit keys (hidebug.getAppMemoryLimit) that ride this record and the
+// once-per-start diag_start record.
 
 export const BYTES_PER_KIB: number = 1024;
 // A byte counter is printed by the runtime from a platform bigint; 20 digits is
 // the u64 maximum, so anything longer is not a reading of that counter.
 export const MAX_BYTE_DIGITS: number = 32;
+// A `getAppMemoryLimit()` field is a platform bigint reported in KILOBYTES
+// (API 12: rssLimit / vssLimit / vmHeapLimit / vmTotalHeapSize), so it is
+// already a KiB value and needs no division — only the same decimal-text
+// validation. 20 digits is the u64 maximum, so a longer text is not a reading
+// of that field (the same bound the byte counters are pinned at below).
+export const MAX_LIMIT_DIGITS: number = 20;
 
 // The getVMRuntimeStat() item names, declared HERE so the runtime never spells
 // out a platform string. Units per the API 26 declaration: gc-count and
@@ -924,6 +954,43 @@ export function statNumberText(value: number): string | null {
     return null;
   }
   return String(value);
+}
+
+// One getAppMemoryLimit() field -> field text. The platform answers a bigint
+// ALREADY IN KILOBYTES, so nothing is scaled here (unlike bytesToKiBText): the
+// runtime prints the bigint and this validates the decimal text. A missing,
+// empty, over-long or non-decimal text (including a negative sign) is null
+// (`na`) — a limit is never a fabricated 0.
+export function limitKiBText(text: string | null): string | null {
+  if (text === null || text.length === 0 || text.length > MAX_LIMIT_DIGITS) {
+    return null;
+  }
+  for (let i = 0; i < text.length; i++) {
+    const ch: string = text.charAt(i);
+    if (ch < '0' || ch > '9') {
+      return null;
+    }
+  }
+  return text;
+}
+
+// The platform's OWN per-process memory limit (hidebug.getAppMemoryLimit(),
+// API 12 — this is the only reading of it in the whole app, and the number the
+// kill investigation had to infer before). rssLimit / vssLimit / vmHeapLimit,
+// all in KiB. null -> `na` for that one key, never a fabricated 0.
+//
+// It rides TWO records: the once-per-process-start diag_start record and every
+// mem_vm record of a detail tick (the same values, read once at start and
+// re-read per detail tick). vmTotalHeapSize is deliberately not carried: a
+// fourth key would push the widest reachable mem_vm past MAX_LINE_CHARS, and
+// the three above are the ones the report asks for.
+export function buildMemLimitFields(rssLimitKb: string | null, vssLimitKb: string | null,
+  vmHeapLimitKb: string | null): DiagFields {
+  const fields: DiagFields = {};
+  fields['rss_limit_kb'] = rssLimitKb === null ? UNAVAILABLE : rssLimitKb;
+  fields['vss_limit_kb'] = vssLimitKb === null ? UNAVAILABLE : vssLimitKb;
+  fields['vm_heap_limit_kb'] = vmHeapLimitKb === null ? UNAVAILABLE : vmHeapLimitKb;
+  return fields;
 }
 
 // The event=mem_vm record of a detail tick. Every argument is already this

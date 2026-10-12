@@ -94,9 +94,10 @@ pub const XOR_MAPPED_CACHE_TTL_MS: u64 = 25_000;
 
 /// Read buffer: upstream `MTU + bufsize.WGBufferOverhead`
 /// (`universal.go:81`, `client/iface/bufsize`). Ours is the WG device's own
-/// `WG_BUF = 2048` (`wg_device.rs`), which already covers MTU 1420 + overhead;
-/// a short buffer would silently truncate WireGuard datagrams the moment stage
-/// 3 routes them through here.
+/// `WG_BUF = 2048` (`wg_device.rs`), which already covers the default MTU
+/// 1280 (upstream `iface.DefaultMTU`) + overhead; a short buffer would
+/// silently truncate WireGuard datagrams the moment stage 3 routes them
+/// through here.
 pub const MUX_RECV_BUF: usize = 2048;
 
 /// Datagrams one [`IceMux::drain`] call may read. The pump runs every

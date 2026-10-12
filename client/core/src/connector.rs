@@ -4566,6 +4566,19 @@ pub struct ShellNetworkConfig {
     /// Own peer FQDN (`PeerConfig.fqdn`, e.g. "me.netbird.cloud") — the Home
     /// screen's domain line. `None` when management sent none. Public material.
     pub fqdn: Option<String>,
+    /// The tunnel MTU management ANNOUNCED (`PeerConfig.mtu`, field 7) —
+    /// upstream's `selectMTU` second input (`client/internal/connect.go:740`
+    /// @67c2041: local config MTU wins, else this, else `iface.DefaultMTU`).
+    /// Exported only when it is USABLE on this platform
+    /// (`config::MTU_MIN..=config::MTU_MAX`): the shell hands the value to
+    /// `VpnConfig.mtu`, which the platform rejects outside [576,1500]
+    /// (device-verified create-401, 2026-09-15) — an unusable announcement is
+    /// therefore NOT the shell-applicable subset and stays out of the document.
+    /// `None` = nothing usable announced (the official server never populates
+    /// the field: `toPeerConfig` in
+    /// management/internals/shared/grpc/conversion.go:121 leaves it 0), so the
+    /// shell keeps the official default 1280.
+    pub mtu: Option<u16>,
 }
 
 /// Canonical dotted-quad/prefix rendering of a parsed route network.
@@ -4776,6 +4789,16 @@ impl ShellNetworkConfig {
             // announced `stuns[]` URIs (they ride the sync config too).
             stuns: Vec::new(),
             fqdn: map.peer.as_ref().and_then(|p| p.fqdn.clone()),
+            // Upstream's per-map MTU announcement (`PeerConfig.mtu`), gated to
+            // the envelope this platform's `VpnConfig.mtu` accepts — see the
+            // field doc. `map.peer.mtu` is already normalised to `None` for the
+            // unset/0 wire value.
+            mtu: map
+                .peer
+                .as_ref()
+                .and_then(|p| p.mtu)
+                .filter(|m| (config::MTU_MIN as i32..=config::MTU_MAX as i32).contains(m))
+                .map(|m| m as u16),
         }
     }
 
@@ -4868,8 +4891,17 @@ impl ShellNetworkConfig {
             Some(f) => jstr("fqdn", f),
             None => "\"fqdn\":null".to_string(),
         };
+        // Upstream MTU alignment (2026-10-12): the announced `PeerConfig.mtu`,
+        // TAIL-appended after every pre-existing field (same a1947b9 discipline
+        // — `fqdn` stays directly before it). `null` = nothing usable was
+        // announced, which is the official server's normal answer — the shell
+        // then keeps the official default 1280.
+        let mtu = match self.mtu {
+            Some(m) => jnum("mtu", m as u64),
+            None => "\"mtu\":null".to_string(),
+        };
         format!(
-            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}},\"stuns\":[{}],{}}}",
+            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}},\"stuns\":[{}],{},{}}}",
             jbool("available", true),
             jnum("serial", self.serial),
             address,
@@ -4885,6 +4917,7 @@ impl ShellNetworkConfig {
             jstr("reason", &self.default_route_reason),
             stuns,
             fqdn,
+            mtu,
         )
     }
 }
@@ -7830,8 +7863,10 @@ fn with_ice_sockets_section(
 /// address/prefix, managed routes with the default-route mark, DNS servers,
 /// peer summary — public keys + allowed-ips counts only). N2-H I2: the tail
 /// carries the announced `stuns[].uri` list (the shell's exclusion-derivation
-/// channel — see [`ShellNetworkConfig::stuns`]). Always valid JSON;
-/// with no connector or before the first map:
+/// channel — see [`ShellNetworkConfig::stuns`]). 2026-10-12 upstream MTU
+/// alignment: the final tail field is the announced `PeerConfig.mtu` when it
+/// is usable on this platform (see [`ShellNetworkConfig::mtu`]). Always valid
+/// JSON; with no connector or before the first map:
 /// `{"available":false,"reason":"no-network-map"}`.
 pub fn connector_network_config_json() -> String {
     let slot = connector_slot();
@@ -11858,6 +11893,45 @@ mod tests {
         assert_eq!(v6.address_prefix_len, None);
     }
 
+    // 2026-10-12 upstream MTU alignment: the announced `PeerConfig.mtu`
+    // (`client/internal/connect.go:740` selectMTU's second input) reaches the
+    // shell ONLY inside this platform's `VpnConfig.mtu` envelope — an
+    // out-of-envelope announcement is not the shell-applicable subset and must
+    // not travel (the platform rejects the whole VpnConfig outside [576,1500],
+    // device-verified create-401 on 2026-09-15).
+    #[test]
+    fn announced_mtu_is_exported_only_inside_the_platform_envelope() {
+        let with_mtu = |mtu: i32| {
+            let mut map = shell_test_map();
+            if let Some(peer) = map.peer.as_mut() {
+                peer.mtu = Some(mtu);
+            }
+            ShellNetworkConfig::from_map_gated(&map, false, false)
+        };
+
+        // usable announcements travel verbatim
+        assert_eq!(with_mtu(1380).mtu, Some(1380));
+        assert_eq!(with_mtu(576).mtu, Some(576));
+        assert_eq!(with_mtu(1500).mtu, Some(1500));
+
+        // outside the envelope: not exported (the shell keeps the default)
+        assert_eq!(with_mtu(575).mtu, None);
+        assert_eq!(with_mtu(1501).mtu, None);
+        assert_eq!(with_mtu(8192).mtu, None);
+        assert_eq!(with_mtu(-1).mtu, None);
+        assert_eq!(with_mtu(0).mtu, None);
+
+        // unset: the official server's normal answer (`toPeerConfig` leaves the
+        // field 0) — nothing announced, nothing exported
+        let mut unset = shell_test_map();
+        if let Some(peer) = unset.peer.as_mut() {
+            peer.mtu = None;
+        }
+        let snap = ShellNetworkConfig::from_map_gated(&unset, false, false);
+        assert_eq!(snap.mtu, None);
+        assert!(snap.to_json().ends_with(",\"mtu\":null}"), "{}", snap.to_json());
+    }
+
     // N2-H I2: this contract test had LOST its `#[test]` attribute in
     // d9346c3 (dead since then — the shape assertions below never ran);
     // restored here because this increment extends exactly this contract.
@@ -11932,13 +12006,19 @@ mod tests {
             // N2-H I2: the tail-appended stun section (nothing announced on a
             // from_map_gated snapshot = an honest empty array, never invented)
             "\"stuns\":[]",
+            // 2026-10-12 upstream MTU alignment: the announced PeerConfig.mtu
+            // (shell_test_map carries 1380) rides the tail verbatim
+            "\"mtu\":1380",
         ] {
             assert!(json.contains(fragment), "missing {fragment} in {json}");
         }
-        // N2-H I2 tail-append discipline + UI phase 1: the own-fqdn section is
-        // the NEW last field — every pre-existing field keeps its order and
-        // shape (stuns stays directly before it)
-        assert!(json.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\"}"), "{json}");
+        // N2-H I2 tail-append discipline + UI phase 1 + upstream MTU alignment:
+        // the announced-MTU section is the NEW last field — every pre-existing
+        // field keeps its order and shape (fqdn stays directly before it)
+        assert!(
+            json.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\",\"mtu\":1380}"),
+            "{json}"
+        );
         // the held default route must NOT appear as an installable route
         assert!(
             !json.contains("{\"network\":\"0.0.0.0/0\""),
@@ -12135,7 +12215,7 @@ mod tests {
             assert!(json.contains(&format!("{{\"uri\":\"{uri}\"}}")), "{uri} in {json}");
         }
         assert!(json.contains(&format!(
-            "\"stuns\":[{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}}],\"fqdn\":\"me.netbird.cloud\"}}",
+            "\"stuns\":[{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}}],\"fqdn\":\"me.netbird.cloud\",\"mtu\":1380}}",
             announced[0], announced[1], announced[2], announced[3]
         )), "announced order + tail position: {json}");
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
@@ -12181,7 +12261,10 @@ mod tests {
             },
         );
         let cleared = shared.network_config_json();
-        assert!(cleared.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\"}"), "{cleared}");
+        assert!(
+            cleared.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\",\"mtu\":1380}"),
+            "{cleared}"
+        );
         assert!(!cleared.contains("stun.netbird.io"), "{cleared}");
     }
 
