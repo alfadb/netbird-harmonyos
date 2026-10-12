@@ -410,12 +410,16 @@ fn rate_budget_bounds_bytes_per_window_and_stays_separate_from_queue_drops() {
     assert!(during.rate_suppressed > 0, "the budget must refuse a burst: {during:?}");
     assert_eq!(during.accepted + during.dropped, during.offered);
     // The strict rate bound: admitted charged bytes stay inside the window
-    // budget, allowing the burst to straddle one boundary (plus one for a
-    // scheduling delay before `elapsed` is taken).
+    // budgets, allowing the burst to straddle one boundary (plus one for a
+    // scheduling delay before `elapsed` is taken). A `configure` ALSO opens the
+    // startup allowance (one extra ordinary-sized window, only for the first
+    // seconds of a session), so the per-window ceiling here is the sum of the
+    // two fixed windows — and the bound keeps holding if the burst ran past the
+    // grace, when only the ordinary window is left.
     let windows = elapsed.as_millis() as u64 / 1000 + 2;
     let charged = during.accepted * LINE_BYTES;
     assert!(
-        charged <= windows * BUDGET,
+        charged <= windows * (BUDGET + phone_log::DEFAULT_STARTUP_RATE_BYTES_PER_SEC),
         "admission budget exceeded: {charged} charged bytes in {windows} window(s)"
     );
     // ... and the bound is not trivially satisfied by refusing everything.
@@ -434,12 +438,15 @@ fn rate_budget_bounds_records_per_window_and_recovers_next_window() {
     let _guard = lock();
     let dir = Dir::new("rate-records");
     let path = dir.file("netbird-vpn.log");
-    // 3 records per second with the byte budget off: the RECORD budget is the
-    // only brake, so recovery is observable without generating megabytes.
+    // 3 records per second with the byte budget off: the RECORD budgets are the
+    // only brake, so recovery is observable without generating megabytes. The
+    // burst is larger than the ordinary + startup record budgets, so the brake
+    // still bites (see `startup_allowance_admits_the_session_start_burst` for
+    // the allowance itself).
     const BUDGET: u64 = 3;
     phone_log::configure_with(&path, &options_with_rate(1024, 4, 4096, u64::MAX, BUDGET)).unwrap();
 
-    let offered = 20u64;
+    let offered = 200u64;
     let start = Instant::now();
     for i in 0..offered {
         phone_log::append(&format!("RATEREC|i={i}"));
@@ -452,7 +459,8 @@ fn rate_budget_bounds_records_per_window_and_recovers_next_window() {
     assert!(during.accepted >= BUDGET, "the first window must admit its records");
     let windows = elapsed.as_millis() as u64 / 1000 + 2;
     assert!(
-        during.accepted <= windows * BUDGET,
+        during.accepted
+            <= windows * (BUDGET + phone_log::DEFAULT_STARTUP_RATE_RECORDS_PER_SEC),
         "record budget exceeded: {} admitted in {windows} window(s)",
         during.accepted
     );
@@ -460,7 +468,10 @@ fn rate_budget_bounds_records_per_window_and_recovers_next_window() {
 
     // Recovery: the exact boundary is proven with the injected clock in the
     // unit tests; here the INSTALLED logger must recover by itself, which needs
-    // the window to turn over — one bounded 1.1 s wait, no stress loop.
+    // a window to turn over — one bounded 1.1 s wait, no stress loop. (Inside
+    // the startup grace the allowance may carry the line instead of the
+    // ordinary window; either way it must be admitted, and the refusal counter
+    // must not move.)
     let suppressed_before = during.rate_suppressed;
     thread::sleep(Duration::from_millis(1100));
     let marker = "RATEREC|recovered-after-the-window";
@@ -477,6 +488,48 @@ fn rate_budget_bounds_records_per_window_and_recovers_next_window() {
     assert!(text.contains(marker), "the recovered line was not written: {text}");
 }
 
+// The 0.0.27 residual startup gap (device report §F/G): the priority window
+// saves the EVIDENCE markers, but a fresh session still refused 5.15 % of its
+// lines (101 lines, all inside the first ~4.4 s) — the per-peer relay-lane and
+// ICE fan-out is ordinary by design and no marker was lost. `configure` now
+// opens ONE extra ordinary-sized window for the first seconds of the session;
+// this proves the INSTALLED logger (real clock, real deadline) carries that
+// burst under a budget that alone would refuse it.
+#[test]
+fn startup_allowance_admits_the_session_start_burst() {
+    let _guard = lock();
+    let dir = Dir::new("startup-allowance");
+    let path = dir.file("netbird-vpn.log");
+    // One record and one charged byte per ordinary window: without the startup
+    // allowance every line after the first would be refused.
+    phone_log::configure_with(&path, &options_with_rate(1024, 4, 4096, 1, 1)).unwrap();
+
+    // ~40 bytes per line; 48 lines stay inside the startup allowance's own
+    // record budget (the observed device burst is ~100–150 lines in one or two
+    // seconds, ~64 of which the allowance must carry alongside the ordinary
+    // window).
+    const BURST: u64 = 48;
+    assert!(BURST <= phone_log::DEFAULT_STARTUP_RATE_RECORDS_PER_SEC);
+    for i in 0..BURST {
+        phone_log::append(&format!("STARTS|i={i}|pad={}", "s".repeat(24)));
+    }
+    let during = phone_log::stats();
+    assert_eq!(during.offered, BURST);
+    assert_eq!(
+        during.accepted, BURST,
+        "the startup allowance must carry the session-start burst: {during:?}"
+    );
+    assert_eq!(during.rate_suppressed, 0, "{during:?}");
+
+    assert!(phone_log::flush(Duration::from_secs(5)), "flush timed out");
+    assert!(phone_log::shutdown(Duration::from_secs(5)));
+    let text = read_segments(&path, 4);
+    // All 48 lines are under the startup record budget, so every one of them is
+    // on disk; the tiny segment cap rotates, so only the LAST line is asserted
+    // by name (the written counter above is the whole-burst evidence).
+    assert!(text.contains("STARTS|i=47"), "the last burst line is missing: {text}");
+}
+
 // The startup gap of the 0.0.26 device runs: the ordinary budget is spent
 // inside the first seconds of a connect and swallows lifecycle/selection
 // EVIDENCE lines (103 refusals in 6 s; one peer's `N5_ICE|selected-pair`
@@ -489,10 +542,13 @@ fn priority_evidence_lines_are_admitted_when_the_ordinary_budget_is_spent() {
     let _guard = lock();
     let dir = Dir::new("priority");
     let path = dir.file("netbird-vpn.log");
-    // The ordinary budget is spent after ONE tiny line per window; the priority
-    // (marker) allowance keeps its production default, so the only brake that
-    // can touch the evidence lines below is the priority budget itself.
+    // The ordinary budget is spent after ONE tiny line per window (the startup
+    // allowance of a fresh `configure` is a production constant, so the burst
+    // below is sized past it); the priority (marker) allowance keeps its
+    // production default, so the only brake that can touch the evidence lines
+    // below is the priority budget itself.
     phone_log::configure_with(&path, &options_with_rate(2 * 1024 * 1024, 4, 4096, 1, 1)).unwrap();
+    const ORDINARY_BURST: usize = 100;
 
     // (1) The SHELL entrance (`append_shell` = the ArkTS bridge) routes a
     // NON-evidence record to the ORDINARY window: as the window's first line it
@@ -503,8 +559,10 @@ fn priority_evidence_lines_are_admitted_when_the_ordinary_budget_is_spent() {
     assert_eq!(first.accepted, 1, "the ordinary window must admit its first line: {first:?}");
     assert_eq!(first.rate_suppressed, 0, "{first:?}");
 
-    // (2) ... and the ordinary burst behind it is refused.
-    for i in 0..20 {
+    // (2) ... and the ordinary burst behind it is refused (the configured
+    // ordinary budget plus the production-sized startup allowance together
+    // carry only ~65 lines, far below the burst).
+    for i in 0..ORDINARY_BURST {
         phone_log::append(&format!("ORD|i={i}|pad={}", "o".repeat(40)));
     }
     let during = phone_log::stats();
@@ -527,8 +585,17 @@ fn priority_evidence_lines_are_admitted_when_the_ordinary_budget_is_spent() {
     }
     let shell_evidence = "ts=1 pid=2 event=vpn_protect_begin detail=VPN_PROTECT_BEGIN:stage=protect";
     phone_log::append_shell(shell_evidence);
+    // The shell's per-request socket-supply outcome record (0.0.27 device
+    // report §C/§G1: the ROM keeps no I-level app-domain line, and the refusals
+    // CLUSTER in the network-change minutes when the ordinary budget is spent —
+    // so this record is both the only place the shell-side reason exists and a
+    // priority marker).
+    let shell_supply = "ts=1 pid=2 role=vpn event=socket_supply ms=9 purpose=dns \
+                        reason=none result=protected";
+    phone_log::append_shell(shell_supply);
     let mut evidence: Vec<&str> = core_evidence.to_vec();
     evidence.push(shell_evidence);
+    evidence.push(shell_supply);
 
     let after = phone_log::stats();
     assert_eq!(
@@ -547,7 +614,7 @@ fn priority_evidence_lines_are_admitted_when_the_ordinary_budget_is_spent() {
     // budget that swallowed the device's nomination record) — while the one
     // ordinary line that got in first is the shell record from (1).
     let ordinary = parse_records(&text).iter().filter(|r| r.line.starts_with("ORD|")).count();
-    assert!(ordinary < 20, "the ordinary burst must have been refused: {ordinary}");
+    assert!(ordinary < ORDINARY_BURST, "the ordinary burst must have been refused: {ordinary}");
     assert!(text.contains(shell_ordinary), "the admitted shell record must land: {text}");
 }
 

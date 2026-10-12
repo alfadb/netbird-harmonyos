@@ -466,7 +466,14 @@ export const PUBLIC_FIELD_KEYS: string[] = [
   'conn_stops', 'dns_pending', 'ice_available', 'ice_fds', 'ice_live',
   'ice_sessions', 'ice_stopped', 'icesock_queued', 'icesock_ready',
   'icesock_taken', 'relay_foreign', 'relay_lanes', 'relay_opens',
-  'relay_ready', 'supply_installed', 'supply_pending', 'supply_queued'
+  'relay_ready', 'supply_installed', 'supply_pending', 'supply_queued',
+  // 2026-10-13 observability increment (device report §C/D/G1): the three
+  // facts the shell could not persist before — `purpose` (the socket a supply
+  // request asked for: dns/management/signal/relay), `mtu` (the effective
+  // tunnel MTU submitted to the platform) and `source` (its provenance:
+  // default vs network-map). All three are bounded, non-secret tokens/numbers;
+  // the set stays closed.
+  'purpose', 'mtu', 'source'
 ];
 
 // Public keys plus the runtime's own keys (memory readings, the every-10th

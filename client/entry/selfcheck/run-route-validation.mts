@@ -403,6 +403,41 @@ try {
   check('T-MTU: the selected MTU reaches the platform VpnConfig unchanged',
     cfg.buildPlatformVpnConfig(withAnnouncedMtu(1380)).mtu === 1380 &&
     cfg.buildPlatformVpnConfig(base).mtu === 1280);
+  // T-MTU-SOURCE (2026-10-13 device report §D): the PROVENANCE of the effective
+  // MTU, in the tokens the extension persists (`VPN_TUNNEL_MTU|…|source=`).
+  // `tunnelMtuSource` reads the same `selectTunnelMtu` answer, so the token can
+  // never describe an MTU other than the one in force; an announcement equal to
+  // the base default reads `default` (documented: the value in force is the
+  // default value either way).
+  check('T-MTU-SOURCE: an announced MTU is attributed to the network map',
+    cfg.tunnelMtuSource(1280, 1380) === 'network-map' &&
+    cfg.tunnelMtuSource(1280, 576) === 'network-map' &&
+    cfg.tunnelMtuSource(1280, 1500) === 'network-map' &&
+    cfg.tunnelMtuSource(1400, 1380) === 'network-map' &&
+    cfg.TUNNEL_MTU_SOURCE_NETWORK_MAP === 'network-map',
+    String(cfg.tunnelMtuSource(1280, 1380)));
+  check('T-MTU-SOURCE: absent / malformed / out-of-envelope stays the default',
+    cfg.tunnelMtuSource(1280, null) === 'default' &&
+    cfg.tunnelMtuSource(1280, undefined) === 'default' &&
+    cfg.tunnelMtuSource(1280, 1501) === 'default' &&
+    cfg.tunnelMtuSource(1280, 575) === 'default' &&
+    cfg.tunnelMtuSource(1280, 8192) === 'default' &&
+    cfg.tunnelMtuSource(1280, -1) === 'default' &&
+    cfg.tunnelMtuSource(1280, 0) === 'default' &&
+    cfg.tunnelMtuSource(1280, '1380' as never) === 'default' &&
+    cfg.tunnelMtuSource(1280, 1380.5) === 'default' &&
+    cfg.tunnelMtuSource(1280, 1280) === 'default' &&
+    cfg.TUNNEL_MTU_SOURCE_DEFAULT === 'default',
+    String(cfg.tunnelMtuSource(1280, 1501)));
+  check('T-MTU-SOURCE: the token always agrees with the effective MTU',
+    [null, undefined, 0, 575, 576, 1280, 1380, 1500, 1501, 8192, -1, 1380.5]
+      .every((m: number | null | undefined): boolean => {
+        const source: string = cfg.tunnelMtuSource(1280, m);
+        const effective: number = cfg.selectTunnelMtu(1280, m);
+        return source === 'network-map'
+          ? effective !== 1280 && effective === m
+          : effective === 1280;
+      }));
 
   // T2/T3 end-to-end: core snapshot JSON passthrough -> validator verdict
   const snapMissing = JSON.parse('{"available":true,"address":"10.99.0.1",' +

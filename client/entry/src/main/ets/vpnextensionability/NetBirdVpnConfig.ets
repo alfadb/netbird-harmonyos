@@ -117,6 +117,26 @@ export function selectTunnelMtu(baseMtu: number, announced: number | undefined |
   return announced;
 }
 
+// The two provenance tokens of the effective tunnel MTU (device report §D,
+// 2026-10-13: the applied MTU was verifiable only from `ifconfig`, because
+// nothing logged it). `default` = the base template's own value stood (the
+// official client's `iface.DefaultMTU`, or an announcement that is absent /
+// malformed / outside the SDK envelope); `network-map` = the management map's
+// announced `PeerConfig.mtu` was selected.
+export const TUNNEL_MTU_SOURCE_DEFAULT: string = 'default';
+export const TUNNEL_MTU_SOURCE_NETWORK_MAP: string = 'network-map';
+
+// The SOURCE of the value `selectTunnelMtu` returns for the SAME inputs — one
+// call, so the token can never describe an MTU other than the one in force.
+// Pure, never throws. An announcement that EQUALS the base default reads
+// `default`: the value in force is the default value either way, and this
+// function never claims a difference the effective MTU does not show.
+export function tunnelMtuSource(baseMtu: number, announced: number | undefined | null): string {
+  return announced !== undefined && announced !== null &&
+    selectTunnelMtu(baseMtu, announced) !== baseMtu
+    ? TUNNEL_MTU_SOURCE_NETWORK_MAP : TUNNEL_MTU_SOURCE_DEFAULT;
+}
+
 // MR4-verified default-route shape (e8e2cf9), expressed as configuration:
 // route 1: tunnel subnet 10.99.0.0/24 (plain route);
 // route 2: IPv4 default 0.0.0.0/0 with isDefaultRoute: true.
