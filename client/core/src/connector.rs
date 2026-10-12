@@ -1575,6 +1575,10 @@ struct IceStatusSample {
     /// orchestrator that was never successfully read (the documented unknown
     /// shape, flagged by `ice_snapshot_stale`).
     ice_peers: Option<Vec<PeerIceDetail>>,
+    /// 0.0.26 gap 1: the shared mux's counters, read in the SAME orchestrator
+    /// acquisition as `ice`/`ice_peers` (non-blocking: a busy mux lock answers
+    /// `None` = unknown). `None` also means "no mux at all".
+    mux: Option<crate::ice_mux::MuxStats>,
     /// Monotonic ms of the successful read that produced `ice`/`ice_peers`.
     at_ms: u64,
     /// TRUE when this sample is served BECAUSE the orchestrator lock was busy
@@ -1598,6 +1602,7 @@ impl IceStatusSample {
         IceStatusSample {
             ice: IceOrchestratorSummary::default(),
             ice_peers: None,
+            mux: None,
             at_ms: 0,
             stale: false,
             age_ms: None,
@@ -1613,6 +1618,7 @@ impl IceStatusSample {
         IceStatusSample {
             ice: IceOrchestratorSummary::default(),
             ice_peers: None,
+            mux: None,
             at_ms: 0,
             stale: true,
             age_ms: None,
@@ -1871,6 +1877,8 @@ impl ConnectorShared {
         let fresh = try_lock_poison(orch).map(|g| IceStatusSample {
             ice: g.summary(),
             ice_peers: Some(g.ice_details()),
+            // 0.0.26 gap 1: same acquisition, non-blocking leaf read.
+            mux: g.mux_stats_try(),
             at_ms: crate::sys::mono_ms(),
             stale: false,
             age_ms: Some(0),
@@ -4228,6 +4236,31 @@ fn ice_peers_json(v: Option<&[PeerIceDetail]>) -> String {
     format!("\"ice_peers\":[{}]", entries.join(","))
 }
 
+/// 0.0.26 gap 1: the `ice_mux` tail — the shared mux's counters
+/// ([`crate::ice_mux::MuxStats`]). `null` = no mux at all, or the mux state
+/// lock was busy when the sample was taken (this document's own "unknown",
+/// never a fabricated zero). Counters only: no fd, no address, no payload.
+fn ice_mux_json(v: Option<crate::ice_mux::MuxStats>) -> String {
+    let Some(s) = v else {
+        return "\"ice_mux\":null".to_string();
+    };
+    format!(
+        "\"ice_mux\":{{{}}}",
+        [
+            jnum("reads", s.reads),
+            jnum("xor_hits", s.xor_hits),
+            jnum("xor_misses", s.xor_misses),
+            jnum("xor_expired", s.xor_expired),
+            jnum("xor_filled", s.xor_filled),
+            jnum("overlay_dropped", s.overlay_dropped),
+            jnum("stun_unknown", s.stun_unknown),
+            jnum("data_unknown", s.data_unknown),
+            jnum("queue_dropped", s.queue_dropped),
+        ]
+        .join(",")
+    )
+}
+
 /// Immutable snapshot of the connector status (the `connector_status()`
 /// payload).
 #[derive(Debug, Clone, PartialEq)]
@@ -4287,6 +4320,18 @@ pub struct ConnectorStatus {
     /// field keeps its position. Public material only: no ufrag/password, no
     /// fd, no token.
     pub ice_peers: Option<Vec<PeerIceDetail>>,
+    /// 0.0.26 gap 1 (真机 0.0.25 §4.3): the shared ICE/WG mux's counters
+    /// (`crate::ice_mux::MuxStats`), TAIL-appended after `ice_peers` — additive
+    /// only, every pre-existing field keeps its position. `null` = no mux at
+    /// all, or its state lock was busy at the sample instant (this document's
+    /// own "unknown"; never a fabricated zero). The counters the device log
+    /// could not carry before: `xor_hits`/`xor_misses` (srflx cache),
+    /// `xor_filled`/`xor_expired`, `overlay_dropped`, `stun_unknown`,
+    /// `data_unknown`, `queue_dropped`, `reads`. Read from the SAME
+    /// orchestrator acquisition as `ice`/`ice_peers`, and deliberately NOT
+    /// blocking: the shell's synchronous poll must never queue behind the mux
+    /// reader. No peer key, fd or payload material.
+    pub ice_mux: Option<crate::ice_mux::MuxStats>,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -4359,6 +4404,10 @@ impl ConnectorStatus {
             relay: shared.relay_status(),
             peer_relays,
             ice_peers: ice.ice_peers.clone(),
+            // 0.0.26 gap 1: the mux counters ride the SAME sample as `ice` /
+            // `ice_peers` (one orchestrator acquisition; the mux leaf read is
+            // non-blocking — `None` = no mux or a busy mux lock).
+            ice_mux: ice.mux,
         }
     }
 
@@ -4366,7 +4415,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -4413,6 +4462,9 @@ impl ConnectorStatus {
             // pre-existing field keeps its position. Same three-state shape:
             // `null` = no orchestrator, `[]` = orchestrator with zero peers.
             ice_peers_json(self.ice_peers.as_deref()),
+            // 0.0.26 gap 1: the shared-mux counters, TAIL-appended after
+            // `ice_peers` — additive only. `null` = no mux / busy mux lock.
+            ice_mux_json(self.ice_mux),
         )
     }
 }
@@ -7439,6 +7491,8 @@ pub fn connector_status_json() -> String {
             peer_relays: None,
             // ... and no ICE orchestrator either: `null`, not `[]`
             ice_peers: None,
+            // 0.0.26 gap 1: no mux either
+            ice_mux: None,
         }
         .to_json(),
     }
@@ -9111,6 +9165,7 @@ mod tests {
             relay: RelayStatus::disabled(),
             peer_relays: None,
             ice_peers: None,
+            ice_mux: None,
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
@@ -9663,6 +9718,9 @@ mod tests {
                 rx_bytes_to_tun: 800,
                 dropped_no_route: 1,
                 decrypt_errors: 2,
+                // 0.0.26 gap 3: a NON-zero value on purpose — the field must be
+                // proven exported, not merely defaulted to 0.
+                unknown_peer_drops: 4,
                 // N13-D1: the per-peer attribution tail — one peer with a
                 // live session riding the carrier, one registered peer with
                 // no session (both entry shapes frozen here). N13-D4 appends
@@ -9708,6 +9766,7 @@ mod tests {
             relay: RelayStatus::disabled(),
             peer_relays: None,
             ice_peers: None,
+            ice_mux: None,
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -9748,7 +9807,8 @@ mod tests {
                 "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
                  \"peers_with_session\":1,\"handshakes\":3,\"tx_packets\":9,\"tx_bytes\":900,\
                  \"rx_packets\":8,\"rx_bytes_to_tun\":800,\
-                 \"dropped_no_route\":1,\"decrypt_errors\":2,\"carrier_tx_packets\":0,\
+                 \"dropped_no_route\":1,\"decrypt_errors\":2,\"unknown_peer_drops\":4,\
+                 \"carrier_tx_packets\":0,\
                  \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
                  \"direct_restores\":0,\"wg_peers\":[\
                  {\"pub_key_b64\":\"bjEzLWQxLXBlZXItc2Vzc2lvbg==\",\"endpoint\":null,\
@@ -9775,14 +9835,15 @@ mod tests {
         );
         // the relay segment stays the LAST pre-existing section of the
         // document (the ets consumer reads by field; N13-D1 must not move it);
-        // the 2026-10-06 `peer_relays` tail follows it ADDITIVELY and the
-        // 2026-10-07 `ice_peers` tail follows THAT.
+        // the 2026-10-06 `peer_relays` tail follows it ADDITIVELY, the
+        // 2026-10-07 `ice_peers` tail follows THAT and the 0.0.26 `ice_mux`
+        // tail follows those.
         assert!(
             json.ends_with(&format!(
-                "\"relay\":{},\"peer_relays\":null,\"ice_peers\":null}}",
+                "\"relay\":{},\"peer_relays\":null,\"ice_peers\":null,\"ice_mux\":null}}",
                 status.relay.to_json()
             )),
-            "relay keeps its position; peer_relays and ice_peers are the tails: {json}"
+            "relay keeps its position; peer_relays / ice_peers / ice_mux are the tails: {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
 
@@ -9825,8 +9886,8 @@ mod tests {
             "the frozen relay object keeps its exact shape before the tail: {lanes_json}"
         );
         assert!(
-            lanes_json.ends_with("],\"ice_peers\":null}"),
-            "peer_relays keeps its shape and ice_peers is the tail (additive only): {lanes_json}"
+            lanes_json.ends_with("],\"ice_peers\":null,\"ice_mux\":null}"),
+            "peer_relays keeps its shape and the ice_peers/ice_mux tails follow (additive only): {lanes_json}"
         );
         assert!(matches!(config::parse_document(&lanes_json), Ok(Json::Obj(_))));
 
@@ -9851,6 +9912,7 @@ mod tests {
             relay: RelayStatus::disabled(),
             peer_relays: None,
             ice_peers: None,
+            ice_mux: None,
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -9871,7 +9933,8 @@ mod tests {
                 "\"wg\":{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
                  \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
                  \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
-                 \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
+                 \"dropped_no_route\":0,\"decrypt_errors\":0,\"unknown_peer_drops\":0,\
+                 \"carrier_tx_packets\":0,\
                  \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
                  \"direct_restores\":0,\"wg_peers\":[]}"
             ),
@@ -9886,8 +9949,8 @@ mod tests {
         );
         assert!(
             empty.contains("\"relay\":")
-                && empty.ends_with("\"peer_relays\":null,\"ice_peers\":null}"),
-            "the no-carrier default renders both tails as null: {empty}"
+                && empty.ends_with("\"peer_relays\":null,\"ice_peers\":null,\"ice_mux\":null}"),
+            "the no-carrier default renders all three tails as null: {empty}"
         );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
     }
@@ -9992,8 +10055,9 @@ mod tests {
         );
 
         // document level: `peer_relays` keeps its exact bytes and `ice_peers`
-        // rides immediately after it (the additive tail), then the strict
-        // reader accepts the whole document.
+        // rides immediately after it (the additive tail); 0.0.26 appends the
+        // `ice_mux` tail after THAT, and the strict reader accepts the whole
+        // document.
         let registry = WgPeerRegistry::new();
         let shared = ConnectorShared::new(false, None);
         let mut status = ConnectorStatus::snapshot(
@@ -10006,20 +10070,34 @@ mod tests {
             &shared.ice_status_sample(),
         );
         status.ice_peers = Some(vec![idle, connected, disconnected]);
+        status.ice_mux = Some(crate::ice_mux::MuxStats {
+            reads: 7,
+            xor_hits: 3,
+            xor_misses: 5,
+            xor_filled: 2,
+            ..Default::default()
+        });
         let json = status.to_json();
         let lanes = "\"peer_relays\":[{\"pub_key_b64\":\"QUJD\",\
                      \"relay_url\":\"rel://relay.example:33000\"}]";
+        let mux = "\"ice_mux\":{\"reads\":7,\"xor_hits\":3,\"xor_misses\":5,\
+                   \"xor_expired\":0,\"xor_filled\":2,\"overlay_dropped\":0,\
+                   \"stun_unknown\":0,\"data_unknown\":0,\"queue_dropped\":0}";
         assert!(
-            json.contains(&format!("{lanes},{details}")),
+            json.contains(&format!("{lanes},{details},{mux}")),
             "ice_peers must ride immediately after peer_relays: {json}"
         );
         assert!(
-            json.ends_with(&format!("{details}}}")),
-            "ice_peers is the ConnectorStatus document tail: {json}"
+            json.ends_with(&format!("{mux}}}")),
+            "ice_mux is the ConnectorStatus document tail: {json}"
         );
         assert!(
             json.rfind("\"peer_relays\":").expect("peer_relays") < json.rfind("\"ice_peers\":").expect("ice_peers"),
             "the tail order is peer_relays then ice_peers: {json}"
+        );
+        assert!(
+            json.rfind("\"ice_peers\":").expect("ice_peers") < json.rfind("\"ice_mux\":").expect("ice_mux"),
+            "the tail order is ice_peers then ice_mux: {json}"
         );
 
         // the contract reader: by key, the array carries exactly the eight
@@ -10089,6 +10167,19 @@ mod tests {
             "pub_key_b64,relay_url",
             "the pre-existing entry shape is unchanged"
         );
+        // 0.0.26 gap 1: the `ice_mux` tail is the strict-reader-visible counter
+        // object and carries exactly the documented keys in order.
+        let mux = obj_get(&root, "ice_mux");
+        let Json::Obj(mux_entries) = mux else {
+            panic!("ice_mux must be an object here");
+        };
+        assert_eq!(
+            mux_entries.iter().map(|(k, _)| k.clone()).collect::<Vec<String>>().join(","),
+            "reads,xor_hits,xor_misses,xor_expired,xor_filled,overlay_dropped,\
+             stun_unknown,data_unknown,queue_dropped",
+            "the ice_mux key order is the frozen contract"
+        );
+        assert_eq!(obj_get(mux, "xor_misses"), &Json::Num(5));
     }
 
     /// 2026-10-07 (2026-10-09: caller-supplied sample): `ConnectorStatus::snapshot`
@@ -10110,7 +10201,7 @@ mod tests {
         assert_eq!(status.ice_peers, None);
         assert_eq!(status.ice, IceOrchestratorSummary::default());
         assert!(
-            status.to_json().ends_with("\"peer_relays\":null,\"ice_peers\":null}"),
+            status.to_json().ends_with("\"peer_relays\":null,\"ice_peers\":null,\"ice_mux\":null}"),
             "{}",
             status.to_json()
         );
@@ -10134,7 +10225,7 @@ mod tests {
         assert_eq!(empty_peers.ice_peers, Some(vec![]), "armed with zero peers is [], never null");
         assert_eq!(empty_peers.ice, IceOrchestratorSummary::default());
         assert!(
-            empty_peers.to_json().ends_with(",\"ice_peers\":[]}"),
+            empty_peers.to_json().ends_with(",\"ice_peers\":[],\"ice_mux\":null}"),
             "{}",
             empty_peers.to_json()
         );
@@ -10158,7 +10249,8 @@ mod tests {
             json.ends_with(
                 ",\"ice_peers\":[{\"pub_key\":\"UEVFUjA=\",\"state\":\"idle\",\
                  \"controlling\":null,\"selected_local\":null,\"selected_remote\":null,\
-                 \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null}]}"
+                 \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null}],\
+                 \"ice_mux\":null}"
             ),
             "{json}"
         );
@@ -12461,6 +12553,7 @@ mod tests {
             relay: RelayStatus::disabled(),
             peer_relays: None,
             ice_peers: None,
+            ice_mux: None,
         }
         .to_json();
         assert!(
@@ -13071,6 +13164,7 @@ mod tests {
             relay: st,
             peer_relays: None,
             ice_peers: None,
+            ice_mux: None,
         };
         let json = status.to_json();
         let adv_pos = json.find("\"relay_advertised\":").expect("advertised section");
@@ -14521,8 +14615,8 @@ mod tests {
             "ice_peers is tail-appended AFTER peer_relays: {json}"
         );
         assert!(
-            json.ends_with("]}"),
-            "the ice_peers array is the ConnectorStatus document tail: {json}"
+            json.ends_with("],\"ice_mux\":null}"),
+            "the ice_mux tail follows the ice_peers array: {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
         // the negative premise, pinned: the controlled peer's ADVERTISEMENT is

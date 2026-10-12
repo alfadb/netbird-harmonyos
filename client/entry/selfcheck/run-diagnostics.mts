@@ -151,6 +151,48 @@ try {
   check('booleans are literal true/false',
     m.normalizeValue('ok', true) === 'true' && m.normalizeValue('ok', false) === 'false');
 
+  // ---- 0.0.26 gap 2: the VPN_* lifecycle markers reach netbird-vpn.log -------
+  // The shell mirrors each VPN_* HiLog lifecycle marker through the SAME
+  // diagnostics tee as event=<marker lowercased> + detail=<verbatim marker>.
+  // Pinned here: (a) the marker token survives the credential guard (it must
+  // NOT be redacted as an opaque secret) and (b) every required call site is
+  // really present in the extension source (a wiring pin, since the byte-
+  // identical .ets source is the artifact that ships).
+  const markerRecord = m.buildRecord(ts, 42, 'vpn', 'vpn_protect_begin',
+    { detail: 'VPN_PROTECT_BEGIN:stage=protect' }, false);
+  check('a mirrored lifecycle marker survives redaction and keeps its values',
+    markerRecord ===
+    'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=vpn_protect_begin ' +
+    'detail=VPN_PROTECT_BEGIN:stage=protect\n',
+    markerRecord);
+  check('every mirrored marker name is a legal public event name',
+    ['vpn_protect_begin', 'vpn_protect_resolved', 'vpn_protect_fail_closed',
+      'vpn_ice_mux_armed', 'vpn_ice_mux_fail', 'vpn_create_begin',
+      'vpn_create_resolved', 'vpn_create_rejected', 'vpn_create_invalid_fd',
+      'vpn_connection_created', 'vpn_start_flow_rejected', 'vpn_destroy_begin',
+      'vpn_destroy_resolved', 'vpn_destroy_rejected', 'vpn_destroy_skipped']
+      .every((n: string): boolean => m.isPublicEventName(n)));
+  {
+    const ext = readFileSync(join(here, '..', 'src', 'main', 'ets',
+      'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
+    check('the extension defines the shared lifecycle-marker mirror helper',
+      ext.includes('private diagLifecycleMarker(marker: string, detail: string): void'));
+    for (const marker of ['VPN_PROTECT_BEGIN', 'VPN_PROTECT_RESOLVED',
+      'VPN_PROTECT_FAIL_CLOSED', 'VPN_ICE_MUX_ARMED', 'VPN_ICE_MUX_FAIL',
+      'VPN_CREATE_BEGIN', 'VPN_CREATE_RESOLVED', 'VPN_CREATE_REJECTED',
+      'VPN_CONNECTION_CREATED', 'VPN_START_FLOW_REJECTED', 'VPN_DESTROY_BEGIN',
+      'VPN_DESTROY_RESOLVED', 'VPN_DESTROY_REJECTED', 'VPN_DESTROY_SKIPPED']) {
+      check(`the ${marker} marker is mirrored into the app log`,
+        ext.includes(`this.diagLifecycleMarker('${marker}'`));
+    }
+    // the HiLog line itself is untouched (only a mirror call was ADDED next to
+    // each one) — the marker text is still passed to hilog verbatim.
+    check('the HiLog markers themselves are unchanged (mirror is additive)',
+      ext.includes("'VPN_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d'") &&
+      ext.includes("'VPN_PROTECT_RESOLVED|requestId=%{public}s|fd=%{public}d|datagramsFlown=none-yet'") &&
+      ext.includes('VPN_ICE_MUX_ARMED|requestId='));
+  }
+
   // ---- redaction -----------------------------------------------------------
   const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abcdefghijklmnop';
   const wgKey = 'YJk3mZ1S6rPq0vQ4xT8uL2nF5hD9cB7aE1gK4wR6tY0=';

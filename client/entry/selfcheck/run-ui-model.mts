@@ -227,6 +227,7 @@ try {
     signal: { registered: true, reconnects: 2 },
     wg: { ready: true, peers_with_session: 2, tx_packets: 11, tx_bytes: 1100,
       rx_packets: 9, rx_bytes_to_tun: 900, dropped_no_route: 3, decrypt_errors: 1,
+      unknown_peer_drops: 5,
       wg_peers: detailWgPeers },
     relay: { enabled: true, state: 'ready', current_url: 'rels://live.relay:443',
       urls: ['rels://cfg.relay:443', 'rel://cfg2.relay:80'], reconnects: 2,
@@ -254,7 +255,22 @@ try {
   check('detail: wg traffic counters aggregated verbatim',
     detail.wg_traffic.tx_packets === 11 && detail.wg_traffic.tx_bytes === 1100 &&
     detail.wg_traffic.rx_packets === 9 && detail.wg_traffic.rx_bytes_to_tun === 900 &&
-    detail.wg_traffic.dropped_no_route === 3 && detail.wg_traffic.decrypt_errors === 1);
+    detail.wg_traffic.dropped_no_route === 3 && detail.wg_traffic.decrypt_errors === 1 &&
+    detail.wg_traffic.unknown_peer_drops === 5);
+  // 0.0.26 gap 3: the third drop counter is ALWAYS present in the published
+  // document — a legacy core section without the field reads 0, never a
+  // missing key.
+  const legacyWg = m.buildUiStatusDocument(
+    { running: true, state: 'connected', peer_count: 0, route_count: 0, reconnects: 0,
+      last_error: null, signal: { registered: true, reconnects: 0 },
+      wg: { ready: true, peers_with_session: 0, tx_packets: 0, tx_bytes: 0,
+        rx_packets: 0, rx_bytes_to_tun: 0, dropped_no_route: 0, decrypt_errors: 0 },
+      relay: { enabled: false, state: 'disabled', current_url: null, urls: [],
+        reconnects: 0, transport_bytes: 0, token_valid: false, last_error_class: null },
+      session_expiry: 'unknown', session_expires_at_unix: null },
+    detailNet, 'ui-8', 1, true, null, { host: '', port: 0, ip: '' });
+  check('detail: a legacy wg section still publishes unknown_peer_drops as 0',
+    legacyWg.wg_traffic.unknown_peer_drops === 0);
   check('detail: relay view carries urls/current/counters/error',
     detail.relay.enabled === true && detail.relay.state === 'ready' &&
     detail.relay.current_url === 'rels://live.relay:443' &&

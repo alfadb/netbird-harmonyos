@@ -318,6 +318,10 @@ export interface UiWgTraffic {
   rx_bytes_to_tun: number;
   dropped_no_route: number;
   decrypt_errors: number;
+  // 0.0.26 gap 3: the device's THIRD drop counter (inbound datagrams matching
+  // no registered peer). Exported next to the other two; 0 when the core
+  // section predates the field (never a missing key).
+  unknown_peer_drops: number;
 }
 
 // The relay client view (core's `relay`). `current_url` is the effective
@@ -793,7 +797,9 @@ function buildWgTraffic(wg: WgDataplaneStatus): UiWgTraffic {
     rx_packets: typeof wg.rx_packets === 'number' ? wg.rx_packets : 0,
     rx_bytes_to_tun: typeof wg.rx_bytes_to_tun === 'number' ? wg.rx_bytes_to_tun : 0,
     dropped_no_route: typeof wg.dropped_no_route === 'number' ? wg.dropped_no_route : 0,
-    decrypt_errors: typeof wg.decrypt_errors === 'number' ? wg.decrypt_errors : 0
+    decrypt_errors: typeof wg.decrypt_errors === 'number' ? wg.decrypt_errors : 0,
+    unknown_peer_drops:
+      typeof wg.unknown_peer_drops === 'number' ? wg.unknown_peer_drops : 0
   };
   return traffic;
 }

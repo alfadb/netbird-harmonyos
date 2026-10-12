@@ -431,6 +431,17 @@ impl IceMux {
         self.lock().stats
     }
 
+    /// 0.0.26 gap 1: the NON-BLOCKING counter read for the status document
+    /// ([`crate::connector::ConnectorStatus`]'s `ice_mux` tail). The state lock
+    /// is held by the reader pass / the ICE pump while it classifies a datagram,
+    /// so a busy lock answers `None` (this document's "unknown") instead of
+    /// queueing the shell's synchronous status read behind it — the same rule
+    /// [`crate::connector::ConnectorShared::ice_status_sample`] applies to the
+    /// orchestrator lock. Never a fabricated zero.
+    pub fn stats_try(&self) -> Option<MuxStats> {
+        self.shared.st.try_lock().ok().map(|g| g.stats)
+    }
+
     /// The read loop, one pass: read until EAGAIN or the per-pass budget, then
     /// classify and route (upstream `UniversalUDPMuxDefault::ReadFromConn`,
     /// `universal.go:80-108`). Non-blocking; whoever calls it owns the cadence —

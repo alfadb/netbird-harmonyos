@@ -532,6 +532,22 @@ try {
       'supply_installed', 'supply_pending', 'supply_queued', 'relay_ready', 'relay_lanes',
       'relay_opens', 'relay_foreign', 'dns_pending']]
   ];
+  // 0.0.26 gap 2: the VPN_* lifecycle markers mirrored into the app log by
+  // `diagLifecycleMarker` — the event name is the marker lowercased (never a
+  // literal in the source, hence its own list) and every record carries the
+  // verbatim UPPERCASE marker in `detail`.
+  const mirroredMarkers: string[] = [
+    'VPN_PROTECT_BEGIN', 'VPN_PROTECT_RESOLVED', 'VPN_PROTECT_FAIL_CLOSED',
+    'VPN_ICE_MUX_ARMED', 'VPN_ICE_MUX_FAIL', 'VPN_CREATE_BEGIN',
+    'VPN_CREATE_RESOLVED', 'VPN_CREATE_REJECTED', 'VPN_CREATE_INVALID_FD',
+    'VPN_CONNECTION_CREATED', 'VPN_START_FLOW_REJECTED', 'VPN_DESTROY_BEGIN',
+    'VPN_DESTROY_RESOLVED', 'VPN_DESTROY_REJECTED', 'VPN_DESTROY_SKIPPED'
+  ];
+  const badMirrored = mirroredMarkers
+    .filter((mk: string) => core.isPublicEventName(mk.toLowerCase()) !== true);
+  check('every mirrored lifecycle marker has a legal public event name',
+    badMirrored.length === 0 && core.PUBLIC_FIELD_KEYS.indexOf('detail') >= 0,
+    badMirrored.join(','));
   const badNames: string[] = milestones
     .filter((mm: [string, string[]]) => core.isPublicEventName(mm[0]) !== true)
     .map((mm: [string, string[]]) => mm[0]);
@@ -785,8 +801,11 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 16 reviewed names / 20 call sites',
-    milestones.length === 16 && extText.split('this.diagMilestone(').length === 21);
+  check('the wired milestone surface is exactly the 16 reviewed names / 21 helper calls',
+    milestones.length === 16 && extText.split('this.diagMilestone(').length === 22);
+  check('every mirrored lifecycle marker is really wired into the extension',
+    mirroredMarkers.every((mk: string) =>
+      extText.includes(`this.diagLifecycleMarker('${mk}'`)));
   check('the milestones are recorded through the shared non-throwing helper',
     extText.includes('private diagMilestone(name: string, fields: DiagFields): void') &&
     sliceFrom(extText, 'private diagMilestone(name: string',

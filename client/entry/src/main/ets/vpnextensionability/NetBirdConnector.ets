@@ -153,6 +153,10 @@ export interface WgDataplaneStatus {
   rx_bytes_to_tun?: number;
   dropped_no_route: number;
   decrypt_errors: number;
+  // 0.0.26 gap 3: the third device drop counter. Optional on the type so a
+  // document from an older core still reads (the model maps a missing value
+  // to 0).
+  unknown_peer_drops?: number;
   // N13-D1 per-peer session attribution (tail-appended by the core after the
   // carrier_* counters; read by name). UI phase 1: the peers tab's
   // online/direct-relay/handshake source.

@@ -980,6 +980,43 @@ pub fn session_expired_line(pub_key_b64: &str) -> String {
     )
 }
 
+/// 0.0.26 gap 5（真机 0.0.25 §5.1）：`N13_WG` 的**载体/直连切换行**此前不带
+/// peer 标识，多 peer 同时切换时无从归因。`peer=` 一律**追加在行尾**，已有
+/// 字段顺序不变，前缀格式与 [`session_established_line`] 同源（同一个
+/// [`crate::peer_conn::peer_short`]）—— 公开材料：公钥前 8 位，不含密钥本身。
+pub fn carrier_attach_line(kind: &str, replaced: bool, pub_key_b64: &str) -> String {
+    format!(
+        "N13_WG|carrier-attach|kind={kind}|replaced={replaced}|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
+/// `N13_WG|carrier-detach|peer=<公钥前8位>` —— 见 [`carrier_attach_line`]。
+pub fn carrier_detach_line(pub_key_b64: &str) -> String {
+    format!(
+        "N13_WG|carrier-detach|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
+/// `N13_WG|carrier->direct|ice-selected-path|peer=<公钥前8位>` —— ICE 重新
+/// 提名后从载体切回直连的那一次（见 [`carrier_attach_line`]）。
+pub fn carrier_to_direct_line(pub_key_b64: &str) -> String {
+    format!(
+        "N13_WG|carrier->direct|ice-selected-path|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
+/// `N13_WG|direct->carrier|no-ice-endpoint|peer=<公钥前8位>` —— 直连路径消失
+/// 后转上载体的那一次（见 [`carrier_attach_line`]）。
+pub fn direct_to_carrier_line(pub_key_b64: &str) -> String {
+    format!(
+        "N13_WG|direct->carrier|no-ice-endpoint|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
 /// Whether ONE boringtun stats reading is a handshake **strictly later than the
 /// policy expiry instant** of the peer's session (`established_ms +
 /// session_max_ms`) —— the only reading that may re-establish an expired
@@ -1876,13 +1913,14 @@ impl WgDevice {
         };
         let replaced = self.peers[idx].carrier.is_some();
         self.peers[idx].carrier = Some(carrier);
-        emit(&format!(
-            "N13_WG|carrier-attach|kind={}|replaced={replaced}",
+        emit(&carrier_attach_line(
             self.peers[idx]
                 .carrier
                 .as_ref()
                 .map(|c| c.kind())
-                .unwrap_or("?")
+                .unwrap_or("?"),
+            replaced,
+            pub_key_b64,
         ));
         Ok(())
     }
@@ -1899,7 +1937,7 @@ impl WgDevice {
             // the bearer source resets with the carrier: the next dispatch
             // (direct OR a re-attached carrier) counts as a fresh transition
             self.peers[idx].on_carrier = false;
-            emit("N13_WG|carrier-detach");
+            emit(&carrier_detach_line(pub_key_b64));
             true
         } else {
             false
@@ -2472,7 +2510,7 @@ impl WgDevice {
             if self.peers[idx].on_carrier {
                 self.peers[idx].on_carrier = false;
                 self.stats.direct_restores += 1;
-                emit("N13_WG|carrier->direct|ice-selected-path");
+                emit(&carrier_to_direct_line(&self.peers[idx].key_b64));
             }
             let ep = self.peers[idx].endpoint.expect("endpoint checked above");
             let fd = self.egress_fd_of(idx);
@@ -2481,7 +2519,7 @@ impl WgDevice {
         if !self.peers[idx].on_carrier {
             self.peers[idx].on_carrier = true;
             self.stats.carrier_takeovers += 1;
-            emit("N13_WG|direct->carrier|no-ice-endpoint");
+            emit(&direct_to_carrier_line(&self.peers[idx].key_b64));
         }
         let Some(carrier) = self.peers[idx].carrier.clone() else {
             // routed but never given any path: fail-closed, counted
@@ -2916,6 +2954,14 @@ pub struct WgDataplaneStatus {
     pub dropped_no_route: u64,
     /// Inbound datagrams a matched peer failed to process.
     pub decrypt_errors: u64,
+    /// 0.0.26 gap 3 (真机 0.0.25 §5.2): inbound datagrams that matched NO
+    /// registered peer at all — the off-path demux drop of
+    /// [`WgDeviceStats::unknown_peer_drops`]. Exported next to
+    /// `dropped_no_route`/`decrypt_errors` because those three are the
+    /// device's whole drop accounting and only this one was missing from the
+    /// status document (the field existed on the stats struct but never left
+    /// the process).
+    pub unknown_peer_drops: u64,
     // -- N13-D2 relay-carrier counters (appended to the JSON AFTER the
     //    pre-D2 fields; consumers read the head positionally) --
     /// Encapsulated datagrams delivered via the relay carrier (disjoint
@@ -2948,7 +2994,7 @@ impl WgDataplaneStatus {
     /// The `connector_status()` `wg` JSON object.
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\"wg_peers\":[{}]}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\"wg_peers\":[{}]}}",
             crate::util::jbool("fed_socket", self.fed_socket),
             crate::util::jbool("fed_tun", self.fed_tun),
             crate::util::jbool("device_up", self.device_up),
@@ -2961,6 +3007,7 @@ impl WgDataplaneStatus {
             crate::util::jinum("rx_bytes_to_tun", self.rx_bytes_to_tun as i64),
             crate::util::jinum("dropped_no_route", self.dropped_no_route as i64),
             crate::util::jinum("decrypt_errors", self.decrypt_errors as i64),
+            crate::util::jinum("unknown_peer_drops", self.unknown_peer_drops as i64),
             crate::util::jinum("carrier_tx_packets", self.carrier_tx_packets as i64),
             crate::util::jinum("carrier_tx_bytes", self.carrier_tx_bytes as i64),
             crate::util::jinum("carrier_rejects", self.carrier_rejects as i64),
@@ -3904,6 +3951,7 @@ impl WgPeerApplier for WgDeviceFeed {
             st.rx_bytes_to_tun = stats.rx_bytes_to_tun;
             st.dropped_no_route = stats.no_route_drops;
             st.decrypt_errors = stats.decrypt_errors;
+            st.unknown_peer_drops = stats.unknown_peer_drops;
             st.carrier_tx_packets = stats.carrier_tx_packets;
             st.carrier_tx_bytes = stats.carrier_tx_bytes;
             st.carrier_rejects = stats.carrier_rejects;
@@ -4322,7 +4370,8 @@ mod feed_tests {
         assert_eq!(st.to_json(), "{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
              \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
              \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
-             \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
+             \"dropped_no_route\":0,\"decrypt_errors\":0,\"unknown_peer_drops\":0,\
+             \"carrier_tx_packets\":0,\
              \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
              \"direct_restores\":0,\"wg_peers\":[]}");
 
@@ -5719,5 +5768,71 @@ mod session_expiry_tests {
             assert!(a.dev.peer_ready(&kb) && a.dev.tunnel_ready(), "cycle {cycle}: online");
             anchor = recovered;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests (0.0.26 device-observability gaps: the N13_WG bearer-transition lines
+// carry their peer, and the device's third drop counter is exported in the
+// status document)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+
+    /// 0.0.26 gap 5（真机 0.0.25 §5.1）：载体 attach/detach 与 direct↔carrier
+    /// 四条切换行都带 `peer=<公钥前8位>`（与 `session-established` 同源同格式）。
+    #[test]
+    fn n13_bearer_transition_lines_carry_the_peer_prefix() {
+        // 8-char alphanumeric prefix of the base64 public key (peer_short)
+        let key = "bjEzLWQxLXBlZXItc2Vzc2lvbg==";
+        assert_eq!(
+            carrier_attach_line("relay", false, key),
+            "N13_WG|carrier-attach|kind=relay|replaced=false|peer=bjEzLWQx"
+        );
+        assert_eq!(
+            carrier_attach_line("relay", true, key),
+            "N13_WG|carrier-attach|kind=relay|replaced=true|peer=bjEzLWQx"
+        );
+        assert_eq!(
+            carrier_detach_line(key),
+            "N13_WG|carrier-detach|peer=bjEzLWQx"
+        );
+        assert_eq!(
+            carrier_to_direct_line(key),
+            "N13_WG|carrier->direct|ice-selected-path|peer=bjEzLWQx"
+        );
+        assert_eq!(
+            direct_to_carrier_line(key),
+            "N13_WG|direct->carrier|no-ice-endpoint|peer=bjEzLWQx"
+        );
+    }
+
+    /// 0.0.26 gap 3（真机 0.0.25 §5.2）：`unknown_peer_drops` 与
+    /// `dropped_no_route`/`decrypt_errors` 并排导出（0.0.25 里它只活在 stats
+    /// 结构体上，从未出现在状态文档里）。
+    #[test]
+    fn dataplane_status_json_exports_unknown_peer_drops() {
+        let st = WgDataplaneStatus {
+            dropped_no_route: 11,
+            decrypt_errors: 1,
+            unknown_peer_drops: 42,
+            ..Default::default()
+        };
+        let json = st.to_json();
+        assert!(
+            json.contains(
+                "\"dropped_no_route\":11,\"decrypt_errors\":1,\"unknown_peer_drops\":42,\
+                 \"carrier_tx_packets\":0,"
+            ),
+            "{json}"
+        );
+        // the not-started snapshot is an honest zero, not an absent field
+        assert!(
+            WgDataplaneStatus::not_started().to_json().contains("\"unknown_peer_drops\":0,"),
+            "{}",
+            WgDataplaneStatus::not_started().to_json()
+        );
     }
 }

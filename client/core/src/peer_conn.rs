@@ -745,6 +745,48 @@ pub(crate) fn peer_short(key: &str) -> String {
     key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
 }
 
+/// 0.0.26 gap 4：[`IceEvent::SelectedPair`] 的落盘证据行，唯一构造点（单测
+/// 钉住格式）。`endpoint_changed=false` = 这次提名选中的远端地址与**上一次
+/// 落配成功**的地址相同（物理网络换代后重新走同一条对端路径，真机 0.0.25
+/// §5.4 的 `HkPMIwdu` 就是这种形态）；`true` = 真的换了远端 endpoint。
+///
+/// 公开运行材料：ip + port + 一个布尔，不含任何密钥/凭据。
+pub(crate) fn selected_pair_line(addr: [u8; 4], port: u16, endpoint_changed: bool) -> String {
+    format!(
+        "N5_ICE|selected-pair|{}:{}|endpoint_changed={}",
+        std::net::Ipv4Addr::from(addr),
+        port,
+        endpoint_changed
+    )
+}
+
+/// 0.0.26 gap 1：`N5e_ICE|mux|…` 计数器行的**唯一**构造点，两处共用——
+/// 回退读循环（`read` = 这一拍 drain 出的包数，`periodic=0`）与生产路径的
+/// 周期性快照（`read=0`，`periodic=1`，见 [`HEALTH_SUMMARY_MS`]）。
+///
+/// 字段顺序是**追加式**的：0.0.25 的既有六个字段（`read`/`xor_hit`/
+/// `xor_fill`/`overlay_drop`/`stun_unknown`/`data_unknown`）保持原位与原
+/// 拼写，0.0.26 在行尾补 `xor_miss`/`xor_expired`/`queue_drop`/`periodic`
+/// —— 真机报告 §4.3 要的 `xor_miss` 正是此前完全没有的那一个。
+pub(crate) fn mux_stats_line(
+    read: usize,
+    s: &crate::ice_mux::MuxStats,
+    periodic: bool,
+) -> String {
+    format!(
+        "N5e_ICE|mux|read={read}|xor_hit={}|xor_fill={}|overlay_drop={}|stun_unknown={}|data_unknown={}|xor_miss={}|xor_expired={}|queue_drop={}|periodic={}",
+        s.xor_hits,
+        s.xor_filled,
+        s.overlay_dropped,
+        s.stun_unknown,
+        s.data_unknown,
+        s.xor_misses,
+        s.xor_expired,
+        s.queue_dropped,
+        u8::from(periodic)
+    )
+}
+
 /// ICE controlling 角色的确定性决胜（官方语义，`client/internal/peer/conn.go`：
 /// `isController(config) = config.LocalKey > config.Key` —— 本端 WG 公钥的
 /// base64 字符串**大于**对端公钥 → 本端 controlling；否则 controlled。
@@ -857,6 +899,13 @@ struct PeerConn {
     pending_remote: Vec<Candidate>,
     selected_remote: Option<([u8; 4], u16)>,
     endpoint_applied: bool,
+    /// 0.0.26 gap 4（真机 0.0.25 §5.4，peer `HkPMIwdu`）：**最后一次真的落配
+    /// 成功**的远端 endpoint。`selected_remote` 是「当前活会话选中的对」，
+    /// 会话一拆（`drop_session`）就清空；本字段**刻意不被拆会话清掉**，因为
+    /// 「物理网络换代后重新提名到同一个远端地址」这件事只有跨会话比较才看得
+    /// 出来 —— 它正是 `N5_ICE|selected-pair|…|endpoint_changed=false` 的判据
+    /// （地址真的变了才是 `true`）。
+    last_applied_endpoint: Option<([u8; 4], u16)>,
     last_error: Option<ErrorClass>,
     /// 当前会话的创建时刻（注入时钟；0 = 无会话）。**纯观测**（日志
     /// `round=`）：曾经的 9 s 截止期起点已随 `START_DEADLINE_MS`（已删除）
@@ -902,6 +951,7 @@ impl PeerConn {
             pending_remote: Vec::new(),
             selected_remote: None,
             endpoint_applied: false,
+            last_applied_endpoint: None,
             last_error: None,
             session_at_ms: 0,
             timeout_ms,
@@ -1064,6 +1114,12 @@ pub struct PeerIceOrchestrator {
     /// harness 用 [`PeerIceOrchestrator::set_guard_rng`] 换成定序样本，才能逐值
     /// 断言 3/6/12/24 s 序列。
     guard_rng: Box<dyn Rng + Send>,
+    /// 0.0.26 gap 1（真机 0.0.25 §4.3）：上一次周期性 mux 计数行的时刻（0 =
+    /// 尚未打过）。回退读循环那一行是「这一拍读了多少」，而生产跑的是 mux
+    /// 自己的读线程 → 它一次都不打，`xor_hit/xor_miss` 在设备日志里
+    /// 不可观测；本字段驱动与健康摘要同一节奏（[`HEALTH_SUMMARY_MS`]）的
+    /// 同一行计数器快照。
+    last_mux_stats_ms: u64,
 }
 
 impl PeerIceOrchestrator {
@@ -1087,6 +1143,7 @@ impl PeerIceOrchestrator {
             exec: Arc::new(ThreadGatherExec),
             mux: Arc::new(Mutex::new(None)),
             guard_rng: Box::new(OsRandom),
+            last_mux_stats_ms: 0,
         }
     }
 
@@ -1115,6 +1172,14 @@ impl PeerIceOrchestrator {
     /// 当前共享 mux（若已就位）。
     pub fn ice_mux(&self) -> Option<Arc<crate::ice_mux::IceMux>> {
         self.mux.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// 0.0.26 gap 1：mux 计数器的**非阻塞**快照，供
+    /// `connector_status()` 的 `ice_mux` 尾字段使用。`None` = 没有 mux，
+    /// 或 mux 的状态锁此刻被读线程/泵持有（本文件「busy = 未知，绝不编造
+    /// 零」的同一约定）。
+    pub fn mux_stats_try(&self) -> Option<crate::ice_mux::MuxStats> {
+        self.ice_mux().and_then(|m| m.stats_try())
     }
 
     /// STAGE 2 的 fail-closed 建 mux 路径（主机 CLI 与 host 测试）：从受保护
@@ -1672,11 +1737,22 @@ impl PeerIceOrchestrator {
                 let read = mux.drain();
                 if read > 0 {
                     let s = mux.stats();
-                    crate::hilog::emit(&format!(
-                        "N5e_ICE|mux|read={read}|xor_hit={}|xor_fill={}|overlay_drop={}|stun_unknown={}|data_unknown={}",
-                        s.xor_hits, s.xor_filled, s.overlay_dropped, s.stun_unknown, s.data_unknown
-                    ));
+                    crate::hilog::emit(&mux_stats_line(read, &s, false));
                 }
+            }
+        }
+        // 0.0.26 gap 1（真机 0.0.25 §4.3）：上面那一行是回退读循环的「这一拍
+        // 读了多少」，生产路径（mux 自己的读线程）**一次都不打** → `xor_hit` /
+        // `xor_miss` 在真机日志里不可观测。这里补一行**同一形状**的计数器
+        // 快照，节奏与健康摘要同源（[`HEALTH_SUMMARY_MS`]，`periodic=1` 标明
+        // 它不是某一拍的读结果）。只读 `stats()`，不 drain、不改任何状态。
+        if self.last_mux_stats_ms == 0
+            || now_ms.saturating_sub(self.last_mux_stats_ms) >= HEALTH_SUMMARY_MS
+        {
+            if let Some(mux) = self.ice_mux() {
+                self.last_mux_stats_ms = now_ms;
+                let s = mux.stats();
+                crate::hilog::emit(&mux_stats_line(0, &s, true));
             }
         }
         // 壳层换过 mux（物理网络切换后重新 protect + feed）：仍骑旧 mux 的
@@ -2353,6 +2429,16 @@ impl PeerIceOrchestrator {
                     let peer = &mut self.peers[idx];
                     if let Ok(addr) = parse_ipv4(&remote.address) {
                         peer.selected_remote = Some((addr, remote.port));
+                        // 0.0.26 gap 4：提名证据**先打**、且**无条件**打——
+                        // 「选中了」是这一事件本身的事实，落配成功/失败是它
+                        // 后面的一步；0.0.25 只在落配成功分支里打，于是
+                        // 「提名了但 attach/落配失败」的对端在日志里完全没有
+                        // 提名痕迹。`endpoint_changed` 与上一次**真的落配成功**
+                        // 的地址比较（`last_applied_endpoint` 刻意跨会话保留），
+                        // 所以「物理网络换代后沿用了同一个远端地址」这条路径
+                        // 也有独立一行（真机 0.0.25 §5.4 的 `HkPMIwdu`）。
+                        let endpoint_changed = peer.last_applied_endpoint != Some((addr, remote.port));
+                        crate::hilog::emit(&selected_pair_line(addr, remote.port, endpoint_changed));
                         // N11：WG 骑选中连接 —— 先把选中 pair 的本地 socket
                         // dup 进设备做 egress，再落配 endpoint（落配即触发
                         // 握手，握手必须从选中路径发出）。attach 失败 =
@@ -2372,18 +2458,13 @@ impl PeerIceOrchestrator {
                         match landed {
                             Ok(()) => {
                                 peer.endpoint_applied = true;
-                                // selected-pair evidence (public runtime
-                                // material: ip + port only)
+                                peer.last_applied_endpoint = Some((addr, remote.port));
+                                // 本地侧 egress 证据（公开运行材料：ip+port）
                                 let local = peer
                                     .session
                                     .as_ref()
                                     .and_then(|s| s.selected_pair())
                                     .map(|(l, _)| l);
-                                crate::hilog::emit(&format!(
-                                    "N5_ICE|selected-pair|{}:{}",
-                                    std::net::Ipv4Addr::from(addr),
-                                    remote.port
-                                ));
                                 if let Some(l) = local {
                                     let laddr = parse_ipv4(&l.address).unwrap_or([0, 0, 0, 0]);
                                     crate::hilog::emit(&format!(
@@ -4656,6 +4737,53 @@ mod tests {
         assert_eq!(
             orch.peers[0].session.as_ref().expect("session").local_candidates().len(),
             1
+        );
+    }
+
+    // ---- 0.0.26 gap 1 / gap 4: the two new evidence lines -------------------
+
+    /// 0.0.26 gap 1（真机 0.0.25 §4.3）：周期性 mux 计数行的格式与字段顺序
+    /// 钉死在这里。0.0.25 的既有六个字段保持原位（`read`…`data_unknown`），
+    /// 新增的 `xor_miss`/`xor_expired`/`queue_drop`/`periodic` 追加在行尾——
+    /// 真机报告要的 `xor_miss` 正是此前完全没有的那个。
+    #[test]
+    fn mux_stats_line_pins_the_counter_fields() {
+        let s = crate::ice_mux::MuxStats {
+            reads: 9,
+            xor_hits: 3,
+            xor_misses: 5,
+            xor_expired: 1,
+            xor_filled: 2,
+            overlay_dropped: 4,
+            stun_unknown: 6,
+            data_unknown: 7,
+            queue_dropped: 8,
+        };
+        assert_eq!(
+            mux_stats_line(0, &s, true),
+            "N5e_ICE|mux|read=0|xor_hit=3|xor_fill=2|overlay_drop=4|stun_unknown=6|\
+             data_unknown=7|xor_miss=5|xor_expired=1|queue_drop=8|periodic=1"
+        );
+        // the fallback read-loop shape stays the SAME head, `read` = this pass
+        assert_eq!(
+            mux_stats_line(11, &s, false),
+            "N5e_ICE|mux|read=11|xor_hit=3|xor_fill=2|overlay_drop=4|stun_unknown=6|\
+             data_unknown=7|xor_miss=5|xor_expired=1|queue_drop=8|periodic=0"
+        );
+    }
+
+    /// 0.0.26 gap 4（真机 0.0.25 §5.4）：提名证据行的格式——远端 `ip:port`
+    /// 之后追加 `endpoint_changed`，所以「重新提名到同一个远端地址」与
+    /// 「真的换了远端路径」在日志里可区分，而不是两条一模一样的行。
+    #[test]
+    fn selected_pair_line_marks_an_unchanged_endpoint() {
+        assert_eq!(
+            selected_pair_line([47, 251, 179, 205], 51820, false),
+            "N5_ICE|selected-pair|47.251.179.205:51820|endpoint_changed=false"
+        );
+        assert_eq!(
+            selected_pair_line([192, 168, 50, 8], 37538, true),
+            "N5_ICE|selected-pair|192.168.50.8:37538|endpoint_changed=true"
         );
     }
 }

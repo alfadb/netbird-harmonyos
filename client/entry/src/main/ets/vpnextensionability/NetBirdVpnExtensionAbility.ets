@@ -1141,6 +1141,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_CREATE_REJECTED|requestId=%{public}s|phase=connect-run-active|' +
         'summary=connector-already-running',
         this.requestId);
+      this.diagLifecycleMarker('VPN_CREATE_REJECTED', 'phase=connect-run-active');
       // Still an ANSWER, not a failure: an entry that arrives while a run is
       // active is the idempotent "already running" answer. It needs no evidence
       // document of its own: the ACTIVE run is publishing its own status document
@@ -1162,10 +1163,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       connection = vpnExtension.createVpnConnection(this.context);
       this.connection = connection;
       hilog.info(DOMAIN, TAG, 'VPN_CONNECTION_CREATED|requestId=%{public}s', this.requestId);
+      this.diagLifecycleMarker('VPN_CONNECTION_CREATED', '');
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_CREATE_REJECTED|requestId=%{public}s|phase=create-connection|summary=%{public}s',
         this.requestId, safeError(error as Error));
+      this.diagLifecycleMarker('VPN_CREATE_REJECTED', 'phase=create-connection');
       return;
     }
 
@@ -1187,6 +1190,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_START_FLOW_REJECTED|requestId=%{public}s|summary=%{public}s',
         this.requestId, safeError(error));
+      this.diagLifecycleMarker('VPN_START_FLOW_REJECTED', 'stage=start-flow');
     });
   }
 
@@ -1298,6 +1302,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     } catch (error) {
       // never into the VPN path
     }
+  }
+
+  // 0.0.26 gap 2 (真机 0.0.25 §2 / 手机报告 §2): the device HiLog ring keeps
+  // only minutes of this domain (the phone retained 12 domain-A02900 lines in
+  // six days), so the `VPN_*` lifecycle markers were NOT recoverable after the
+  // fact. They now ALSO land in the app's own netbird-vpn.log through the
+  // EXISTING diagnostics/tee path (`diagMilestone` -> `diagEvent` -> sink ->
+  // `phoneLogAppend`); the HiLog output itself is untouched.
+  //
+  // `detail` carries the VERBATIM marker token (SAFE_CHARS-safe; kept under the
+  // core's 32-char opaque-run threshold so the credential guard cannot redact
+  // it) so a grep for the HiLog marker matches the persisted record; the event
+  // name is the same token lowercased (the core's event-name grammar accepts
+  // only [a-z0-9_], <= 40 chars). `detail` is a short token from the HiLog
+  // line's own vocabulary (`stage=…` / `phase=…`) — the full line is still on
+  // HiLog.
+  private diagLifecycleMarker(marker: string, detail: string): void {
+    const markerFields: DiagFields = {
+      'detail': detail.length > 0 ? marker + ':' + detail : marker
+    };
+    this.diagMilestone(marker.toLowerCase(), markerFields);
   }
 
   // Writer health ONCE per minute, riding the EXISTING 5 s watcher tick (no
@@ -2196,6 +2221,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_BEGIN|requestId=%{public}s|address=%{public}s|prefixLength=%{public}d',
       this.requestId, merged.tunnelAddress, merged.tunnelPrefixLength);
+    this.diagLifecycleMarker('VPN_CREATE_BEGIN', 'phase=create');
     const rawCreate: Promise<number> = connection.create(config);
     this.createPromise = rawCreate.then((fd: number): Promise<CreateOutcome> => {
       return this.settleCreate(fd, gen);
@@ -2204,6 +2230,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_CREATE_REJECTED|requestId=%{public}s|phase=create|summary=%{public}s',
         this.requestId, safeError(error));
+      this.diagLifecycleMarker('VPN_CREATE_REJECTED', 'phase=create');
       return {
         destroyRequired: false,
         accepted: false,
@@ -4532,6 +4559,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.error(DOMAIN, TAG,
           'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=explicit-logout|summary=%{public}s',
           this.requestId, safeError(err));
+        this.diagLifecycleMarker('VPN_DESTROY_REJECTED', 'phase=explicit-logout');
       });
     } finally {
       // consume exactly once, whatever happened above
@@ -5048,6 +5076,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=connector-death|summary=%{public}s',
         this.requestId, safeError(error));
+      this.diagLifecycleMarker('VPN_DESTROY_REJECTED', 'phase=connector-death');
     });
   }
 
@@ -5711,6 +5740,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=recreate-fail-closed|summary=%{public}s',
         this.requestId, safeError(err));
+      this.diagLifecycleMarker('VPN_DESTROY_REJECTED', 'phase=recreate');
     });
   }
 
@@ -6218,6 +6248,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_RESOLVED|requestId=%{public}s|fd=%{public}s|accepted=%{public}s|marker=%{public}s',
       this.requestId, String(fd), String(accepted), marker);
+    this.diagLifecycleMarker('VPN_CREATE_RESOLVED', accepted ? 'state=accepted' : 'state=rejected');
     if (accepted) {
       // N2-H I3a (v3.1 §2.1 C2 (4) / R-2③): the initial leg's ACCEPTANCE
       // ANCHOR (`VPN_CREATE_RESOLVED|accepted=true`) is where this generation
@@ -6229,6 +6260,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_CREATE_INVALID_FD|requestId=%{public}s|fd=%{public}s|marker=CREATE_INVALID_DESTROY_REQUIRED',
         this.requestId, String(fd));
+      this.diagLifecycleMarker('VPN_CREATE_INVALID_FD', 'state=invalid');
       this.destroyOnce('invalid-create-resolution').catch((error: Error) => {
         hilog.error(DOMAIN, TAG,
           'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=invalid-create-unexpected|summary=%{public}s',
@@ -6494,6 +6526,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (connection === undefined) {
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=connection-missing', this.requestId);
+      this.diagLifecycleMarker('VPN_PROTECT_FAIL_CLOSED', 'stage=connection-missing');
       return false;
     }
 
@@ -6509,6 +6542,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=outbound-open-throw|summary=%{public}s',
         this.requestId, safeError(error as Error));
+      this.diagLifecycleMarker('VPN_PROTECT_FAIL_CLOSED', 'stage=outbound-open-throw');
       return false;
     }
     if (fd < 0 || bindRc !== 0) {
@@ -6517,12 +6551,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=outbound-open|fd=%{public}d|' +
         'bindRc=%{public}d|bindErrno=%{public}d',
         this.requestId, fd, bindRc, bindErrno);
+      this.diagLifecycleMarker('VPN_PROTECT_FAIL_CLOSED', 'stage=outbound-open');
       return false;
     }
     // Keep this original local across await: destroy audits only published fds.
     // A late protect result after teardown must never publish an orphan fd.
     hilog.info(DOMAIN, TAG,
       'VPN_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d', this.requestId, fd);
+    this.diagLifecycleMarker('VPN_PROTECT_BEGIN', 'stage=protect');
 
     const protectedOk: boolean = await this.protectSocketWithBox(connection, fd, 'Wb');
     if (!protectedOk || this.destroyRequested || this.destroyPromise !== undefined ||
@@ -6530,12 +6566,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       socketSupplyCloseFd(fd);
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=protect|fd=%{public}d', this.requestId, fd);
+      this.diagLifecycleMarker('VPN_PROTECT_FAIL_CLOSED', 'stage=protect');
       return false;
     }
     this.outboundSocketFd = fd;
     this.outboundProtected = true;
     hilog.info(DOMAIN, TAG,
       'VPN_PROTECT_RESOLVED|requestId=%{public}s|fd=%{public}d|datagramsFlown=none-yet', this.requestId, fd);
+    this.diagLifecycleMarker('VPN_PROTECT_RESOLVED', 'stage=protect');
     return true;
   }
 
@@ -6577,6 +6615,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       this.n2CdProductionBlocked(epoch)) {
       hilog.error(DOMAIN, TAG,
         'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=stale-or-gated', this.requestId);
+      this.diagLifecycleMarker('VPN_ICE_MUX_FAIL', 'stage=stale-or-gated');
       return false;
     }
     try {
@@ -6585,6 +6624,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.error(DOMAIN, TAG,
           'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=arm|error=%{public}s',
           this.requestId, armed.error ?? 'no-message');
+        this.diagLifecycleMarker('VPN_ICE_MUX_FAIL', 'stage=arm');
         return false;
       }
       const fedLine: string = `VPN_ICE_MUX_ARMED|requestId=${this.requestId}|` +
@@ -6593,11 +6633,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         `wall_ms=${Date.now()}`;
       hilog.warn(DOMAIN, TAG, '%{public}s', fedLine);
       this.n2RingAppend(fedLine);
+      // 0.0.26 gap 2: the arm marker also lands in netbird-vpn.log (the N2 ring
+      // is off on device: `N2_RING_STATS|file=none|enabled=false`), so the
+      // generation's arm stays quotable after the HiLog ring rotates.
+      this.diagLifecycleMarker('VPN_ICE_MUX_ARMED', 'stage=arm');
       return true;
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=arm-throw|summary=%{public}s',
         this.requestId, safeError(error as Error));
+      this.diagLifecycleMarker('VPN_ICE_MUX_FAIL', 'stage=arm-throw');
       return false;
     }
   }
@@ -7268,6 +7313,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (createPromise === undefined) {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_SKIPPED|requestId=%{public}s|reason=create-not-started-or-sync-rejected', this.requestId);
+      this.diagLifecycleMarker('VPN_DESTROY_SKIPPED', 'reason=create-not-started');
       return;
     }
 
@@ -7278,6 +7324,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (!outcome.destroyRequired) {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_SKIPPED|requestId=%{public}s|reason=%{public}s', this.requestId, outcome.reason);
+      this.diagLifecycleMarker('VPN_DESTROY_SKIPPED', 'reason=not-required');
       return;
     }
 
@@ -7285,6 +7332,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (connection === undefined) {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_SKIPPED|requestId=%{public}s|reason=connection-invariant-missing', this.requestId);
+      this.diagLifecycleMarker('VPN_DESTROY_SKIPPED', 'reason=connection-missing');
       return;
     }
 
@@ -7295,6 +7343,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG,
       'VPN_DESTROY_BEGIN|requestId=%{public}s|trigger=%{public}s|createAccepted=%{public}s|reason=%{public}s',
       this.requestId, this.destroyTrigger, String(outcome.accepted), outcome.reason);
+    this.diagLifecycleMarker('VPN_DESTROY_BEGIN', 'stage=destroy');
 
     try {
       await connection.destroy();
@@ -7304,6 +7353,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_RESOLVED|requestId=%{public}s|fdOpen=%{public}s|fdMarker=%{public}s',
         this.requestId, String(postDestroy.open), marker);
+      this.diagLifecycleMarker('VPN_DESTROY_RESOLVED', 'result=ok');
       // 2026-10-08: the teardown's own outcome, recorded from INSIDE
       // runDestroyOnce so it covers every trigger (onDestroy, connector death,
       // recreate fail-closed, invalid create) — and so it is enqueued before
@@ -7320,6 +7370,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=destroy|fdOpen=%{public}s|' +
         'fdMarker=%{public}s|summary=%{public}s',
         this.requestId, String(postDestroy.open), marker, safeError(error as Error));
+      this.diagLifecycleMarker('VPN_DESTROY_REJECTED', 'phase=destroy');
       const milestoneFields: DiagFields = {
         'result': 'fail', 'stage': 'destroy', 'trigger': this.destroyTrigger
       };
