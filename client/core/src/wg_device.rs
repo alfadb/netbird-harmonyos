@@ -1446,6 +1446,8 @@ impl WgDevice {
 
     /// Our current TUN dup fd number (`None` if the TunFd were closed —
     /// observability only; always distinct from the shell-side raw numbers).
+    /// 0.0.28: also the data-plane pump's poll target — TUN readiness is the
+    /// forwarding path's wake source, so a packet never waits for a tick.
     pub fn tun_fd(&self) -> Option<i32> {
         self.tun.fd()
     }
@@ -1493,6 +1495,64 @@ impl WgDevice {
     /// The caller dups it; this device keeps and closes only its OWN dup.
     pub fn socket_fd(&self) -> Option<i32> {
         self.fd
+    }
+
+    /// The injected-clock instant at which [`WgDevice::tick`] next has real work
+    /// — the data-plane pump's deadline source (0.0.28; it replaces the fixed
+    /// tick). `None` = no pending device timer at all. Mirrors `tick`'s own
+    /// branches exactly (no timer is added or changed):
+    ///
+    /// - established peer: `session_established_ms + cfg.session_max_ms`
+    ///   (policy expiry) and `last_outbound_ms + cfg.keepalive_ms` (or "now"
+    ///   when nothing was ever sent — `tick` sends the first keepalive at once);
+    /// - peer with a path but no live session (or expired): the campaign
+    ///   deadline `first_init_ms + cfg.hs_deadline_ms`, the retry
+    ///   `last_init_ms + cfg.hs_retry_ms`, or "now" when the campaign is armed
+    ///   but never fired (`tick`'s `None => true` arm).
+    ///
+    /// Deliberately NOT capped here: the boringtun bound (its internal
+    /// rekey/cookie timers have no queryable next-instant, and its own FFI doc
+    /// recommends a 100 ms cadence) is the pump's WAIT bound, applied by
+    /// [`WgDeviceFeed::pump_wait_plan`] — so this stays a pure timer query and
+    /// is exactly assertable in tests.
+    ///
+    /// Diagnostics-only branches of `tick` (the N2 tees/socket trace, armed only
+    /// in evidence runs) need no extra deadline: their own cadences are seconds
+    /// and the pump's `WG_PUMP_TICK_MS` wait bound already services them.
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
+        let mut next: Option<u64> = None;
+        let mut push = |t: u64| {
+            next = Some(match next {
+                Some(n) => n.min(t),
+                None => t,
+            });
+        };
+        for idx in 0..self.peers.len() {
+            let p = &self.peers[idx];
+            if p.session_established && !p.expired {
+                push(p.session_established_ms.saturating_add(self.cfg.session_max_ms));
+                match p.last_outbound_ms {
+                    Some(t) => push(t.saturating_add(self.cfg.keepalive_ms)),
+                    None => push(now_ms),
+                }
+            }
+            if self.has_path(idx) && (!p.session_established || p.expired) {
+                match p.first_init_ms {
+                    Some(t0) => {
+                        push(t0.saturating_add(self.cfg.hs_deadline_ms));
+                        match p.last_init_ms {
+                            Some(t) => push(t.saturating_add(self.cfg.hs_retry_ms)),
+                            None => push(now_ms),
+                        }
+                    }
+                    // The campaign deadline already fired (`tick` cleared it):
+                    // with a path and no session the next tick initiates at
+                    // once, exactly like `tick`'s `Some(_) | None` arm.
+                    None => push(now_ms),
+                }
+            }
+        }
+        next
     }
 
     /// OFFICIAL-ALIGNMENT STAGE 3: hand the socket's read half to the shared
@@ -3269,12 +3329,57 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
 // WgDeviceFeed — the PRODUCTION-DEFAULT seam (N7)
 // ---------------------------------------------------------------------------
 
-/// Pump cadence for the production data-plane thread (same shape as the ICE
-/// pump; the device itself is clock-injected — this loop only FEEDS it).
-/// 100 ms → 10 ms (100 Hz) so `DRAIN_MAX` frames are actually available per
-/// second: 64 frames × 100 cycles/s. This is the loop's only idle cost (one
-/// wakeup per tick, each doing non-blocking poll/read work).
-pub const WG_PUMP_TICK_MS: u64 = 10;
+/// Upper bound on the production data-plane thread's WAIT (the device itself is
+/// clock-injected — this loop only FEEDS it). 0.0.28: the loop is no longer a
+/// fixed 10 ms tick; it blocks in `poll` on the TUN fd (and, while the device
+/// still owns its own read half, the outer socket fd) until the earliest WG
+/// timer deadline, and **a packet makes the fd readable so forwarding never
+/// waits for a tick at all**.
+///
+/// Chosen bound = boringtun's own recommendation for its state-keeping entry
+/// point: the FFI doc of `wireguard_tick` says *"This is a state keeping
+/// function, that need to be called periodically. Recommended interval: 100ms"*
+/// (`boringtun-0.7.1/src/ffi/mod.rs:354-355`, the same text in
+/// `src/wireguard_ffi.h`), and boringtun's own device calls `update_timers` per
+/// peer from a 250 ms periodic event (`src/device/mod.rs:573`). So 100 ms is
+/// the coarsest interval at which boringtun's rekey/cookie housekeeping is
+/// documented to be sane, and it is also an upper bound on how late our own
+/// device-clock timers (25 s keepalive, 5 s handshake retry, 540 s session
+/// expiry) can fire. Every one of those is computed exactly
+/// ([`WgDevice::next_deadline_ms`]) — this constant only bounds the wait when
+/// the earliest of them is farther away.
+///
+/// The 0.0.5 raise 100 ms → 10 ms (`docs/direct-throughput-fix.md`) was for the
+/// `DRAIN_MAX`-per-tick BUDGET (64 frames × ticks/s); with readiness-driven
+/// polling the budget is consumed once per readable pass and the loop re-drains
+/// immediately while the budget is exhausted, so throughput no longer scales
+/// with this number.
+pub const WG_PUMP_TICK_MS: u64 = 100;
+
+/// One wait plan for the production data-plane pump: the fds whose readiness
+/// means "data to move" plus the bounded timeout. Pure data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WgPumpWait {
+    /// The device TUN fd, once the device is up and has adopted a TUN.
+    pub tun_fd: Option<i32>,
+    /// The device's own outer UDP socket fd — ONLY while the device owns its
+    /// read half (`WgDevice::shared_socket_reader == false`). With the shared
+    /// ICE mux armed, that mux's reader thread is the ONE reader (upstream
+    /// `device_kernel_unix.go:109`) and delivers non-STUN datagrams straight
+    /// into the device, so polling here would be a second reader on one fd.
+    pub wg_fd: Option<i32>,
+    /// Wait upper bound in ms: `min(earliest WG timer, WG_PUMP_TICK_MS)`.
+    pub timeout_ms: u64,
+}
+
+/// Anti-spin floor for a device timer that is ALREADY due when the pump comes
+/// back around — i.e. a retry that cannot make progress (a keepalive/handshake
+/// initiation whose `sendto` on a dead socket or a refusing bearer keeps
+/// failing: the anchor `last_outbound_ms`/`last_init_ms` is only written on a
+/// successful send). The pre-0.0.28 fixed tick bounded that state at 10 ms, and
+/// this keeps the same bound instead of letting `poll(0)` spin the loop at
+/// 100 % CPU. A data-bearing wait is unaffected: readiness wakes it at once.
+pub const WG_PUMP_DUE_FLOOR_MS: u64 = 10;
 
 /// Why a [`WgDeviceFeed::feed_wg_socket`] / [`WgDeviceFeed::feed_tun`] call
 /// was refused (stable tokens only — they cross the NAPI error surface).
@@ -3575,28 +3680,118 @@ impl WgDeviceFeed {
         g.device.as_ref().map(|d| d.with_device(f))
     }
 
-    /// Spawn the PRODUCTION data-plane pump thread: every
-    /// [`WG_PUMP_TICK_MS`] it drives `service_tun` / `service_udp` / `tick`
-    /// on the real monotonic clock while a device is up, and exits on the
-    /// connector stop flag. A detached std::thread (never blocks a runtime
-    /// worker); without feeds it simply no-ops until the device appears.
+    /// Spawn the PRODUCTION data-plane pump thread (0.0.28: event-driven). It
+    /// blocks in `poll` on the TUN fd — and, while the device still owns its own
+    /// read half, the outer socket fd — with a timeout of
+    /// `min(earliest WG timer, WG_PUMP_TICK_MS)`, then drives `service_tun` /
+    /// `service_udp` / `tick` on the real monotonic clock while a device is up,
+    /// and exits on the connector stop flag. A ready packet wakes it at once, so
+    /// forwarding never waits for a tick; a `DRAIN_MAX`-exhausting pass re-polls
+    /// with a zero timeout instead of waiting. A detached std::thread (never
+    /// blocks a runtime worker); without feeds it idles at the wait bound until
+    /// the device appears.
     pub fn spawn_data_plane_pump(self: &Arc<Self>, stop_flag: Arc<AtomicBool>) {
         let slot = Arc::clone(self);
         let _ = std::thread::Builder::new().name("wg-pump".into()).spawn(move || {
+            // `saturated` = the previous pass exhausted `DRAIN_MAX` on either
+            // read half: re-drain immediately (poll timeout 0) instead of
+            // waiting for a timer — this is what keeps the per-pass budget from
+            // becoming a throughput cap.
+            let mut saturated = false;
             while !stop_flag.load(Ordering::Acquire) {
-                std::thread::sleep(core::time::Duration::from_millis(WG_PUMP_TICK_MS));
+                let plan = slot.pump_wait_plan(sys::mono_ms(), saturated);
+                saturated = false;
+                let t0 = sys::mono_ms();
+                let ready = Self::pump_wait(&plan);
+                if ready == 0
+                    && plan.timeout_ms > 0
+                    && sys::mono_ms().saturating_sub(t0) == 0
+                {
+                    // `poll` returned at once with NOTHING readable: a dead fd's
+                    // POLLERR/POLLHUP/POLLNVAL, or EINTR. Re-entering `poll`
+                    // immediately would spin the thread at 100 %; the pre-0.0.28
+                    // fixed tick bounded exactly this state at the same 10 ms
+                    // floor (a live fd with data is unaffected: `ready > 0`).
+                    sys::sleep_ms(WG_PUMP_DUE_FLOOR_MS);
+                }
                 if stop_flag.load(Ordering::Acquire) {
                     return;
                 }
                 let now = sys::mono_ms();
                 // one pump step; no-op while the device is not up
-                let _ = slot.with_device(|d| {
-                    d.service_tun(now);
-                    d.service_udp(now);
+                if let Some((tun_n, udp_n)) = slot.with_device(|d| {
+                    let tun_n = d.service_tun(now);
+                    let udp_n = d.service_udp(now);
                     d.tick(now);
-                });
+                    (tun_n, udp_n)
+                }) {
+                    saturated = tun_n >= DRAIN_MAX || udp_n >= DRAIN_MAX;
+                }
             }
         });
+    }
+
+    /// The pump's next wait plan: which fds to `poll` and for how long. Computed
+    /// under the feed lock (a brief take — nothing is held while waiting).
+    /// `saturated` = the previous pass consumed the whole drain budget on either
+    /// half, so the timeout is 0 (drain again at once, never wait).
+    pub fn pump_wait_plan(&self, now_ms: u64, saturated: bool) -> WgPumpWait {
+        let g = self.inner.lock_poison();
+        let Some(dev) = g.device.as_ref() else {
+            // No device yet: bounded idle until the feeds arrive (the feed
+            // itself builds the device, so this is a startup/shutdown window).
+            return WgPumpWait {
+                tun_fd: None,
+                wg_fd: None,
+                timeout_ms: if saturated { 0 } else { WG_PUMP_TICK_MS },
+            };
+        };
+        dev.with_device(|d| {
+            // 没有更早的设备定时器 → boringtun 的 100 ms 上界；有更早的 → 它。
+            let remaining = match d.next_deadline_ms(now_ms) {
+                Some(t) => t.saturating_sub(now_ms).min(WG_PUMP_TICK_MS),
+                None => WG_PUMP_TICK_MS,
+            };
+            WgPumpWait {
+                tun_fd: d.tun_fd(),
+                wg_fd: if d.shared_socket_reader() { None } else { d.socket_fd() },
+                timeout_ms: if saturated {
+                    0
+                } else if remaining == 0 {
+                    // Due now but the pass that should clear it could not make
+                    // progress: floor instead of spinning on `poll(0)`.
+                    WG_PUMP_DUE_FLOOR_MS
+                } else {
+                    remaining
+                },
+            }
+        })
+    }
+
+    /// Execute one wait plan: `poll` the plan's fds (level-triggered, so a
+    /// packet on the TUN makes this return at once — the forwarding wake
+    /// source), or a bounded sleep when nothing can be polled. Returns the
+    /// number of fds that reported ready (0 on timeout / no fd).
+    pub fn pump_wait(plan: &WgPumpWait) -> usize {
+        let mut fds: Vec<sys::pollfd> = Vec::new();
+        if let Some(fd) = plan.tun_fd {
+            fds.push(sys::pollfd { fd, events: sys::POLLIN, revents: 0 });
+        }
+        if let Some(fd) = plan.wg_fd {
+            fds.push(sys::pollfd { fd, events: sys::POLLIN, revents: 0 });
+        }
+        if fds.is_empty() {
+            if plan.timeout_ms > 0 {
+                sys::sleep_ms(plan.timeout_ms);
+            }
+            return 0;
+        }
+        let timeout = plan.timeout_ms.min(i32::MAX as u64) as i32;
+        let (ret, _errno) = sys::poll_fds(&mut fds, timeout);
+        if ret <= 0 {
+            return 0;
+        }
+        fds.iter().filter(|f| (f.revents & sys::POLLIN) != 0).count()
     }
 
     /// Build the device when both feeds are present. Returns whether a
@@ -4655,6 +4850,179 @@ mod feed_tests {
 
         crate::n2_outer_receipt::arm(false);
         for fd in [wg_raw, tun_raw, tun_end, peer_fd, stranger_fd] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 0.0.28 event-driven data-plane pump：等待计划 + 截止期
+    // -----------------------------------------------------------------
+
+    /// 空闲设备（无 peer、无会话）：等待上界就是 boringtun 的 `wireguard_tick`
+    /// 推荐间隔（100 ms），**不是**旧的 10 ms 拍；TUN fd 在计划里（转发路径
+    /// 的唤醒源），设备自己读外层 socket 时它也在，交给 mux 之后就不在。
+    #[test]
+    fn idle_device_waits_the_boringtun_bound_and_polls_the_right_fds() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        slot.feed_wg_socket(wg_raw).unwrap();
+        slot.feed_tun(tun_raw).unwrap();
+        let now = sys::mono_ms();
+        let plan = slot.pump_wait_plan(now, false);
+        assert_eq!(plan.timeout_ms, WG_PUMP_TICK_MS, "the bounded wait is boringtun's 100 ms");
+        assert!(plan.tun_fd.is_some(), "the TUN fd is the forwarding wake source");
+        assert!(plan.wg_fd.is_some(), "the device owns its own read half here");
+        // 一屏的 `DRAIN_MAX` 用满 → 下一轮不再等（预算不能变成吞吐上限）。
+        assert_eq!(slot.pump_wait_plan(now, true).timeout_ms, 0);
+        // 交给共享 mux 之后，同一枚 fd 不再被 poll（一个 fd 只能有一个读者）。
+        let dev_fd = slot.with_device(|d| {
+            assert_eq!(d.next_deadline_ms(now), None, "no peer, no device timer");
+            d.set_shared_socket_reader(true);
+            (d.tun_fd(), d.socket_fd())
+        });
+        let (tun_fd, wg_fd) = dev_fd.expect("device up");
+        assert_eq!(tun_fd, plan.tun_fd, "still our TUN dup");
+        assert!(wg_fd.is_some(), "the device still holds its outer socket");
+        let plan = slot.pump_wait_plan(now, false);
+        assert_eq!(plan.wg_fd, None, "the mux reader owns the outer socket's read half");
+        assert_eq!(plan.tun_fd, tun_fd);
+        assert_eq!(plan.timeout_ms, WG_PUMP_TICK_MS);
+        drop(slot);
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// 每个设备侧定时器都是精确截止期：keepalive 25 s、会话过期 540 s、
+    /// 握手重试 5 s / campaign 90 s；一个「有路但没会话」的 peer 立刻要发起。
+    #[test]
+    fn next_deadline_mirrors_the_device_timers() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        slot.feed_wg_socket(wg_raw).unwrap();
+        slot.feed_tun(tun_raw).unwrap();
+        let key = test_secret_b64(0x11);
+        slot.apply_peers(&[peer_entry(&key, [10, 77, 0, 2])]).expect("peers");
+        let now = 100_000u64;
+        // 有 endpoint 但没会话：`set_endpoint` 落配**当拍就发起**握手
+        // （`tick` 的 `None => true` 分支），campaign 锚点因此落在 now。
+        slot.with_device(|d| {
+            d.set_endpoint(&key, [10, 77, 0, 2], 51_820, now).expect("endpoint");
+            assert!(d.has_path(0));
+            // 落配当拍就发起握手；锚点无论是否真的发出去都由下面显式钉住。
+            d.peers[0].first_init_ms = Some(now);
+            d.peers[0].last_init_ms = Some(now);
+            assert_eq!(d.next_deadline_ms(now), Some(now + d.cfg.hs_retry_ms));
+            // 90 s 的 campaign deadline 更早时它赢。
+            d.peers[0].first_init_ms = Some(now.saturating_sub(89_000));
+            assert_eq!(d.next_deadline_ms(now), Some(now + 1_000));
+            d.peers[0].first_init_ms = Some(now);
+            // campaign 未起（有路、没会话、两个锚点都空）→ 第一拍立刻发起。
+            d.peers[0].first_init_ms = None;
+            d.peers[0].last_init_ms = None;
+            assert_eq!(d.next_deadline_ms(now), Some(now));
+            // 会话建立：keepalive（last_outbound 锚点）与 540 s 过期。
+            d.peers[0].session_established = true;
+            d.peers[0].session_established_ms = now;
+            d.peers[0].last_outbound_ms = Some(now);
+            d.peers[0].expired = false;
+            assert_eq!(d.next_deadline_ms(now), Some(now + d.cfg.keepalive_ms));
+            assert!(d.cfg.keepalive_ms < d.cfg.session_max_ms, "25 s keepalive < 540 s expiry");
+            // 从未出过包 → 第一拍立刻补 keepalive。
+            d.peers[0].last_outbound_ms = None;
+            assert_eq!(d.next_deadline_ms(now), Some(now));
+            assert_eq!(d.cfg.keepalive_ms, DEFAULT_KEEPALIVE_MS);
+            assert_eq!(d.cfg.session_max_ms, DEFAULT_SESSION_MAX_MS);
+            // 无 peer 的设备没有任何设备定时器。
+            d.peers.clear();
+            assert_eq!(d.next_deadline_ms(now), None);
+        })
+        .expect("device up");
+        drop(slot);
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// 转发**不等节拍**：TUN 可读时 `pump_wait` 立即返回（这里是 socketpair
+    /// 上的真实数据），随后的 `service_tun` 把它读掉。这正是 0.0.5 把节拍
+    /// 从 100 ms 提到 10 ms 的那个理由的替代实现——预算不再由节拍喂。
+    #[test]
+    fn a_readable_tun_wakes_the_wait_at_once_and_the_frame_is_drained() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        slot.feed_wg_socket(wg_raw).unwrap();
+        slot.feed_tun(tun_raw).unwrap();
+        let now = sys::mono_ms();
+        let plan = slot.pump_wait_plan(now, false);
+        assert_eq!(plan.timeout_ms, WG_PUMP_TICK_MS);
+        // 没有数据时：等满上界（这里只验证「会阻塞」，用 0 超时探测可读性）。
+        let probe = WgPumpWait { timeout_ms: 0, ..plan };
+        assert_eq!(WgDeviceFeed::pump_wait(&probe), 0, "nothing readable yet");
+        // 写一帧进 TUN 的测试端 → 设备那一端立刻可读。
+        let frame = [0x45u8, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0, 10, 77, 0, 1, 10, 77, 0, 9, 0, 53, 0, 53, 0, 8, 0, 0];
+        let n = unsafe {
+            sys::write(
+                tun_end,
+                frame.as_ptr() as *const core::ffi::c_void,
+                frame.len(),
+            )
+        };
+        assert_eq!(n as usize, frame.len());
+        let t0 = std::time::Instant::now();
+        assert_eq!(WgDeviceFeed::pump_wait(&plan), 1, "the TUN fd reports readable");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(50),
+            "readiness must not wait for the timer bound (waited {:?})",
+            t0.elapsed()
+        );
+        let tun_n = slot.with_device(|d| d.service_tun(sys::mono_ms())).expect("device up");
+        assert_eq!(tun_n, 1, "the frame is drained by readiness, not by a tick");
+        drop(slot);
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// 生产泵线程本身（不是复刻）：喂完两个 fd 之后，往 TUN 写一帧，设备必须
+    /// 在**不依赖任何节拍**的情况下把它读掉（统计面 `no_route_drops` 增长即为
+    /// 证据——目标是不可路由地址）。停止标志置位后线程不再服务：再写一帧，
+    /// 计数在几百毫秒内不动。上界给得很宽：这里验的是「线程真的在跑服务 /
+    /// 真的会停」，不是延迟。
+    #[test]
+    fn the_production_pump_thread_services_the_device_and_exits_on_the_stop_flag() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let slot = std::sync::Arc::new(slot);
+        slot.feed_wg_socket(wg_raw).unwrap();
+        slot.feed_tun(tun_raw).unwrap();
+        slot.apply_peers(&[peer_entry(&test_secret_b64(0x11), [10, 77, 0, 2])]).expect("peers");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        slot.spawn_data_plane_pump(stop.clone());
+        assert!(slot.device_up());
+        let frame = [0x45u8, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0, 10, 77, 0, 1, 10, 77, 0, 9, 0, 53, 0, 53, 0, 8, 0, 0];
+        let write_frame = || {
+            let n = unsafe {
+                sys::write(
+                    tun_end,
+                    frame.as_ptr() as *const core::ffi::c_void,
+                    frame.len(),
+                )
+            };
+            assert_eq!(n as usize, frame.len());
+        };
+        write_frame();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while slot.with_device(|d| d.stats()).expect("device").no_route_drops == 0 {
+            assert!(std::time::Instant::now() < deadline, "the pump thread must drain the TUN");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // 停止标志是线程唯一的退出条件；退出延迟上界 = 等待上界（100 ms）。
+        stop.store(true, Ordering::Release);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let before = slot.with_device(|d| d.stats()).expect("device").no_route_drops;
+        write_frame();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let after = slot.with_device(|d| d.stats()).expect("device").no_route_drops;
+        assert_eq!(after, before, "a stopped pump must not keep draining the TUN");
+        drop(slot);
+        for fd in [wg_raw, tun_raw, tun_end] {
             unsafe { sys::close(fd) };
         }
     }

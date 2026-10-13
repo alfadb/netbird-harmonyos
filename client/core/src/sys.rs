@@ -275,6 +275,18 @@ pub fn poll1(fd: c_int, events: i16, timeout_ms: c_int) -> (c_int, c_int, i16) {
     (ret, e, fds.revents)
 }
 
+/// poll() on a caller-built `pollfd` slice (same syscall as [`poll1`], N fds):
+/// `revents` is written back into `fds`, so a caller can see which fd fired.
+/// Returns (ret, errno). Used by the WG data-plane pump to wait on the TUN fd
+/// (and, when the device still owns its own read half, the outer socket fd)
+/// instead of spinning on a fixed tick — a packet makes the fd readable and
+/// `poll` returns at once, so forwarding never waits for a timer.
+pub fn poll_fds(fds: &mut [pollfd], timeout_ms: c_int) -> (c_int, c_int) {
+    let ret = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, timeout_ms) };
+    let e = if ret == -1 { errno() } else { 0 };
+    (ret, e)
+}
+
 /// read() into buf; returns (n, errno).
 pub fn read_fd(fd: c_int, buf: &mut [u8]) -> (isize, c_int) {
     let n = unsafe { read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
