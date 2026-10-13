@@ -200,6 +200,100 @@ try {
     p.KEEP_ALIVE_REASON_GRACE === 'grace' &&
     p.KEEP_ALIVE_REASON_RECONNECT_GAVE_UP === 'reconnect-gave-up');
 
+  // -- 0.0.28: a kill -> automatic reconnect (stop-then-start) keeps the task ---
+  // v027b device log (netbird-ui.log, 2026-10-13, all times CST): a `SwapFull`
+  // kill of the extension, 1-5 s later
+  //   ui_auto_reconnect count=1 reason=marker-open result=reconnected trigger=background
+  // and 1-3 s after THAT
+  //   ui_bg_task count=0 reason=user-stop result=ok stage=stop
+  // — while the user had asked for nothing (0 `ui_disconnect` records in the whole
+  // UI log). The task went, the UI process was frozen, and the NEXT kill left the
+  // phone with no tunnel for 90.5 min / 28.0 min.
+  //
+  // The page's own restart leg fed that verdict: stopVpnExtensionThenStart()
+  // wrote the USER-STOP stamp, and decideKeepAlive() answers `userStopRecent`
+  // before every other fact, so the very next 2 s tick withdrew the task. The
+  // sequence below drives the REAL policy with the REAL fact derivation; the page
+  // pins further down prove the page now arms the restart-leg latch instead, so
+  // the fact passed here is the one the page really passes.
+  const killAt = T0 + 1000;
+  const up = p.keepAliveWithTask(fresh(), true);   // the task is held, tunnel up
+  const actions: string[] = [];
+  const tick = (state: object, nowMs: number, vpnActive: boolean,
+    restartLegStamp: number, inactiveSinceMs: number): any => {
+    // The page's tick: `stopSent` is false (no disconnect was asked for) and the
+    // stamp handed in is the one the sequence's leg armed.
+    const d = decided(state, { nowMs: nowMs, vpnActive: vpnActive,
+      vpnInactiveSinceMs: inactiveSinceMs,
+      userStopRecent: p.keepAliveUserStopRecent(false, restartLegStamp, nowMs) });
+    actions.push(d.action);
+    return d;
+  };
+  // t0: the last healthy tick, 1 s before the kill.
+  let seqState = tick(up, killAt - 1000, true, 0, 0).state;
+  // t1: the kill. No fresh document, the tunnel's last-active moment is stamped
+  //     here; the restart leg arms the page's OWN latch, so the USER-STOP stamp
+  //     stays 0 and the grace keeps the task.
+  const t1 = tick(seqState, killAt, false, 0, killAt);
+  seqState = t1.state;
+  // t2: the reconnect was decided and the stop-then-start leg ran. Still no
+  //     document from the new instance.
+  const t2 = tick(seqState, killAt + 2000, false, 0, killAt);
+  seqState = t2.state;
+  // t3: the new instance published an active document — the reconnect succeeded.
+  const t3 = tick(seqState, killAt + 4000, true, 0, 0);
+  check('the kill tick KEEPS the borrowed task (grace, never a stop)',
+    t1.action === p.KEEP_ALIVE_ACTION_NONE && t1.reason === p.KEEP_ALIVE_REASON_GRACE &&
+    t1.state.taskPresent === true, JSON.stringify(t1));
+  check('the stop-then-start reconnect leg does not end it either',
+    t2.action === p.KEEP_ALIVE_ACTION_NONE && t2.reason === p.KEEP_ALIVE_REASON_GRACE &&
+    t2.state.taskPresent === true, JSON.stringify(t2));
+  check('the successful reconnect keeps it, and NO step of the sequence is a stop',
+    t3.action === p.KEEP_ALIVE_ACTION_NONE && t3.state.taskPresent === true &&
+    actions.indexOf(p.KEEP_ALIVE_ACTION_STOP) < 0, JSON.stringify([actions, t3]));
+  check('so the record the device log showed is never produced',
+    t1.reason !== p.KEEP_ALIVE_REASON_USER_STOP &&
+    t2.reason !== p.KEEP_ALIVE_REASON_USER_STOP &&
+    t3.reason !== p.KEEP_ALIVE_REASON_USER_STOP);
+  check('the OLD wiring reproduces the device line exactly (the regression is real)',
+    ((): boolean => {
+      // Until 0.0.28 the restart leg wrote the user-stop stamp; 2 s later that
+      // stamp is still inside the 8 s guard, and the policy answers
+      // STOP/user-stop on a tunnel that is UP and a task that is held.
+      const oldFact = p.keepAliveUserStopRecent(false, killAt + 2000, killAt + 4000);
+      const old = decided(up, { nowMs: killAt + 4000, vpnActive: true,
+        userStopRecent: oldFact });
+      return oldFact === true && old.action === p.KEEP_ALIVE_ACTION_STOP &&
+        old.reason === p.KEEP_ALIVE_REASON_USER_STOP;
+    })());
+  check('the user-stop fact is true only for a REAL stop: stopSent, or a stamp < 8 s',
+    p.keepAliveUserStopRecent(true, 0, T0) === true &&
+    p.keepAliveUserStopRecent(false, T0 - 8000, T0) === true &&
+    p.keepAliveUserStopRecent(false, T0 - 8001, T0) === false &&
+    p.keepAliveUserStopRecent(false, 0, T0) === false &&
+    p.KEEP_ALIVE_USER_STOP_GUARD_MS === 8000);
+  check('a REAL user stop still ends it on the spot',
+    decided(up, { nowMs: killAt + 4000, vpnActive: true,
+      userStopRecent: p.keepAliveUserStopRecent(true, killAt + 4000, killAt + 4000) })
+      .action === p.KEEP_ALIVE_ACTION_STOP &&
+    decided(up, { nowMs: killAt + 4000, vpnActive: true,
+      userStopRecent: p.keepAliveUserStopRecent(true, killAt + 4000, killAt + 4000) })
+      .reason === p.KEEP_ALIVE_REASON_USER_STOP);
+  check('a real stop that RESOLVED keeps the guard armed for exactly its 8 s',
+    decided(up, { nowMs: T0 + 8000, vpnActive: true,
+      userStopRecent: p.keepAliveUserStopRecent(false, T0, T0 + 8000) })
+      .reason === p.KEEP_ALIVE_REASON_USER_STOP &&
+    decided(up, { nowMs: T0 + 8001, vpnActive: true,
+      userStopRecent: p.keepAliveUserStopRecent(false, T0, T0 + 8001) })
+      .reason === p.KEEP_ALIVE_REASON_TASK_PRESENT);
+  check('a platform cancellation still ends the task and is never argued with',
+    ((): boolean => {
+      const gone = p.keepAliveWithTask(cancelled(up, p.KEEP_ALIVE_CANCEL_SYSTEM, 0, T0), false);
+      const d = decided(gone, { nowMs: T0 + 1000 });
+      return gone.taskPresent === false && d.action === p.KEEP_ALIVE_ACTION_NONE &&
+        d.reason === p.KEEP_ALIVE_REASON_BACKOFF;
+    })());
+
   // -- the platform's verdicts ------------------------------------------------
   const dismissed = cancelled(fresh(), p.KEEP_ALIVE_CANCEL_USER_REMOVE_NOTIFICATION, 0, T0);
   check('removing the notification is the USER dismissing this connection',
@@ -659,6 +753,29 @@ check('a manual connect and a disconnect are the policy transitions they claim t
   PAGE.indexOf('keepAliveOnUserConnect(this.bgKeepAliveState)') >= 0 &&
   PAGE.indexOf('keepAliveOnUserStop(this.bgKeepAliveState)') >= 0 &&
   PAGE.indexOf('keepAliveOnLogout(this.bgKeepAliveState)') >= 0);
+// 0.0.28: the page's own stop-then-start re-entry leg is NOT a user stop. It arms
+// the restart-leg latch; the ONLY writer of the user-stop latch is the real
+// disconnect leg (requestStop), and the keep-alive fact is the pure policy's
+// derivation rather than an inline expression the host cannot drive.
+const restartLegBody = sliceFrom(PAGE,
+  'private stopVpnExtensionThenStart(fromAutoReconnect: boolean): void {',
+  'private async waitExtensionGoneThenStart(');
+check('the stop-then-start re-entry leg arms the RESTART-LEG latch, never the user-stop one',
+  restartLegBody.indexOf('this.lastRestartLegAtMs = Date.now();') >= 0 &&
+  restartLegBody.indexOf('this.lastUserStopAtMs') < 0, restartLegBody.replace(/\n/g, ' | '));
+check('the real disconnect leg is the only writer of the user-stop latch',
+  PAGE.split('this.lastUserStopAtMs = ').length === 2 &&
+  sliceFrom(PAGE, 'private requestStop(): void {', '// ---- 诊断日志导出')
+    .indexOf('this.lastUserStopAtMs = Date.now();') >= 0);
+check('the disconnect notice reads the two latches as the two different facts they are',
+  pollBody.indexOf('Date.now() - this.lastUserStopAtMs > 8000') >= 0 &&
+  pollBody.indexOf('Date.now() - this.lastRestartLegAtMs > 8000') >= 0 &&
+  PAGE.indexOf('private lastRestartLegAtMs: number = 0;') >= 0);
+check('the keep-alive user-stop fact is the pure policy\'s derivation, not an inline expression',
+  syncBody.indexOf('userStopRecent: keepAliveUserStopRecent(this.stopSent, ' +
+    'this.lastUserStopAtMs, nowMs)') >= 0 &&
+  syncBody.indexOf('this.stopSent || nowMs - this.lastUserStopAtMs <= 8000') < 0 &&
+  POLICY_TEXT.indexOf('export function keepAliveUserStopRecent(') >= 0);
 const toggleBody = sliceFrom(PAGE, 'private onKeepAliveToggle(isOn: boolean): void {',
   '// ---- derived view state');
 check('the settings page carries the switch and its one-line explanation',

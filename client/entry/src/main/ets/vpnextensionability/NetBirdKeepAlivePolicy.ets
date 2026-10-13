@@ -65,7 +65,9 @@
 //   disabled            the settings switch is off
 //   logout              an explicit logout is in flight / just resolved (or the
 //                       app has no credentials at all)
-//   user-stop           the page just asked for a disconnect
+//   user-stop           the page just asked for a disconnect (a REAL one: the
+//                       page's own stop-then-start re-entry leg is not this — it
+//                       arms the page's restart-leg latch instead, 0.0.28)
 //   vpn-inactive        no fresh status document reports an active tunnel, and the
 //                       reconnect grace is over (or never started)
 //   grace               the tunnel is inactive but the reconnect still has time
@@ -114,6 +116,22 @@ export const KEEP_ALIVE_REASON_VPN_ACTIVE: string = 'vpn-active';
 export const KEEP_ALIVE_REASON_DISABLED: string = 'disabled';
 export const KEEP_ALIVE_REASON_LOGOUT: string = 'logout';
 export const KEEP_ALIVE_REASON_USER_STOP: string = 'user-stop';
+// 0.0.28（重启腿不再被读成用户停止）：页面自己的两个锁存器（`stopSent` 与真正用户
+// 停止的时刻）降到策略的这一个事实。纯函数、导出，所以 0.0.28 修掉的那个回归在主机
+// 上可复现：页面的 stop-then-start 重入腿（stopVpnExtensionThenStart）曾经写的是
+// "用户停止时刻"，于是自动重连后 1-3 s 的那一拍把重入腿读成"用户刚要求断开"，
+// decideKeepAlive() 当场返回 STOP/user-stop，借来的长时任务被撤销——下一次进程被杀
+// 就再也没有后台重连（v027b 真机：90.5 min 与 28.0 min 两次断网）。重入腿改为写页面
+// 自己的 restart-leg 锁存器，只有 requestStop()（真正用户停止）才写下面这个时刻。
+export const KEEP_ALIVE_USER_STOP_GUARD_MS: number = 8000;
+
+export function keepAliveUserStopRecent(stopSent: boolean, lastUserStopAtMs: number,
+  nowMs: number): boolean {
+  if (stopSent) {
+    return true;
+  }
+  return lastUserStopAtMs > 0 && nowMs - lastUserStopAtMs <= KEEP_ALIVE_USER_STOP_GUARD_MS;
+}
 export const KEEP_ALIVE_REASON_VPN_INACTIVE: string = 'vpn-inactive';
 // 0.0.20: the reconnect still has time left — the task is KEPT and nothing is
 // asked for.

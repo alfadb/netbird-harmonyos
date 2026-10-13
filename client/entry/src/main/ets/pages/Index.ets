@@ -121,7 +121,8 @@ import { KeepAliveCancelEvent, KeepAliveDecision, KeepAliveFacts, KeepAlivePolic
   KEEP_ALIVE_REASON_VPN_ACTIVE, KEEP_ALIVE_RESUME_GAP,
   decideKeepAlive, keepAliveInitialState, keepAliveOnCancelled, keepAliveOnLogout,
   keepAliveOnRefreshed, keepAliveOnStartResolved, keepAliveOnUserConnect,
-  keepAliveOnUserStop, keepAliveWithTask, keepAlivePollGapMs, keepAliveResumedAfterGap,
+  keepAliveOnUserStop, keepAliveUserStopRecent, keepAliveWithTask, keepAlivePollGapMs,
+  keepAliveResumedAfterGap,
   shouldRefresh } from '../vpnextensionability/NetBirdKeepAlivePolicy';
 import { keepAliveTaskPresent, refreshKeepAlive, refreshKeepAliveText,
   setKeepAliveResumeListener, startKeepAlive,
@@ -933,6 +934,17 @@ struct Index {
   // active → null without a user stop = the extension fail-closed / died).
   private lastLiveState: string = '';
   private lastUserStopAtMs: number = 0;
+  // 0.0.28: the page's OWN stop-then-start re-entry leg
+  // (stopVpnExtensionThenStart) arms THIS latch — never the user-stop one above.
+  // Until 0.0.28 that leg wrote `lastUserStopAtMs`, and the keep-alive policy
+  // reads that as "the user just asked for a disconnect": the tick 1-3 s after
+  // every automatic reconnect withdrew the borrowed task as
+  // `ui_bg_task stage=stop reason=user-stop`, so the NEXT extension kill had
+  // nothing to recover it until the app came back to the foreground (v027b
+  // device log: 90.5 min and 28.0 min with no tunnel). One use only: suppressing
+  // the false "VPN 已断开" notice when the document that disappears is our own
+  // stop, exactly what the old line was for.
+  private lastRestartLegAtMs: number = 0;
   // When the current/last start request was sent — gates the persistent
   // failure notice to THIS attempt (a leftover from an earlier attempt is
   // never shown as the live verdict).
@@ -1229,12 +1241,16 @@ struct Index {
       if (this.observedPublishedStatus) {
         // the document disappeared = the extension is gone (stopped or
         // destroyed): release the request latches for an explicit retry
-        // roam-1005-0014 A.3: if the last live state was ACTIVE and no user
-        // stop just resolved, the tunnel ended without the user asking —
-        // surface the reconnect notice (the extension's fail-closed path
-        // removed the document after its VPN_RECREATE_VERIFY failure).
+        // roam-1005-0014 A.3: if the last live state was ACTIVE and neither the
+        // user nor the page's own restart leg just stopped the extension, the
+        // tunnel ended without the user asking — surface the reconnect notice
+        // (the extension's fail-closed path removed the document after its
+        // VPN_RECREATE_VERIFY failure). 0.0.28: the restart-leg latch is checked
+        // on its own; it is a different fact from a user stop and must never be
+        // read as one (see lastRestartLegAtMs).
         if (vpnActiveState(this.lastLiveState) && !this.stopSent &&
           Date.now() - this.lastUserStopAtMs > 8000 &&
+          Date.now() - this.lastRestartLegAtMs > 8000 &&
           Date.now() - this.lastLogoutAtMs > 25000) {
           this.disconnectNotice = 'VPN 已断开，请重新连接';
         }
@@ -1560,7 +1576,9 @@ struct Index {
       vpnActive: vpnActive,
       // The page's own user-stop guard (8 s), the same one the disconnect notice
       // uses: a stop the user just asked for must never be answered with a task.
-      userStopRecent: this.stopSent || nowMs - this.lastUserStopAtMs <= 8000,
+      // 0.0.28: the derivation is the pure policy's, so "which latch counts as a
+      // user stop" is host-checkable — the page's own restart leg is not one.
+      userStopRecent: keepAliveUserStopRecent(this.stopSent, this.lastUserStopAtMs, nowMs),
       // An explicit logout in flight / just resolved (25 s), or no credentials at
       // all — there is nothing to keep alive for.
       loggedOut: this.lastLogoutAtMs > 0 && nowMs - this.lastLogoutAtMs <= 25000 ||
@@ -3278,9 +3296,18 @@ struct Index {
   // can never keep the user's retry from starting. Still needed exactly because a
   // repeated start against a LIVE instance is not a re-entry on this platform.
   private stopVpnExtensionThenStart(fromAutoReconnect: boolean): void {
-    // the status document disappearing a moment from now is THIS stop, not a
-    // fail-closed disconnect (the same latch requestStop() sets).
-    this.lastUserStopAtMs = Date.now();
+    // 0.0.28: the status document disappearing a moment from now is THIS stop, not
+    // a fail-closed disconnect — but it is NOT a user stop either. Until 0.0.28
+    // this line wrote `lastUserStopAtMs` (the latch requestStop() sets), and the
+    // keep-alive policy reads that latch as "the user just asked for a
+    // disconnect": decideKeepAlive() answers STOP/user-stop BEFORE every other
+    // fact, so the borrowed task was withdrawn on the next 2 s tick — 1-3 s after
+    // every automatic reconnect, which is exactly when the following kill became
+    // unrecoverable (v027b: ui_auto_reconnect at 10:46:58 / 14:46:39 / 16:39:30,
+    // stage=stop reason=user-stop at 10:47:00 / 14:46:40 / 16:39:32). The page's
+    // own restart-leg latch carries the suppression instead; only requestStop()'s
+    // own leg writes the user-stop one.
+    this.lastRestartLegAtMs = Date.now();
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).catch((_error: Error) => {
       // nothing to stop (already gone / never started): the wait leg decides.
     });
