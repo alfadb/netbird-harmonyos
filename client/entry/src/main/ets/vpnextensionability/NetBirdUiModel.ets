@@ -183,6 +183,12 @@ export interface UiStatusDocument {
   // older document omits it too, and the UI gate treats "not false" as
   // lenient-pass.
   iface_present?: boolean;
+  // 2026-10-13 MTU observability (device report §D): the effective tunnel MTU
+  // (VpnConfig.mtu) of the config the extension submitted most recently — the
+  // value the platform sets on vpn-tun, published next to iface_present.
+  // OMITTED until a config was built (an older document omits it too), so the
+  // UI/reader can tell 未知 from a real value; it is never defaulted to 1280.
+  mtu?: number;
   // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
   // last live) relay session (relay.current_url), falling back to the first
   // configured relay url; null when neither is known.
@@ -883,8 +889,11 @@ function buildIceMux(
 // pre-phase-1 meaning; the appended fields ride the tail. ifacePresent is
 // the extension's vpn-tun interface probe (true/false); undefined leaves
 // the field out of the JSON (probe unreadable / legacy caller) — the UI
-// gate then stays lenient instead of failing a live tunnel. managementUrl /
-// managementEndpoint are the extension's configured management url and its
+// gate then stays lenient instead of failing a live tunnel. mtu is the
+// effective tunnel MTU of the config the extension submitted (undefined
+// before the first create leaves the field out, never a defaulted 1280).
+// managementUrl / managementEndpoint are the extension's configured
+// management url and its
 // parsed endpoint: host and port only are published, never the URL string
 // (see managementEndpointView — a hand-written management_url may carry
 // userinfo or a query and none of it may reach the document). The whole
@@ -892,7 +901,7 @@ function buildIceMux(
 export function buildUiStatusDocument(status: ConnectorStatusResult,
   network: CoreNetworkConfig | null, requestId: string,
   nowMs: number, ifacePresent?: boolean, managementUrl?: string,
-  managementEndpoint?: ManagementEndpoint | null): UiStatusDocument {
+  managementEndpoint?: ManagementEndpoint | null, mtu?: number): UiStatusDocument {
   const errorClass: string =
     status.last_error !== undefined && status.last_error !== null
       ? status.last_error.class
@@ -1015,6 +1024,7 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
         ? status.wg.wg_peers : undefined, status.peer_relays, status.ice_peers)
       : [],
     iface_present: ifacePresent,
+    mtu: mtu,
     relay_url: relayUrl,
     network: networkView,
     wg_traffic: wgTraffic,

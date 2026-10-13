@@ -878,6 +878,11 @@ export interface PublishedStatus {
   // when the probe could not read the counter or the document predates the
   // field. '已连接' requires this not to be false.
   iface_present?: boolean;
+  // 2026-10-13 MTU observability (device report §D): the effective tunnel MTU
+  // (VpnConfig.mtu) the extension submitted, published next to iface_present.
+  // Optional and ABSENT until a config was built (and in every older document)
+  // — the reader treats "absent" as 未知, never as a defaulted 1280.
+  mtu?: number;
   // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
   // last live) relay session — relay.current_url when set, else the first
   // configured url; null when neither is known. Read leniently.

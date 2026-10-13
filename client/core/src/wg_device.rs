@@ -960,6 +960,24 @@ pub fn wg_feed_adopted_line(peers: usize, endpoints: usize, egress_replayed: usi
     format!("N7_WG_FEED|adopted|peers={peers}|endpoints={endpoints}|egress_replayed={egress_replayed}|mono_ms={mono_ms}")
 }
 
+/// The device-up report, emitted once per DEVICE CONSTRUCTION (2026-10-13 MTU
+/// observability, device report §D): the data plane exists. The line carries the
+/// core's OWN tunnel MTU and its provenance, because "the core's MTU" was not
+/// logged anywhere before: it is [`crate::config::DEFAULT_MTU`] — the official
+/// client's `iface.DefaultMTU = 1280` — the value every core buffer is sized
+/// against (`WG_BUF` / `tun::READ_BUF` / `ice_mux::MUX_RECV_BUF` = 2048 ≥ MTU +
+/// transport overhead). This process has NO runtime MTU input: the platform
+/// `VpnConfig.mtu` belongs to the shell (its `VPN_TUNNEL_MTU` record carries the
+/// effective value and whether the management map announced it), so
+/// `mtu_source=core-default` is the honest provenance and no announced value is
+/// invented here.
+pub fn wg_feed_device_up_line() -> String {
+    format!(
+        "N7_WG_FEED|device-up|data-plane-started|mtu={}|mtu_source=core-default",
+        crate::config::DEFAULT_MTU
+    )
+}
+
 /// `N6_WG_DEVICE|session-established|peer=<公钥前8位>` —— 哪个 peer 的 WG
 /// 会话建成（0050 §8 item 2：真机上这条行不带 peer 标识，`wgSessions=4`
 /// 时无从知道是哪 4 个 peer；观测缺口，不是「其余 2 个没建成」的证据）。
@@ -3523,7 +3541,7 @@ impl WgDeviceFeed {
             Self::try_build(&mut g, &self.cfg)
         };
         if built {
-            emit("N7_WG_FEED|device-up|data-plane-started");
+            emit(&wg_feed_device_up_line());
         }
         Ok(())
     }
@@ -4189,6 +4207,12 @@ mod feed_tests {
             "N2_TUN_FRAMES|scope=session|mono_ms=9|seen=3|control=0|production=2|leaks=0|diag=true|is_evidence=false");
         assert_eq!(wg_feed_adopted_line(2, 1, 1, 77),
             "N7_WG_FEED|adopted|peers=2|endpoints=1|egress_replayed=1|mono_ms=77");
+        // MTU observability (2026-10-13): the device-up line names the core's
+        // own tunnel MTU (buffers are sized against it) and its provenance.
+        assert_eq!(wg_feed_device_up_line(),
+            "N7_WG_FEED|device-up|data-plane-started|mtu=1280|mtu_source=core-default");
+        assert_eq!(crate::config::DEFAULT_MTU, 1280);
+        assert!(WG_BUF >= crate::config::DEFAULT_MTU as usize);
         for fd in [wg_raw, tun_raw, tun_end] {
             unsafe { sys::close(fd) };
         }

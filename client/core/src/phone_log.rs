@@ -74,6 +74,37 @@
 //! two windows turn over lazily and independently, exactly like the single
 //! window below.
 //!
+//! ## Startup allowance (bounded, first seconds of a session only)
+//!
+//! The priority window protects EVIDENCE, and it works: on the 0.0.27 device
+//! runs every lifecycle/selection marker of a fresh session is present. But the
+//! storm that spends the ordinary budget in the first seconds of a session is
+//! ordinary by design — the session still refused 5.15 % of its lines (101
+//! lines, all inside the first ~4.4 s): every known peer is dialed at once, so
+//! the relay-lane fan-out (`connector: relay lane opening` / `open waiting`,
+//! `relay: peers-online`) and the per-peer ICE round (`N5c_ICE|session` /
+//! `locals-gathered` / `gather-stun`, `N5d_ICE|check-tx`) arrive together for
+//! all ~20 peers. None of them is a marker, and each carries a distinct fact
+//! (peer, candidate, round, mapped address), so the fix is capacity at the
+//! session START, not silence at the source.
+//!
+//! [`DEFAULT_STARTUP_GRACE_MS`] therefore opens ONE extra window for the first
+//! seconds after [`configure`] — a session start: the tee is installed in the
+//! VPN extension's `onCreate`. While it is open an ORDINARY line walks that
+//! allowance FIRST and the ordinary window second, so a second's bound is the
+//! SUM of two fixed windows instead of one. The allowance closes on a plain
+//! deadline check (`now_ms >= startup_until_ms`) and is then never consulted
+//! again: no carry-over, no backlog, no timer. EVIDENCE is untouched — it keeps
+//! its own priority window and never spends the startup allowance, so a marker
+//! storm cannot eat the burst allowance either.
+//!
+//! The aggregate bound stays fixed: `startup + ordinary + priority`
+//! (20 480 B / 160 records) per second while the grace is open and
+//! `ordinary + priority` (12 288 B / 96 records) per second afterwards. The
+//! grace can add at most one ordinary window per second for
+//! [`DEFAULT_STARTUP_GRACE_MS`] (≈ 82 KB / 640 records above the steady bound,
+//! session start only) and never widens the ordinary window itself.
+//!
 //! The window is reset LAZILY by the first append of the next second: there is
 //! no timer, no background thread and nothing runs while the tee is idle. An
 //! unused second is NOT carried over, so a burst is bounded by about one
@@ -211,6 +242,23 @@ pub const DEFAULT_PRIORITY_RATE_BYTES_PER_SEC: u64 = 4096;
 /// Priority admission budget in records per window (half the ordinary record
 /// budget). The observed startup marker burst is ~10 lines inside one second.
 pub const DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC: u64 = 32;
+/// How long the startup allowance stays open after [`configure`] (milliseconds,
+/// monotone clock). The 0.0.27 device runs refused the whole session-start
+/// burst inside the first ~4.4 s (101 lines in one session, 150 in another), so
+/// 10 s covers it with margin while keeping the allowance to the session start
+/// — a steady-state session never sees it (see the module docs "Startup
+/// allowance").
+pub const DEFAULT_STARTUP_GRACE_MS: u64 = 10_000;
+/// Startup allowance in charged bytes per window: one ordinary-sized window,
+/// so the worst observed second (≈152 offered records, of which ~30 are
+/// evidence) fits the `startup + ordinary` byte bound while the per-second
+/// bound stays the sum of fixed windows.
+pub const DEFAULT_STARTUP_RATE_BYTES_PER_SEC: u64 = 8192;
+/// Startup allowance in records per window (one ordinary-sized window). The
+/// observed worst second offered ~152 lines TOTAL for all ~20 peers; ~30 of
+/// them are evidence lines charged to the priority window, so the ordinary side
+/// needs ≳64 records.
+pub const DEFAULT_STARTUP_RATE_RECORDS_PER_SEC: u64 = 64;
 /// Smallest accepted segment cap (tests use tiny caps to force rotation).
 pub const MIN_MAX_BYTES: u64 = 1024;
 /// Largest accepted segment cap.
@@ -438,6 +486,21 @@ struct RateLimit {
 ///   `VPN_CONNECTION_CREATED`, `VPN_PROTECT_BEGIN/RESOLVED/FAIL_CLOSED`,
 ///   `VPN_ICE_MUX_ARMED/FAIL`, `VPN_DESTROY_…`), which ride the persisted
 ///   record as `detail=VPN_…`;
+/// * `event=socket_supply` — the shell's per-request protected-socket supply
+///   outcome (purpose/result/reason/ms). One line per supply request (~220 in
+///   8 h), the only place the shell-side REFUSAL reason exists, and the 0.0.27
+///   device log proved it can only be read from the file (this ROM keeps no
+///   I-level app-domain line), so it must survive the busiest window — and its
+///   refusals CLUSTER in exactly the network-change/recreate minutes when the
+///   ordinary budget is spent (device log item C/G1: 35 of 128 refusals inside
+///   the 01:04–01:14 change);
+/// * `event=vpn_tunnel_mtu` — the shell's effective tunnel MTU and its
+///   provenance (default vs network-map), once per config build. The device
+///   report (§D) found the applied MTU logged NOWHERE: the hilog
+///   `VPN_CONFIG_APPLIED|…|mtu=` line is I-level on the app domain, which this
+///   ROM keeps none of, and `ifconfig` was the only proof. It is emitted at the
+///   create instant — the middle of the session-start fan-out — so it needs the
+///   same protection as the other markers;
 /// * `N5_ICE|selected-pair` — the per-peer ICE pair nomination (the `N5c_ICE` /
 ///   `N5d_ICE` check/gather lines are storms and deliberately stay ordinary);
 /// * `N6_WG_DEVICE|session-established` / `session-expired` — the WG session
@@ -453,6 +516,8 @@ struct RateLimit {
 /// which must keep competing for the ordinary budget only.
 pub const PRIORITY_MARKERS: &[&str] = &[
     "VPN_",
+    "event=socket_supply",
+    "event=vpn_tunnel_mtu",
     "N5_ICE|selected-pair",
     "N6_WG_DEVICE|session-established",
     "N6_WG_DEVICE|session-expired",
@@ -472,16 +537,65 @@ pub fn is_evidence(line: &str) -> bool {
     PRIORITY_MARKERS.iter().any(|marker| line.contains(marker))
 }
 
+/// Every admission window of one logger, in the order a line walks them, plus
+/// the startup deadline. PURE policy: the caller passes the monotone
+/// millisecond clock, so the unit tests drive exact window and deadline
+/// boundaries with no sleep and no global state, and the installed logger holds
+/// the whole policy behind ONE short mutex (one lock per admitted line, as
+/// before the startup allowance existed).
+#[derive(Clone, Copy, Debug, Default)]
+struct Admission {
+    /// Extra allowance, consulted ONLY before `startup_until_ms`.
+    startup: RateWindow,
+    /// The ordinary window every line has always walked.
+    ordinary: RateWindow,
+    /// The evidence window (see [`PRIORITY_MARKERS`]).
+    priority: RateWindow,
+    /// Monotone ms at which the startup allowance closes. Set once at
+    /// `configure`; the deadline is checked on every ordinary line, so a closed
+    /// allowance costs exactly one integer compare.
+    startup_until_ms: u64,
+    startup_limits: RateLimit,
+    ordinary_limits: RateLimit,
+    priority_limits: RateLimit,
+}
+
+impl Admission {
+    /// Whether the startup allowance is still open at `now_ms`. Pure.
+    fn startup_open(&self, now_ms: u64) -> bool {
+        now_ms < self.startup_until_ms
+    }
+
+    /// One ORDINARY line: the startup allowance first (while it is open, so the
+    /// session-start fan-out does not spend the ordinary budget), then the
+    /// ordinary window.
+    fn admit_ordinary(&mut self, now_ms: u64, line_len: usize) -> bool {
+        if self.startup_open(now_ms)
+            && self.startup.admit(now_ms, line_len, self.startup_limits)
+        {
+            return true;
+        }
+        self.ordinary.admit(now_ms, line_len, self.ordinary_limits)
+    }
+
+    /// One EVIDENCE line: the priority window first and the ordinary window as
+    /// its fallback — exactly the shape the priority increment introduced. The
+    /// startup allowance is deliberately NOT in this path: evidence has its own
+    /// allowance, and a marker storm must not be able to spend the burst
+    /// allowance.
+    fn admit_evidence(&mut self, now_ms: u64, line_len: usize) -> bool {
+        self.priority.admit(now_ms, line_len, self.priority_limits)
+            || self.ordinary.admit(now_ms, line_len, self.ordinary_limits)
+    }
+}
+
 struct Logger {
     tx: SyncSender<Msg>,
     counters: Arc<Counters>,
     /// Admission gates, checked BEFORE any allocation and before the queue.
-    /// `rate` is the ordinary window every line walks first; `priority_rate` is
-    /// the small window [`append_evidence`] tries first (see the module docs).
-    rate: Mutex<RateWindow>,
-    priority_rate: Mutex<RateWindow>,
-    limits: RateLimit,
-    priority_limits: RateLimit,
+    /// See [`Admission`]: the startup allowance, the ordinary window every line
+    /// walks, and the small priority window evidence tries first.
+    admission: Mutex<Admission>,
     path: String,
     session: String,
     cfg: Options,
@@ -603,13 +717,24 @@ pub fn configure_with(path: &str, opts: &Options) -> Result<(), &'static str> {
     let logger = Arc::new(Logger {
         tx,
         counters,
-        rate: Mutex::new(RateWindow::default()),
-        priority_rate: Mutex::new(RateWindow::default()),
-        limits: RateLimit { bytes: rate_bytes_per_sec, records: rate_records_per_sec },
-        priority_limits: RateLimit {
-            bytes: DEFAULT_PRIORITY_RATE_BYTES_PER_SEC,
-            records: DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC,
-        },
+        admission: Mutex::new(Admission {
+            // The deadline is relative to THIS configure: the tee is installed
+            // once per VPN session (`onCreate`), so the allowance is a session
+            // start, not a process start.
+            startup_until_ms: mono_ms().saturating_add(DEFAULT_STARTUP_GRACE_MS),
+            startup_limits: RateLimit {
+                bytes: DEFAULT_STARTUP_RATE_BYTES_PER_SEC,
+                records: DEFAULT_STARTUP_RATE_RECORDS_PER_SEC,
+            },
+            ordinary_limits: RateLimit { bytes: rate_bytes_per_sec, records: rate_records_per_sec },
+            priority_limits: RateLimit {
+                bytes: DEFAULT_PRIORITY_RATE_BYTES_PER_SEC,
+                records: DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC,
+            },
+            // Windows start closed on the lazy open (`open_ms = 0`), exactly as
+            // the single window always did.
+            ..Admission::default()
+        }),
         path: path.to_string(),
         session,
         cfg,
@@ -626,8 +751,9 @@ pub fn configure_with(path: &str, opts: &Options) -> Result<(), &'static str> {
 
 /// Tee one ORDINARY funnel line into the phone log (non-blocking; callable from
 /// any thread, including the network/ArkTS caller). This is the hot path of the
-/// ICE/route storm and does exactly one admission check — the ordinary
-/// per-second budget — with no text scan.
+/// ICE/route storm and does exactly one admission check — the startup allowance
+/// (only while it is open, i.e. the first seconds of a session) and then the
+/// ordinary per-second budget — with no text scan.
 ///
 /// Disk I/O never happens here. An admitted line is redacted + capped at ingress
 /// and handed to the bounded queue with `try_send`; a line the budget refuses
@@ -792,17 +918,17 @@ pub fn status_json() -> String {
 }
 
 impl Logger {
-    /// The ORDINARY hot path (every core line): one window, no scan, exactly the
-    /// admission the tee had before the priority window existed.
+    /// The ORDINARY hot path (every core line): the startup allowance and the
+    /// ordinary window, one short lock, no scan.
     fn offer(&self, line: &str) {
         // Admission BEFORE any allocation and before the queue: a refused line
         // costs one short lock and a few arithmetic ops, no payload buffer, no
         // queue slot and no disk write.
         let admitted = self
-            .rate
+            .admission
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .admit(mono_ms(), line.len(), self.limits);
+            .admit_ordinary(mono_ms(), line.len());
         self.enqueue(line, admitted);
     }
 
@@ -813,17 +939,11 @@ impl Logger {
     /// `now_ms`, so they agree on which second they charge; each is a FIXED
     /// budget, so the aggregate per window is their sum (see the module docs).
     fn offer_evidence(&self, line: &str) {
-        let now_ms = mono_ms();
         let admitted = self
-            .priority_rate
+            .admission
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .admit(now_ms, line.len(), self.priority_limits)
-            || self
-                .rate
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .admit(now_ms, line.len(), self.limits);
+            .admit_evidence(mono_ms(), line.len());
         self.enqueue(line, admitted);
     }
 
@@ -1675,6 +1795,10 @@ mod tests {
             "ts=2026-10-12T11:24:33.020Z pid=7775 event=vpn_protect_begin \
              detail=VPN_PROTECT_BEGIN:stage=protect",
             "N5_ICE|selected-pair|192.168.50.9:34486|endpoint_changed=true|peer=t7tldQA3",
+            "ts=2026-10-13T06:51:47.651Z pid=41859 role=vpn event=socket_supply \
+             ms=9 purpose=dns reason=none result=protected",
+            "ts=2026-10-13T06:51:47.727Z pid=41859 role=vpn event=vpn_tunnel_mtu \
+             mtu=1280 source=default stage=create",
             "N6_WG_DEVICE|session-established|peer=t7tldQA3",
             "N6_WG_DEVICE|session-expired|peer=t7tldQA3",
             "N13_WG|carrier-attach|kind=relay|replaced=false|peer=t7tldQA3",
@@ -1759,5 +1883,142 @@ mod tests {
         let bytes: usize = burst.iter().map(|line| line.len()).sum();
         assert!((burst.len() as u64) <= DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC, "{bytes} bytes");
         assert!((bytes as u64) <= DEFAULT_PRIORITY_RATE_BYTES_PER_SEC, "{bytes} bytes");
+    }
+
+    // -----------------------------------------------------------------------
+    // startup allowance: the session-start fan-out gets ONE extra fixed window
+    // (see the module docs "Startup allowance"). Pure policy, injected clock.
+    // -----------------------------------------------------------------------
+
+    /// The production shape, with the deadline the test wants.
+    fn production_admission(startup_until_ms: u64) -> Admission {
+        Admission {
+            startup_until_ms,
+            startup_limits: RateLimit {
+                bytes: DEFAULT_STARTUP_RATE_BYTES_PER_SEC,
+                records: DEFAULT_STARTUP_RATE_RECORDS_PER_SEC,
+            },
+            ordinary_limits: RateLimit {
+                bytes: DEFAULT_RATE_BYTES_PER_SEC,
+                records: DEFAULT_RATE_RECORDS_PER_SEC,
+            },
+            priority_limits: RateLimit {
+                bytes: DEFAULT_PRIORITY_RATE_BYTES_PER_SEC,
+                records: DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC,
+            },
+            ..Admission::default()
+        }
+    }
+
+    #[test]
+    fn startup_allowance_carries_the_session_start_burst_then_closes() {
+        let mut a = production_admission(DEFAULT_STARTUP_GRACE_MS);
+        // The observed session start: ~150 ordinary fan-out lines of ~60 bytes
+        // offered inside the first second. The ordinary window alone carries 64
+        // of them; the startup allowance carries the next 64.
+        let mut admitted = 0;
+        for _ in 0..200 {
+            if a.admit_ordinary(1_000, 60) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 128, "the startup allowance must extend the window");
+        assert_eq!(a.startup.records, DEFAULT_STARTUP_RATE_RECORDS_PER_SEC);
+        assert_eq!(a.ordinary.records, DEFAULT_RATE_RECORDS_PER_SEC);
+        // Still a FIXED bound: the two windows are spent, nothing carries over,
+        // and it is not a hole in the ordinary budget.
+        assert!(DEFAULT_STARTUP_RATE_BYTES_PER_SEC + DEFAULT_RATE_BYTES_PER_SEC < 32 * 1024);
+        // The next second is a fresh pair of windows.
+        let mut next = 0;
+        for _ in 0..200 {
+            if a.admit_ordinary(2_000, 60) {
+                next += 1;
+            }
+        }
+        assert_eq!(next, 128);
+        // Past the deadline the allowance is never consulted again: only the
+        // ordinary window admits, and the startup window is left untouched.
+        let frozen_open = a.startup.open_ms;
+        let frozen_records = a.startup.records;
+        let mut after = 0;
+        for _ in 0..200 {
+            if a.admit_ordinary(DEFAULT_STARTUP_GRACE_MS + 1, 60) {
+                after += 1;
+            }
+        }
+        assert_eq!(after, DEFAULT_RATE_RECORDS_PER_SEC as usize);
+        assert_eq!(a.startup.open_ms, frozen_open, "the closed allowance was consulted");
+        assert_eq!(a.startup.records, frozen_records);
+        // The deadline is exclusive at the boundary: 1 ms before it the
+        // allowance is still open.
+        let mut boundary = production_admission(DEFAULT_STARTUP_GRACE_MS);
+        let mut at_boundary = 0;
+        for _ in 0..200 {
+            if boundary.admit_ordinary(DEFAULT_STARTUP_GRACE_MS - 1, 60) {
+                at_boundary += 1;
+            }
+        }
+        assert_eq!(at_boundary, 128);
+    }
+
+    #[test]
+    fn startup_allowance_is_bounded_per_window_and_never_touches_evidence() {
+        let mut a = production_admission(DEFAULT_STARTUP_GRACE_MS);
+        // A storm of 1 KiB ordinary lines inside the grace is charged to the
+        // two fixed windows only: at most `startup + ordinary` bytes.
+        let mut charged = 0u64;
+        for _ in 0..64 {
+            if a.admit_ordinary(500, 1024) {
+                charged += 1024;
+            }
+        }
+        assert!(charged <= DEFAULT_STARTUP_RATE_BYTES_PER_SEC + DEFAULT_RATE_BYTES_PER_SEC);
+        assert!(charged > 0);
+        // Evidence keeps its own window: it never spends the startup allowance
+        // (the ordinary window is its fallback), so a marker storm cannot eat
+        // the burst allowance.
+        let mut b = production_admission(DEFAULT_STARTUP_GRACE_MS);
+        let marker_capacity = (DEFAULT_PRIORITY_RATE_RECORDS_PER_SEC
+            + DEFAULT_RATE_RECORDS_PER_SEC) as usize;
+        for i in 0..marker_capacity {
+            assert!(
+                b.admit_evidence(600, 60),
+                "priority + ordinary must carry marker {i} inside the grace"
+            );
+        }
+        assert!(
+            !b.admit_evidence(600, 60),
+            "the evidence bound is fixed, the grace is not a hole"
+        );
+        assert_eq!(b.startup.records, 0, "evidence must not spend the startup allowance");
+        assert_eq!(b.startup.bytes, 0);
+        assert_eq!(
+            b.priority.records + b.ordinary.records,
+            marker_capacity as u64,
+            "every evidence line is charged to one of its own two windows"
+        );
+        // ... and the aggregate bound of the evidence path is unchanged.
+        assert!(
+            b.priority.bytes + b.ordinary.bytes
+                <= DEFAULT_PRIORITY_RATE_BYTES_PER_SEC + DEFAULT_RATE_BYTES_PER_SEC
+        );
+    }
+
+    #[test]
+    fn startup_allowance_is_a_session_start_not_a_process_state() {
+        // The deadline is computed by `configure` from the monotone clock (see
+        // `configure_with`): a logger configured now is open for
+        // `DEFAULT_STARTUP_GRACE_MS` and a later one is open again — the state
+        // is per-install, never carried over from a previous session.
+        let now = mono_ms();
+        let first = now.saturating_add(DEFAULT_STARTUP_GRACE_MS);
+        let later = now.saturating_add(60_000).saturating_add(DEFAULT_STARTUP_GRACE_MS);
+        assert!(later > first);
+        let mut a = production_admission(later);
+        // At the wall position of the FIRST install's deadline this logger is
+        // still open (it was installed much later).
+        assert!(a.startup_open(first));
+        assert!(a.admit_ordinary(first, 60));
+        assert_eq!(a.startup.records, 1);
     }
 }

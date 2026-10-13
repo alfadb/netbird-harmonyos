@@ -168,6 +168,17 @@ try {
       JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-1', 1)))) &&
     !('iface_present' in JSON.parse(
       JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-1', 1, undefined)))));
+  // 2026-10-13 device report §D: the effective tunnel MTU rides the tail next
+  // to iface_present — verbatim when the extension built a config, OMITTED
+  // (never defaulted to 1280) before the first create / in older documents.
+  check('doc mtu rides the tail verbatim when a config was built',
+    m.buildUiStatusDocument(status, net, 'ui-1', 1, true, undefined, null, 1280).mtu === 1280 &&
+    m.buildUiStatusDocument(status, net, 'ui-1', 1, true, undefined, null, 1380).mtu === 1380);
+  check('doc mtu is omitted while no config was built (never a default)',
+    !('mtu' in JSON.parse(
+      JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-1', 1, true)))) &&
+    !('mtu' in JSON.parse(JSON.stringify(
+      m.buildUiStatusDocument(status, net, 'ui-1', 1, true, undefined, null, undefined)))));
   // 2026-10-06 中继地址: the effective session URL wins; the first
   // CONFIGURED url is the fallback; neither → null
   const relayDoc = m.buildUiStatusDocument({

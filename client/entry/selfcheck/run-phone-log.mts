@@ -526,6 +526,12 @@ try {
     ['vpn_memory_level', ['stage', 'state']],
     // 006 bridge surface
     ['vpn_destroy_phase', ['phase', 'stage']],
+    // 2026-10-13 device report §C/G1: the per-request protected-socket supply
+    // outcome — the shell-side refusal reason exists nowhere else on this ROM.
+    ['socket_supply', ['purpose', 'result', 'reason', 'ms']],
+    // 2026-10-13 device report §D: the effective tunnel MTU and its provenance
+    // (default vs network-map), once per config build.
+    ['vpn_tunnel_mtu', ['stage', 'mtu', 'source']],
     ['native_resource_sample', ['stage', 'seq', 'conn_present', 'conn_gen', 'conn_running',
       'conn_state', 'conn_starts', 'conn_stops', 'ice_available', 'ice_sessions', 'ice_live',
       'ice_stopped', 'ice_fds', 'icesock_ready', 'icesock_queued', 'icesock_taken',
@@ -643,13 +649,19 @@ try {
     'private async recoverPhysicalNetwork(): Promise<void> {');
   const recovery = sliceFrom(extText, 'private async recoverPhysicalNetwork(): Promise<void> {',
     'private async startConnectorThenCreate(');
+  // 2026-10-13 observability increment (device report §C/§D): the two new
+  // persisted records and the methods that carry them.
+  const supply = sliceFrom(extText, 'private async fulfillSocketRequest(',
+    'private stopSocketSupply(): void {');
+  const mtuMethod = sliceFrom(extText, 'private logTunnelMtu(',
+    'private logConfigApplied(');
 
   check('every slice for the wiring pins is non-empty',
     tee.length > 0 && sink.length > 0 && sample.length > 0 && tick.length > 0 &&
     onDestroy.length > 0 && death.length > 0 && recreate.length > 0 &&
     failRecreate.length > 0 && runDestroy.length > 0 && connectFailure.length > 0 &&
     networkSwitch.length > 0 && recoveryFail.length > 0 && recovery.length > 0 &&
-    resourceMethod.length > 0,
+    resourceMethod.length > 0 && supply.length > 0 && mtuMethod.length > 0,
     `${tee.length}/${sink.length}/${sample.length}/${tick.length}/${onDestroy.length}`);
 
   check('the extension imports the diagnostics helper and the system-event watcher',
@@ -806,11 +818,56 @@ try {
         record.includes("'stage': 'physical-recovery'") &&
         record.includes("diagMilestone('vpn_net_recovery_failed'");
     })(), recoveryFail);
+  // 2026-10-13 device report §C/G1: every supply request records its outcome on
+  // the PERSISTED tee, inside the reply's finally (so no early return, refusal
+  // or exception path can skip it) — purpose, result, refusal reason, elapsed.
+  // The hilog line stays exactly where it was (this ROM keeps no I-level
+  // app-domain line, which is why the record is the fix).
+  check('every supply request records its outcome on the persisted tee',
+    supply.length > 0 &&
+    supply.includes("diagMilestone('socket_supply'") &&
+    supply.indexOf("diagMilestone('socket_supply'") > supply.indexOf('socketSupplyReply(request.id') &&
+    supply.indexOf("diagMilestone('socket_supply'") < supply.indexOf('socketSupplyCloseFd(fd)') &&
+    supply.includes("'purpose': request.purpose ?? 'unknown'") &&
+    supply.includes("'result': result") &&
+    supply.includes("'reason': reason") &&
+    supply.includes("'ms': Date.now() - t0") &&
+    supply.indexOf('VPN_SOCKET_SUPPLY|id=') < supply.indexOf("diagMilestone('socket_supply'"));
+  check('the supply record carries no fd, no path and no id',
+    (() => {
+      const start: number = supply.indexOf('const supplyFields: DiagFields =');
+      const bag: string = start < 0 ? '' : supply.slice(start, supply.indexOf('};', start));
+      return bag.length > 0 && bag.indexOf('request.id') < 0 && bag.indexOf('fd') < 0 &&
+        bag.indexOf('path') < 0 && bag.indexOf('reply') < 0;
+    })(), supply);
+  // 2026-10-13 device report §D: the effective MTU of the config that is really
+  // submitted (`merged.mtu`, whose source is selectTunnelMtu's answer) is
+  // recorded once per config build — the initial create leg and the recreate
+  // leg — with the provenance token from the PURE source helper.
+  check('the effective tunnel MTU is recorded once per config build, with its source',
+    mtuMethod.length > 0 &&
+    mtuMethod.includes('tunnelMtuSource(baseMtu, announced)') &&
+    mtuMethod.includes("diagMilestone('vpn_tunnel_mtu'") &&
+    mtuMethod.indexOf('this.appliedTunnelMtu = effectiveMtu;') > 0 &&
+    extText.includes(
+      "this.logTunnelMtu(baseTemplate.mtu, net !== null ? net.mtu : null, merged.mtu, 'create');") &&
+    extText.includes("this.logTunnelMtu(recreateTemplate.mtu, net.mtu, merged.mtu, 'recreate');") &&
+    extText.includes('withTunnelSubnetRoute, tunnelMtuSource } from \'./NetBirdVpnConfig\';'));
+  check('the MTU record names the value submitted to the platform, not a default',
+    (() => {
+      const start: number = mtuMethod.indexOf('const milestoneFields: DiagFields =');
+      const bag: string = start < 0 ? '' : mtuMethod.slice(start, mtuMethod.indexOf('};', start));
+      return bag.includes("'mtu': effectiveMtu") && bag.includes("'source': source") &&
+        bag.includes("'stage': leg") && bag.indexOf('1280') < 0 && bag.indexOf('baseMtu') < 0;
+    })(), mtuMethod);
+  check('the published status document carries the same applied MTU',
+    extText.includes('this.managementEndpoint, this.appliedTunnelMtu);') &&
+    extText.includes('private appliedTunnelMtu: number | undefined = undefined;'));
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 16 reviewed names / 21 helper calls',
-    milestones.length === 16 && extText.split('this.diagMilestone(').length === 22);
+  check('the wired milestone surface is exactly the 18 reviewed names / 23 helper calls',
+    milestones.length === 18 && extText.split('this.diagMilestone(').length === 24);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

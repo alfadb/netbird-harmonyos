@@ -11,7 +11,7 @@ import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
   CaptureRouteOutcome, TunnelSubnetRouteOutcome, withCaptureRoute,
-  withTunnelSubnetRoute } from './NetBirdVpnConfig';
+  withTunnelSubnetRoute, tunnelMtuSource } from './NetBirdVpnConfig';
 import { N2EvidenceDecision, N2EvidenceOptions, parseN2Evidence, withN2EvidenceRoutes,
   withoutN2ExcludedRoutes } from './NetBirdN2Evidence';
 import { N2ControlProtocol, sendAndWaitN2Control, sendN2Control } from './NetBirdN2Control';
@@ -886,6 +886,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Serial of the network-config snapshot merged into the platform
   // VpnConfig at create() time (-1 = none applied).
   private appliedNetSerial: number = -1;
+  // 2026-10-13 MTU observability (device report §D): the effective tunnel MTU
+  // of the VpnConfig this process submitted most recently (the platform sets
+  // the vpn-tun interface MTU from exactly that field). undefined until a
+  // config was built, so the published status document OMITS `mtu` before the
+  // first create instead of inventing the default.
+  private appliedTunnelMtu: number | undefined = undefined;
   private lastUnappliedNetSerial: number = -1;
   private lastUnappliedNetLogAtMs: number = 0;
   private lastStatusLogSignature: string = '';
@@ -2201,6 +2207,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'boxMs=%{public}d|fallback=local-config', this.requestId, NETWORK_MAP_WAIT_MS);
     }
     this.logConfigApplied(merged);
+    // Device report §D: the effective tunnel MTU and where it came from, as the
+    // PERSISTED record of the value this create() submits (`merged.mtu` is
+    // exactly what buildPlatformVpnConfig hands to VpnConfig.mtu below).
+    this.logTunnelMtu(baseTemplate.mtu, net !== null ? net.mtu : null, merged.mtu, 'create');
 
     // H1 diagnosis (docs/vpn-create-401-diagnosis-20260915.md §3.2/§4/§5):
     // per-entry SDK-contract validation + the pre-create per-field truth
@@ -5384,6 +5394,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         stage = 'create';
         const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
         this.connection = conn;
+        // Device report §D: the same persisted MTU record for the REBUILT
+        // generation (a recreate re-derives `merged` from the current map, so
+        // the submitted MTU can differ from the first leg's).
+        this.logTunnelMtu(recreateTemplate.mtu, net.mtu, merged.mtu, 'recreate');
         const config: vpnExtension.VpnConfig =
           buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
             this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
@@ -5966,6 +5980,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'protect=%{public}s|reason=%{public}s|elapsedMs=%{public}d|accepted=%{public}s',
           request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
           result, reason, Date.now() - t0, String(reply.ok));
+        // Device report §C/§G1: the per-request supply OUTCOME used to be
+        // observable only through this hilog I-level line, and this ROM keeps
+        // ZERO I-level lines from the app domain — so the 128 refusals of the
+        // 0.0.27 session had no readable reason (`network-dirty` /
+        // `deviation` / `production-gate` / …). The record below rides the
+        // PERSISTED diagnostics tee, which is where the report could read it:
+        // `event=socket_supply` with the purpose, the outcome, the refusal
+        // reason and the elapsed time. The event name is a
+        // PRIORITY_MARKERS entry (phone_log.rs), because the refusals cluster
+        // in the network-change minutes when the ordinary log budget is spent.
+        // Volume: one record per request (~220 per 8 h). No fd, no path, no
+        // credential is carried; the hilog line above is unchanged.
+        const supplyFields: DiagFields = {
+          'purpose': request.purpose ?? 'unknown', 'result': result,
+          'reason': reason, 'ms': Date.now() - t0
+        };
+        this.diagMilestone('socket_supply', supplyFields);
       } finally {
         if (fd >= 0) {
           socketSupplyCloseFd(fd);
@@ -6306,6 +6337,29 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // handle cleared here — independently of the app window close edge, which
     // no longer stops it.
     this.stopInterfaceStatsBurst();
+  }
+
+  // 2026-10-13 MTU observability (device report §D): the effective tunnel MTU
+  // reached the device log NOWHERE. `VPN_CONFIG_APPLIED` below does carry
+  // `mtu=`, but it is a hilog I-level line and this ROM keeps none of the app
+  // domain's I-level lines, so `ifconfig` was the only proof that 1280 was
+  // applied. This record rides the PERSISTED diagnostics tee instead, so
+  // `mtu=` is readable in netbird-vpn.log together with the create leg it
+  // belongs to. `source` is the provenance token of selectTunnelMtu's answer
+  // (tunnelMtuSource: default vs network-map), computed from the same inputs —
+  // never invented, and no secret is involved. One record per config build.
+  private logTunnelMtu(baseMtu: number, announced: number | undefined | null,
+    effectiveMtu: number, leg: string): void {
+    const source: string = tunnelMtuSource(baseMtu, announced);
+    this.appliedTunnelMtu = effectiveMtu;
+    hilog.info(DOMAIN, TAG,
+      'VPN_TUNNEL_MTU|requestId=%{public}s|leg=%{public}s|mtu=%{public}d|source=%{public}s|' +
+      'base=%{public}d',
+      this.requestId, leg, effectiveMtu, source, baseMtu);
+    const milestoneFields: DiagFields = {
+      'stage': leg, 'mtu': effectiveMtu, 'source': source
+    };
+    this.diagMilestone('vpn_tunnel_mtu', milestoneFields);
   }
 
   private logConfigApplied(config: VpnTunnelConfig): void {
@@ -6894,7 +6948,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // parsed a management url; the URL string itself is never published.
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
         this.requestId, Date.now(), ifacePresent, this.managementUrl,
-        this.managementEndpoint);
+        this.managementEndpoint, this.appliedTunnelMtu);
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
       const uiSignature: string = `${doc.state}|${doc.address !== null}|` +
