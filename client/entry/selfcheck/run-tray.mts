@@ -307,16 +307,23 @@ check('the borrowed task is released as SHUTDOWN (no session left)',
   QUIT_TEXT.indexOf('stopKeepAlive(context, KEEP_ALIVE_REVISION_SHUTDOWN, reason)') >= 0);
 check('the difference from a plain system exit is documented in the code',
   QUIT_TEXT.indexOf('PLAIN SYSTEM EXIT') >= 0 &&
-  QUIT_TEXT.indexOf('onDestroy') >= 0);
+  QUIT_TEXT.indexOf('onDestroy') >= 0 &&
+  QUIT_TEXT.indexOf('0.0.30 only made the') >= 0 &&
+  QUIT_TEXT.indexOf('vetoes only on the device where that registration failed') >= 0);
 check('the keep-alive and tray steps of the quit cannot block the exit',
   (QUIT_TEXT.match(/try \{/g) ?? []).length >= 4 &&
   QUIT_TEXT.indexOf('await removeTray(reason);') > QUIT_TEXT.indexOf('catch (error'));
 check('the ability reads the bypass flag from the quit flow',
   ABILITY.indexOf("import { explicitQuitInProgress } from '../tray/NetBirdQuitFlow';") >= 0 &&
   ABILITY.indexOf('explicitQuitInProgress()') >= 0);
-check('the version is 29 / 0.0.29 in both profiles',
-  /versionCode: 29/.test(BUILD_PROFILE) && /versionName: '0\.0\.29'/.test(BUILD_PROFILE) &&
-  /versionCode: 29/.test(APP_JSON5) && /versionName: '0\.0\.29'/.test(APP_JSON5));
+check('the version is 30 / 0.0.30 in both profiles',
+  /versionCode: 30/.test(BUILD_PROFILE) && /versionName: '0\.0\.30'/.test(BUILD_PROFILE) &&
+  /versionCode: 30/.test(APP_JSON5) && /versionName: '0\.0\.30'/.test(APP_JSON5));
+check('0.0.30 fixes the system tray 退出: the guard is gated on the registration',
+  ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
+  ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&
+  ABILITY.indexOf('if (this.closeToBackgroundRegistered) {') >= 0 &&
+  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >= 0);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) { process.exitCode = 1; }

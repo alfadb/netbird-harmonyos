@@ -7,9 +7,13 @@
 //      window, both paths are try/caught and each leaves one diagnostic line —
 //      and the callback does NOT stop the VPN, the task or the ability (the X is
 //      a hide, not an exit).
-//   B. THE FALLBACK GUARD: onPrepareToTerminate() vetoes a termination EXCEPT
-//      while this process is running its own explicit quit, and the permission
-//      the callback needs is declared in module.json5.
+//   B. THE TERMINATE GUARD (0.0.30): onPrepareToTerminate() allows a termination
+//      while this process is running its own explicit quit AND whenever
+//      windowStageClose was registered (the device evidence shows the X reaches
+//      windowStageClose and the system tray 退出 reaches this callback) — it
+//      vetoes ONLY on the device where that registration failed, which is the
+//      fallback's whole reason to exist; the permission the callback needs is
+//      declared in module.json5.
 //   C. KEEP-ALIVE MODE SELECTION: the pure decision (keepAliveModeFor /
 //      isKeepAliveMode, imported BYTE-IDENTICAL) plus the adapter wiring — the
 //      mode is chosen AT REQUEST TIME from deviceInfo.deviceType, both literals
@@ -94,18 +98,35 @@ check('the X stops NOTHING: no VPN stop, no keep-alive stop, no terminateSelf in
 
 const terminateBody = sliceFrom(ABILITY_TEXT, 'onPrepareToTerminate(): boolean {',
   'private persistCredentialOverrides(');
-check('onPrepareToTerminate vetoes by default and allows only OUR OWN quit',
+check('onPrepareToTerminate allows OUR OWN quit first (the app asked to leave)',
   terminateBody.indexOf('if (explicitQuitInProgress()) {') >= 0 &&
   terminateBody.indexOf('if (explicitQuitInProgress()) {') < terminateBody.indexOf('return false;') &&
-  terminateBody.indexOf('return false;') < terminateBody.indexOf('return true;') &&
-  ABILITY_TEXT.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") >= 0);
+  terminateBody.indexOf('return false;') < terminateBody.indexOf('return true;'));
+check('0.0.30: a real termination request is allowed too, when windowStageClose is registered',
+  terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') >= 0 &&
+  terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') <
+    terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >= 0 &&
+  terminateBody.indexOf("'allow-system-exit'") >= 0);
+check('the veto survives ONLY as the last arm (the device where the registration failed)',
+  terminateBody.indexOf('return true;') === terminateBody.lastIndexOf('return true;') &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") <
+    terminateBody.indexOf('return true;'));
+check('the flag is set only where the platform ACCEPTED the registration',
+  guardBody.indexOf('this.closeToBackgroundRegistered = true;') >
+    guardBody.indexOf("windowStage.on('windowStageClose'") &&
+  guardBody.indexOf('this.closeToBackgroundRegistered = true;') < guardBody.indexOf('catch (error)'));
+check('the flag starts false, is written once and read once',
+  ABILITY_TEXT.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
+  (ABILITY_TEXT.match(/this\.closeToBackgroundRegistered/g) ?? []).length === 2);
+check('the device evidence that drove the fix is recorded in the code',
+  ABILITY_TEXT.indexOf('DEVICE EVIDENCE (0.0.29, PC, netbird-ui.log, UI pid 47704') >= 0 &&
+  ABILITY_TEXT.indexOf('holds for the X route only here') >= 0 &&
+  ABILITY_TEXT.indexOf('windowStageClose-unavailable') >= 0);
 check('the permission the fallback needs is declared, inside requestPermissions',
   MODULE_JSON5.indexOf("name: 'ohos.permission.PREPARE_APP_TERMINATE'") >= 0 &&
   MODULE_JSON5.indexOf('requestPermissions') <
     MODULE_JSON5.indexOf('PREPARE_APP_TERMINATE'));
-check('the veto is documented against the platform rule (windowStageClose wins)',
-  ABILITY_TEXT.indexOf('once windowStageClose IS') >= 0 &&
-  ABILITY_TEXT.indexOf('registered, onPrepareToTerminate is no longer called') >= 0);
 
 // ---- C. the borrowed background mode follows the device ---------------------
 

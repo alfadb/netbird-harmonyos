@@ -155,6 +155,13 @@ export default class EntryAbility extends UIAbility {
   // the status/navigation bar colors after a system dark/light switch.
   private mainWindowStage: window.WindowStage | undefined = undefined;
 
+  // 0.0.30 PC 托盘退出修复: did windowStage.on('windowStageClose') actually take?
+  // This is the ONE fact that tells the two close routes apart in
+  // onPrepareToTerminate() below. It is written in exactly one place (the success
+  // arm of registerCloseToBackground) and read in exactly one place, so it can
+  // never disagree with what the platform accepted.
+  private closeToBackgroundRegistered: boolean = false;
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // Diagnostics (earliest safe point): a fresh UI process opens its own
     // observation run and its own marker before anything else in this callback
@@ -384,11 +391,12 @@ export default class EntryAbility extends UIAbility {
   //
   // REGISTRATION MAY FAIL: before HarmonyOS 6.1 the call answers error 801 on a
   // device that is not in free-window mode (and on a ROM without the syscap at
-  // all), so it is try/caught and the failure is ONE diagnostic line. The
-  // fallback is onPrepareToTerminate() below (needs
+  // all), so it is try/caught and the failure is ONE diagnostic line. Whether it
+  // took is remembered in closeToBackgroundRegistered, because that single fact
+  // is what onPrepareToTerminate() below uses to tell the X route from a real
+  // termination request. onPrepareToTerminate() (needs
   // ohos.permission.PREPARE_APP_TERMINATE, normal/system_grant, declared in
-  // module.json5) — note the platform's own rule that once windowStageClose IS
-  // registered, onPrepareToTerminate is no longer called for the X button.
+  // module.json5) is the FALLBACK for the device where this registration fails.
   // ---------------------------------------------------------------------------
   private registerCloseToBackground(windowStage: window.WindowStage): void {
     try {
@@ -400,11 +408,15 @@ export default class EntryAbility extends UIAbility {
         // true = do not close the main window.
         return true;
       });
+      // The registration was accepted: from here on the X button is this
+      // callback's business and a termination request can mean only one thing
+      // (see onPrepareToTerminate).
+      this.closeToBackgroundRegistered = true;
       hilog.info(DOMAIN, TAG, 'UI_CLOSE_GUARD|mode=windowStageClose|result=registered');
     } catch (error) {
       // 801 on a non-free-window device, or the API missing on an old ROM: the
       // page keeps its pre-0.0.29 behaviour for the X button, and
-      // onPrepareToTerminate() is the fallback.
+      // onPrepareToTerminate() stays the fallback that must veto.
       const code: number | undefined = (error as BusinessFailure).code;
       hilog.warn(DOMAIN, TAG, 'UI_CLOSE_GUARD|mode=windowStageClose|result=error|code=%{public}s',
         String(code ?? 'none'));
@@ -443,8 +455,9 @@ export default class EntryAbility extends UIAbility {
     diagnosticsEvent('ui_close_guard', fields);
   }
 
-  // 2026-10-13 关闭到后台（0.0.29）—— the FALLBACK guard, and the only place that
-  // knows whether a termination is OUR OWN.
+  // 2026-10-13 关闭到后台（0.0.29）；2026-10-13 系统托盘退出修复（0.0.30）—— the guard
+  // that separates "the user closed the window" from "the user asked the app to
+  // exit", and the only place that knows whether a termination is OUR OWN.
   //
   // onPrepareToTerminate(): @ohos.app.ability.UIAbility.d.ts:681, API 10,
   // @permission ohos.permission.PREPARE_APP_TERMINATE (normal / system_grant —
@@ -452,18 +465,39 @@ export default class EntryAbility extends UIAbility {
   // "the user clicks the close button or exits from the dock / system tray", and
   // returning true CANCELS the termination.
   //
+  // DEVICE EVIDENCE (0.0.29, PC, netbird-ui.log, UI pid 47704 — the user's test):
+  //   * 15:45:40.884 / 15:45:49.209 / 15:45:57.054 — three clicks on the
+  //     SYSTEM-GENERATED tray 退出 each produced `ui_close_guard result=veto
+  //     stage=onPrepareToTerminate` and NOTHING else: no `windowStageClose`
+  //     record, no onDestroy. The app stayed up, which is exactly the bug.
+  //   * the same process had registered windowStageClose successfully (the log
+  //     contains no `windowStageClose-unavailable` record), and in the earlier
+  //     pid 41730 the X button produced `windowStageClose` + `minimize ok` and
+  //     never onPrepareToTerminate.
+  //   => on this ROM the two routes are disjoint and each fires ONE callback:
+  //      the X reaches windowStageClose; the tray 退出 reaches
+  //      onPrepareToTerminate. (The SDK's own note — "if ... a listener for
+  //      window.WindowStage.on('windowStageClose') [is registered], this callback
+  //      function is not executed" — holds for the X route only here; the system
+  //      tray route still arrives.) So a termination request that arrives WHILE
+  //      windowStageClose is registered cannot be the X: it is the user asking
+  //      the app to exit, and 0.0.29 was vetoing it. Do not do that again.
+  //
   // WHAT IT ANSWERS HERE:
-  //   * false (allow the termination) while THIS process is running the explicit
-  //     quit flow (tray 退出并断开 / 设置 → 退出应用) — the app asked to leave, so
-  //     the guard must not fight it. By that point the flow has already
-  //     disconnected the VPN, released the continuous task and removed the tray
-  //     icon (tray/NetBirdQuitFlow.ets).
-  //   * true (cancel) otherwise. With the X intercepted above this normally never
-  //     runs; it is here for the device where windowStageClose could not be
-  //     registered (801) — and it means the system's auto-generated tray 退出 row
-  //     and a Dock close no longer end the app, which is the price of "close =
-  //     background" and is documented rather than hidden. The exit the user is
-  //     meant to use is the explicit one (tray 退出并断开 / 设置 → 退出应用).
+  //   * false (allow) while THIS process is running the explicit quit flow (tray
+  //     退出并断开 / 设置 → 退出应用) — the app asked to leave, so the guard must
+  //     not fight it. By that point the flow has already disconnected the VPN,
+  //     released the continuous task and removed the tray icon
+  //     (tray/NetBirdQuitFlow.ets).
+  //   * false (allow) when closeToBackgroundRegistered is true: the X is already
+  //     intercepted above, so this request is the system's auto-generated tray
+  //     退出 (or a dock close) and it MUST go through — plain exit, with today's
+  //     onDestroy cleanup (release the continuous task, close the writer; the
+  //     status-bar icon dies with the process, and the :vpn extension process
+  //     keeps the tunnel). A user who wants the VPN gone uses 退出并断开.
+  //   * true (cancel) ONLY when the registration above FAILED (801 / no syscap):
+  //     there the X arrives HERE, and vetoing is what keeps "close = background"
+  //     on such a device. This is the fallback's whole reason to exist.
   //     NOTE the deliberate asymmetry with PLAIN SYSTEM EXIT (force-stop, OOM,
   //     device shutdown): those paths do not consult this callback at all, and
   //     their semantics stay pre-0.0.29 — onDestroy's existing cleanup runs and
@@ -472,6 +506,13 @@ export default class EntryAbility extends UIAbility {
     if (explicitQuitInProgress()) {
       hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=explicit-quit');
       this.recordCloseGuard('onPrepareToTerminate', 'allow-explicit-quit');
+      return false;
+    }
+    if (this.closeToBackgroundRegistered) {
+      // 0.0.30: the X is covered by windowStageClose, so this is a REAL exit
+      // request (the system tray 退出 row / a dock close). Let it terminate.
+      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=system-exit');
+      this.recordCloseGuard('onPrepareToTerminate', 'allow-system-exit');
       return false;
     }
     hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|note=close-is-background');

@@ -34,11 +34,15 @@
 //     cleanup runs (unregister the task callbacks, best-effort stopBackgroundRunning,
 //     stop the diagnostics); the VPN extension process and its tunnel are NOT
 //     touched, so a still-running tunnel may survive the UI process. That is the
-//     pre-0.0.29 semantics and it is deliberately unchanged.
+//     pre-0.0.29 semantics and it is deliberately unchanged. 0.0.30 only made the
+//     tray 退出 item REACH this path again (0.0.29's guard vetoed it, so the item
+//     did nothing at all).
 //
-// THE BYPASS FLAG: EntryAbility.onPrepareToTerminate() vetoes termination by
-// default (the fallback for a device where windowStageClose cannot be
-// registered). That veto must never block OUR OWN exit, so the flag below is set
+// THE BYPASS FLAG: EntryAbility.onPrepareToTerminate() lets a plain system exit
+// through whenever windowStageClose was registered (0.0.30 — the device evidence
+// shows the system tray 退出 arrives at that callback, not at windowStageClose)
+// and vetoes only on the device where that registration failed. Either way the
+// veto must never block OUR OWN exit, so the flag below is set
 // FIRST — before the disconnect, before any await — and the ability reads it.
 // The flag is process-scoped and one-way: this process is on its way out.
 
