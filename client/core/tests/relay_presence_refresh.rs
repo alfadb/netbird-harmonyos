@@ -355,14 +355,17 @@ impl WgPeerApplier for RecordingSeam {
     }
 }
 
-/// Mirrors the production `relay_carrier_pump` contract through the PUBLIC
-/// orchestration surface only: while the relay is Ready, keep every mapped
-/// lane ensured (`ensure_lane` per pass — the lane universe here is one
-/// peer); drain inbound frames between passes. The 20ms pass pace is a CPU
-/// bound, never a correctness input (the production pump waits 500ms);
-/// every assertion below waits on events, not on passes. Any lane-recovery
-/// fix must surface through this contract (presence-aware `ensure_lane` or
-/// the pump's per-pass reconcile) to be observable by the WG seam.
+/// Drives the lane reconcile through the PUBLIC orchestration surface only:
+/// while the relay is Ready, keep the mapped lane ensured (`ensure_lane` per
+/// pass — the lane universe here is one peer) and drain inbound frames
+/// between passes. This is exactly the call the production pump reaches for a
+/// peer whose lane a received OFFER/ANSWER requested
+/// (`RelayCarrier::spawn_requested_lanes` → `ensure_lane`; upstream
+/// `WorkerRelay.OnNewOffer`, worker_relay.go:44-90): the driver simply applies
+/// that trigger on EVERY pass, so the presence/came-back reconcile below is
+/// exercised as production reaches it. The 20ms pass pace is a CPU bound,
+/// never a correctness input (the production pump waits 500ms); every
+/// assertion below waits on events, not on passes.
 async fn pump_loop(carrier: Arc<RelayCarrier>, client: RelayClient, key: &'static str) {
     loop {
         match client.state() {
