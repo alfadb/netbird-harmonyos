@@ -2449,6 +2449,17 @@ impl WgDevice {
             .any(|p| p.key_b64 == pub_key_b64 && p.session_established && !p.expired)
     }
 
+    /// Whether a NON-UDP egress carrier (relay lane) is currently attached for
+    /// the peer — the guard's `relayUsedAndUp` input
+    /// ([`WgPeerApplier::carrier_attached`](crate::connector::WgPeerApplier::carrier_attached)).
+    /// Cheap read (one scan, no clone, no stats): called from the ICE pump's
+    /// guard tick only for peers that are about to be re-offered.
+    pub fn peer_carrier_attached(&self, pub_key_b64: &str) -> bool {
+        self.peers
+            .iter()
+            .any(|p| p.key_b64 == pub_key_b64 && p.carrier.is_some())
+    }
+
     // -- internals ----------------------------------------------------------
 
     /// Handle the outcome of ONE already-decapsulated datagram (upstream
@@ -3219,6 +3230,12 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
         self.device.lock_poison().handle_carrier(datagram, pub_key_b64, now_ms).sent
     }
 
+    /// Guard `PartiallyConnected` input: is the peer's relay lane attached
+    /// (see the trait method's contract)?
+    fn carrier_attached(&self, pub_key_b64: &str) -> bool {
+        self.device.lock_poison().peer_carrier_attached(pub_key_b64)
+    }
+
     /// STAGE 3: the bare device's outer-socket fd, for the shared mux.
     fn wg_socket_fd(&self) -> Option<i32> {
         self.device.lock_poison().socket_fd()
@@ -3909,6 +3926,22 @@ impl WgPeerApplier for WgDeviceFeed {
     /// after adoption).
     fn carrier_capable(&self) -> bool {
         true
+    }
+
+    /// Guard `PartiallyConnected` input (see the trait method's contract):
+    /// the lane exists as soon as it is injected — the pre-device buffer
+    /// ([`WgDeviceFeed::attach_carrier`]'s `carriers`) counts exactly like a
+    /// lane the live device holds, or a lane injected while the device is
+    /// still being built would read "no relay".
+    fn carrier_attached(&self, pub_key_b64: &str) -> bool {
+        let g = self.inner.lock_poison();
+        if g.carriers.iter().any(|(k, _)| k == pub_key_b64) {
+            return true;
+        }
+        match g.device.as_ref() {
+            Some(d) => d.with_device(|dev| dev.peer_carrier_attached(pub_key_b64)),
+            None => false,
+        }
     }
 
     /// N13-D2: relay-arrived datagram → live device (key-matched); no

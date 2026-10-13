@@ -547,6 +547,27 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn carrier_capable(&self) -> bool {
         false
     }
+    /// ALIGN guard `PartiallyConnected` (upstream
+    /// `client/internal/peer/guard/guard.go:131-138`; classification
+    /// `conn.go:1052,1066,1074-1076`): is the peer's NON-UDP egress carrier
+    /// (relay lane) attached to this seam RIGHT NOW? That is the guard's
+    /// `relayUsedAndUp` input — "relay is usable for this peer" — read by the
+    /// ICE orchestrator on the guard's own due ticks only
+    /// (`crate::peer_conn::PeerIceOrchestrator::guard_tick`).
+    ///
+    /// Deliberately the ATTACH fact (`carrier_attached`), not `on_carrier`
+    /// (the last egress happened to leave over the carrier): upstream
+    /// classifies on the relay CONNECTION status (`conn.go:851`
+    /// `conn.statusRelay.Get() == worker.StatusConnected`), which does not
+    /// require traffic to have flowed. A traffic-dependent reading would leave
+    /// exactly the unreachable peers — the ones with nothing to send — on the
+    /// endless renegotiation treadmill this branch exists to stop.
+    ///
+    /// Default `false`: a seam that cannot host a lane always reads "no
+    /// relay", so its peers keep upstream's plain `Disconnected` backoff.
+    fn carrier_attached(&self, _pub_key_b64: &str) -> bool {
+        false
+    }
     /// N13-D2: feed one datagram that arrived over the relay carrier —
     /// the device's carrier-match rules apply (sender key authoritative;
     /// `crate::wg_device` module docs「入向匹配映射」). Returns datagrams
@@ -4205,7 +4226,7 @@ fn ice_endpoint_json(key: &str, v: Option<&IceCandidateEndpoint>) -> String {
 /// retained pair into a live connection.
 fn ice_detail_json(d: &PeerIceDetail) -> String {
     format!(
-        "{{{},{},{},{},{},{},{},{}}}",
+        "{{{},{},{},{},{},{},{},{},{}}}",
         jstr("pub_key", &d.pub_key),
         jstr("state", d.state.as_str()),
         match d.controlling {
@@ -4223,6 +4244,12 @@ fn ice_detail_json(d: &PeerIceDetail) -> String {
                 .map(ErrorClass::to_json)
                 .unwrap_or_else(|| "null".to_string())
         ),
+        // Appended 0.0.27 (alignment guard `PartiallyConnected`): the peer's
+        // guard retry档 — `fast` = the exponential backoff ticker, `hourly` =
+        // the 3-retry budget exhausted → one attempt per hour (upstream
+        // `guard.go:131-138` + `guard/ice_retry_state.go`). Every pre-existing
+        // key keeps its position.
+        jstr("ice_retry", d.ice_retry.as_str()),
     )
 }
 
@@ -9818,13 +9845,16 @@ mod tests {
         // N5c: the per-peer ICE summary rides the status document
         // (unknown_signal = signal frames dropped for an unmatched sender key;
         // device run 3 stalled the whole negotiation with this as the ONLY
-        // symptom, so it is part of the frozen contract).
+        // symptom, so it is part of the frozen contract). 0.0.27 appends the
+        // ICE pump pass counters (the CPU report's §1.1 unobservable pass
+        // rate) at the TAIL of the frozen summary.
         assert!(
             json.contains(
                 "\"ice\":{\"peers\":2,\"idle\":0,\"gathering\":0,\"checking\":0,\"connected\":1,\
                  \"disconnected\":0,\"failed\":1,\"endpoints_applied\":1,\"reachable\":1,\
                  \"unknown_signal\":0,\
-                 \"last_error\":{\"class\":\"network\",\"status\":0}}"
+                 \"last_error\":{\"class\":\"network\",\"status\":0},\
+                 \"pump_passes_total\":0,\"pump_passes_per_10s\":0}"
             ),
             "{json}"
         );
@@ -10018,6 +10048,7 @@ mod tests {
             endpoint_applied: false,
             reachable: false,
             last_error: None,
+            ice_retry: crate::peer_conn::IceRetryMode::Fast,
         };
         let connected = PeerIceDetail {
             pub_key: "REVG".to_string(),
@@ -10036,6 +10067,7 @@ mod tests {
             endpoint_applied: true,
             reachable: true,
             last_error: None,
+            ice_retry: crate::peer_conn::IceRetryMode::Fast,
         };
         // Disconnected KEEPS its selected pair (the live session snapshot
         // still holds it) but `reachable` stays FALSE: a retained endpoint is
@@ -10057,6 +10089,8 @@ mod tests {
             endpoint_applied: true,
             reachable: false,
             last_error: Some(ErrorClass::Auth { status: 7 }),
+            // the hourly guard档 is observable per peer
+            ice_retry: crate::peer_conn::IceRetryMode::Hourly,
         };
         let details = ice_peers_json(Some(&[idle.clone(), connected.clone(), disconnected.clone()]));
         assert_eq!(
@@ -10064,17 +10098,23 @@ mod tests {
             "\"ice_peers\":[\
              {\"pub_key\":\"QUJD\",\"state\":\"idle\",\"controlling\":null,\
              \"selected_local\":null,\"selected_remote\":null,\
-             \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null},\
+             \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null,\
+             \"ice_retry\":\"fast\"},\
              {\"pub_key\":\"REVG\",\"state\":\"connected\",\"controlling\":true,\
              \"selected_local\":{\"type\":\"host\",\"address\":\"192.168.1.5\",\"port\":51820},\
              \"selected_remote\":{\"type\":\"srflx\",\"address\":\"203.0.113.9\",\"port\":51821},\
-             \"endpoint_applied\":true,\"reachable\":true,\"last_error\":null},\
+             \"endpoint_applied\":true,\"reachable\":true,\"last_error\":null,\
+             \"ice_retry\":\"fast\"},\
              {\"pub_key\":\"R0hJ\",\"state\":\"disconnected\",\"controlling\":false,\
              \"selected_local\":{\"type\":\"prflx\",\"address\":\"10.0.0.7\",\"port\":41000},\
              \"selected_remote\":{\"type\":\"relay\",\"address\":\"198.51.100.5\",\"port\":28443},\
              \"endpoint_applied\":true,\"reachable\":false,\
-             \"last_error\":{\"class\":\"auth\",\"status\":7}}]"
+             \"last_error\":{\"class\":\"auth\",\"status\":7},\"ice_retry\":\"hourly\"}]"
         );
+        // the guard retry档 token is projected per peer (the alignment
+        // `PartiallyConnected` state surface): both values are reachable.
+        assert!(details.contains("\"ice_retry\":\"fast\""), "{details}");
+        assert!(details.contains("\"ice_retry\":\"hourly\""), "{details}");
         // every candidate type token is reachable through the projection
         for token in [
             "\"type\":\"host\"",
@@ -10137,10 +10177,11 @@ mod tests {
             "the tail order is ice_peers then ice_mux: {json}"
         );
 
-        // the contract reader: by key, the array carries exactly the eight
+        // the contract reader: by key, the array carries exactly the nine
         // documented keys in order; each endpoint object is exactly
         // {type,address,port} in order; the frozen last_error object is the
-        // same safe class+status shape (never a message).
+        // same safe class+status shape (never a message), and the appended
+        // guard retry档 token is the last key.
         fn obj_keys(v: &Json) -> Vec<String> {
             match v {
                 Json::Obj(entries) => entries.iter().map(|(k, _)| k.clone()).collect(),
@@ -10169,8 +10210,13 @@ mod tests {
         assert_eq!(
             joined(&items[0]),
             "pub_key,state,controlling,selected_local,selected_remote,\
-             endpoint_applied,reachable,last_error",
+             endpoint_applied,reachable,last_error,ice_retry",
             "the per-peer key order is the frozen contract"
+        );
+        assert_eq!(
+            obj_get(&items[2], "ice_retry"),
+            &Json::Str("hourly".to_string()),
+            "the guard retry档 is projected verbatim"
         );
         assert_eq!(joined(obj_get(&items[1], "selected_local")), "type,address,port");
         assert_eq!(joined(obj_get(&items[1], "selected_remote")), "type,address,port");
@@ -10286,7 +10332,8 @@ mod tests {
             json.ends_with(
                 ",\"ice_peers\":[{\"pub_key\":\"UEVFUjA=\",\"state\":\"idle\",\
                  \"controlling\":null,\"selected_local\":null,\"selected_remote\":null,\
-                 \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null}],\
+                 \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null,\
+                 \"ice_retry\":\"fast\"}],\
                  \"ice_mux\":null}"
             ),
             "{json}"

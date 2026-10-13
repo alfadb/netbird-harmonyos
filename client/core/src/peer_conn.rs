@@ -133,6 +133,16 @@ const GUARD_MULTIPLIER: f64 = 2.0;
 pub const PEER_TIMEOUT_MIN_MS: u64 = 30_000;
 pub const PEER_TIMEOUT_MAX_MS: u64 = 45_000;
 
+/// `PartiallyConnected`（本 peer 的 relay 承载已挂、ICE 未连）下的 ICE 发起
+/// 预算 = 上游 `guard/ice_retry_state.go:11` `maxICERetries = 3`：连续 3 次
+/// 发起仍未连上就转每小时（`guard.go:131-138`）。
+pub const ICE_RETRY_MAX: u32 = 3;
+
+/// 预算耗尽后的周期 = 上游 `guard/ice_retry_state.go:13`
+/// `iceRetryInterval = 1 * time.Hour`（`guard.go:135` 的
+/// `iceState.enterHourlyMode()` → `hourlyC()`）。
+pub const ICE_RETRY_HOURLY_MS: u64 = 3_600_000;
+
 /// 抽一个 [30 s, 45 s) 的 per-peer 超时（`engine.go:2010-2011` 的同一算术）。
 fn draw_peer_timeout_ms(rng: &mut dyn Rng) -> u64 {
     let span = (PEER_TIMEOUT_MAX_MS - PEER_TIMEOUT_MIN_MS) as f64;
@@ -268,6 +278,30 @@ impl PeerIceState {
             PeerIceState::Connected => "connected",
             PeerIceState::Disconnected => "disconnected",
             PeerIceState::Failed => "failed",
+        }
+    }
+}
+
+/// per-peer guard 的**重试节拍档位**（上游 `guard/ice_retry_state.go:18-22`
+/// 的 `iceRetryState` 在状态面上的投影）。
+///
+/// - `Fast` = 指数退避 ticker 在驱动（`guard.go:101-108` 的 `initialTicker`
+///   3 s 起跳 / `:200-213` 的 `newReconnectTicker` 800 ms 起跳，×2 封顶在
+///   per-peer 的 [30 s, 45 s)）——含预算已用掉若干次但尚未耗尽的情形；
+/// - `Hourly` = 预算是给 `PartiallyConnected` 的 3 次（[`ICE_RETRY_MAX`]）已
+///   耗尽，ticker 已换成每小时一次（`guard.go:135-137`
+///   `enterHourlyMode()` → `hourlyC()`），直到上游的复位事件重置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IceRetryMode {
+    Fast,
+    Hourly,
+}
+
+impl IceRetryMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IceRetryMode::Fast => "fast",
+            IceRetryMode::Hourly => "hourly",
         }
     }
 }
@@ -675,6 +709,11 @@ pub struct PeerIceDetail {
     pub reachable: bool,
     /// 最后一次错误的分类（无消息文本，密钥纪律同 connector）。
     pub last_error: Option<ErrorClass>,
+    /// 本 peer 的 guard 重试档位（[`IceRetryMode`]）：`fast` = 指数退避
+    /// ticker 在驱动，`hourly` = `PartiallyConnected` 的 3 次预算已耗尽、
+    /// 每小时一次（上游 `guard.go:131-138` + `ice_retry_state.go`）。纯观测
+    /// 投影，不改变任何行为。
+    pub ice_retry: IceRetryMode,
 }
 
 /// 全体 peer 的 ICE 汇总（`connector_status()` 的 `ice` 字段）。
@@ -697,13 +736,24 @@ pub struct IceOrchestratorSummary {
     // stall with NO other symptom (device run 3: peer stayed `idle` forever).
     pub unknown_signal: u64,
     pub last_error: Option<ErrorClass>,
+    /// ICE pump 自编排创建以来跑过的**拍数**（每次
+    /// [`PeerIceOrchestrator::run_once`] 计一）。真机报告的 §1.1 指出
+    /// `N5e_ICE|mux|…|periodic=1` 只证明「≥1 拍/10 s」，泵的真实拍率在
+    /// 日志里不可观测——这是那个量。
+    pub pump_passes_total: u64,
+    /// 最近一个完整周期窗口内折算出的**每 10 s 拍数**（0 = 第一个窗口尚未
+    /// 走完）。窗口与 [`HEALTH_SUMMARY_MS`] 同源；折算是整除去尾，如实是
+    /// 「约」而不是精确瞬时值。
+    pub pump_passes_per_10s: u64,
 }
 
 impl IceOrchestratorSummary {
-    /// JSON 对象（计数 + 分类，无密钥材料）。
+    /// JSON 对象（计数 + 分类，无密钥材料）。字段**追加式**：0.0.27 在既有
+    /// `last_error` 之后补 `pump_passes_total` / `pump_passes_per_10s`，
+    /// 既有字段位置与拼写不动。
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jnum("peers", self.peers as u64),
             jnum("idle", self.idle as u64),
             jnum("gathering", self.gathering as u64),
@@ -721,6 +771,8 @@ impl IceOrchestratorSummary {
                     .map(ErrorClass::to_json)
                     .unwrap_or_else(|| "null".to_string())
             ),
+            jnum("pump_passes_total", self.pump_passes_total),
+            jnum("pump_passes_per_10s", self.pump_passes_per_10s),
         )
     }
 }
@@ -799,6 +851,30 @@ pub(crate) fn mux_stats_line(
         s.xor_expired,
         s.queue_dropped,
         u8::from(periodic)
+    )
+}
+
+/// ICE pump 的**拍计数**行（与 [`mux_stats_line`] 同节奏的兄弟周期行，
+/// `periodic=1`）——真机 0.0.27 CPU 分析报告 §1.1/§5.4：`N5e_ICE|mux|…` 只
+/// 证明「每 10 s 至少一拍」，泵的真实拍率、以及 §2.1「每拍成本 × 拍率」这个
+/// 分解此前完全没有观测面。
+///
+/// - `passes_total`：自编排创建以来的总拍数（单调，跨周期累计）；
+/// - `passes_per_10s`：**该窗口**内拍数按窗口实际时长折算到 10 s 的整数速率
+///   （尾数截断，不是瞬时值）；
+/// - `window_ms`：折算用的真实窗口毫秒（周期行只在
+///   `now − last >= HEALTH_SUMMARY_MS` 时打，所以窗口 ≥ 10 s；给出真实值
+///   才不会把「约 10 s」当成精确分母）。
+///
+/// 三个量都是纯计数，无地址、无 fd、无密钥。
+pub(crate) fn pump_stats_line(passes_total: u64, passes_window: u64, window_ms: u64) -> String {
+    let per_10s = if window_ms == 0 {
+        0
+    } else {
+        passes_window.saturating_mul(10_000) / window_ms
+    };
+    format!(
+        "N5e_ICE|pump|passes_total={passes_total}|passes_per_10s={per_10s}|window_ms={window_ms}|periodic=1"
     )
 }
 
@@ -937,6 +1013,14 @@ struct PeerConn {
     /// 下一跳的时刻（注入时钟；0 = 立即到期）。对应上游 ticker 的
     /// **保证首跳**（`NewTicker` 创建即发一次，`guard.go:101`/`:211`）。
     guard_next_at_ms: u64,
+    /// 上游 `iceRetryState.retries`（`ice_retry_state.go:20`）：本周期内
+    /// `PartiallyConnected` 下已消费的 ICE 发起预算。`guard_reset` 归零。
+    guard_ice_retries: u32,
+    /// 上游 `iceRetryState.hourly != nil`（`ice_retry_state.go:21`）：预算
+    /// 耗尽后 ticker 已换成每小时一次，`guard_next_at_ms` 按
+    /// [`ICE_RETRY_HOURLY_MS`] 前进（退避 backoff 停在原处不再前进，与上游
+    /// `ticker.Stop()` 同义）。`guard_reset` 清除。
+    guard_hourly: bool,
     /// 上一次输出健康摘要行的时刻（0 = 尚未输出过；见
     /// [`HEALTH_SUMMARY_MS`]）。
     last_health_ms: u64,
@@ -974,6 +1058,8 @@ impl PeerConn {
             // 上游 `NewTicker` 保证创建即发一次首跳（`guard.go:101`）：0 =
             // 本 peer 的第一拍就可以发起。
             guard_next_at_ms: 0,
+            guard_ice_retries: 0,
+            guard_hourly: false,
             last_health_ms: 0,
             gather: None,
         }
@@ -1020,6 +1106,11 @@ impl PeerConn {
             endpoint_applied: status.endpoint_applied,
             reachable: status.reachable,
             last_error: status.last_error,
+            ice_retry: if self.guard_hourly {
+                IceRetryMode::Hourly
+            } else {
+                IceRetryMode::Fast
+            },
         }
     }
 }
@@ -1135,6 +1226,17 @@ pub struct PeerIceOrchestrator {
     /// 不可观测；本字段驱动与健康摘要同一节奏（[`HEALTH_SUMMARY_MS`]）的
     /// 同一行计数器快照。
     last_mux_stats_ms: u64,
+    /// ICE pump 的拍计数（真机报告 §1.1：泵的真实拍率此前无观测面）：
+    /// 累计总拍数与**当前窗口**内的拍数，窗口边界与 [`HEALTH_SUMMARY_MS`]
+    /// 同源，见 [`pump_stats_line`]。
+    pump_passes_total: u64,
+    pump_passes_window: u64,
+    /// 当前拍计数窗口的起点（0 = 尚未开过窗口）。
+    last_pump_stats_ms: u64,
+    /// 最近一个**完整**窗口折算出的每 10 s 拍数（状态面
+    /// [`IceOrchestratorSummary::pump_passes_per_10s`] 的来源；0 = 尚无完整
+    /// 窗口）。
+    pump_passes_per_10s: u64,
 }
 
 impl PeerIceOrchestrator {
@@ -1159,6 +1261,10 @@ impl PeerIceOrchestrator {
             mux: Arc::new(Mutex::new(None)),
             guard_rng: Box::new(OsRandom),
             last_mux_stats_ms: 0,
+            pump_passes_total: 0,
+            pump_passes_window: 0,
+            last_pump_stats_ms: 0,
+            pump_passes_per_10s: 0,
         }
     }
 
@@ -1422,6 +1528,8 @@ impl PeerIceOrchestrator {
         let mut s = IceOrchestratorSummary {
             peers: self.peers.len(),
             unknown_signal: self.unknown_signal,
+            pump_passes_total: self.pump_passes_total,
+            pump_passes_per_10s: self.pump_passes_per_10s,
             ..Default::default()
         };
         for p in &self.peers {
@@ -1729,6 +1837,11 @@ impl PeerIceOrchestrator {
         // 刷屏，所以只记**慢拍**（≥ [`TICK_SLOW_LOG_MS`]）：健康拍长 0~1 ms，
         // 慢拍恰好是"有东西阻塞了泵"的现场。
         let pass_start_ms = crate::sys::mono_ms();
+        // 真机 0.0.27 CPU 报告 §1.1：泵的真实拍率此前不可观测（周期 mux 行只
+        // 证明「≥1 拍/10 s」）。每次进 `run_once` 就是一拍，入口计数；窗口的
+        // 折算与输出在下面与 mux 周期快照同一节奏的位置。
+        self.pump_passes_total = self.pump_passes_total.saturating_add(1);
+        self.pump_passes_window = self.pump_passes_window.saturating_add(1);
         // signal 流重连（false→true 的边沿）= 上游 guard 的 sr-reconnect 事件
         // （`guard.go:155-160` `srReconnectedChan`：signal/relay 重连 → 新
         // `newReconnectTicker`，800 ms 起跳，立即首跳被消费）。断流期间本端
@@ -1769,6 +1882,25 @@ impl PeerIceOrchestrator {
                 let s = mux.stats();
                 crate::hilog::emit(&mux_stats_line(0, &s, true));
             }
+        }
+        // 兄弟周期行（真机 0.0.27 CPU 报告 §1.1/§5.4）：泵的**拍率**。上面
+        // 那行 mux 快照只在 mux 存在时打，而且它只证明「≥1 拍/10 s」；这一行
+        // 无条件（不依赖 mux、不依赖任何 peer），给出总拍数与窗口折算拍率。
+        // 窗口只在 `now − 起点 >= HEALTH_SUMMARY_MS` 时收口；首个窗口的起点
+        // 是第一拍的 `now_ms`，因此第一次输出时窗口已经是一个满周期。
+        if self.last_pump_stats_ms == 0 {
+            self.last_pump_stats_ms = now_ms;
+        } else if now_ms.saturating_sub(self.last_pump_stats_ms) >= HEALTH_SUMMARY_MS {
+            let window_ms = now_ms.saturating_sub(self.last_pump_stats_ms);
+            let passes = self.pump_passes_window;
+            self.last_pump_stats_ms = now_ms;
+            self.pump_passes_window = 0;
+            self.pump_passes_per_10s = passes.saturating_mul(10_000) / window_ms;
+            crate::hilog::emit(&pump_stats_line(
+                self.pump_passes_total,
+                passes,
+                window_ms,
+            ));
         }
         // 壳层换过 mux（物理网络切换后重新 protect + feed）：仍骑旧 mux 的
         // 会话已经是死路径，拆掉重协商。
@@ -1847,10 +1979,25 @@ impl PeerIceOrchestrator {
     ///   （`conn.go:537-540`，且只在**状态真的从 Connected 变过去**时才发，
     ///   `conn.go:535-539`）→ `guard.go:148-153`；
     /// - signal（+relay）重连：`SRWatcher.onReconnected`（`sr_watcher.go:76-86`）
-    ///   → `guard.go:155-160`；
-    /// - 物理网络变化：`NetworkWatcher.Changed()` → `guard.go:162-177`；
-    /// - relay 断连：`conn.go:663-667` → `guard.go:141-146`——本核心的 ICE
-    ///   平面尚无 relay 传输（relay 行为本轮不动），故无对应调用点。
+    ///   → `guard.go:155-160`——本核心的对应物是 signal 流的 false→true 边沿
+    ///   （`run_once` 的 `signal_reconnected`，`:155-160` 的 relay 侧重连通知
+    ///   在本核心由 relay 客户端自持（`connector::physical_network_changed`
+    ///   里 `client.network_changed()`），没有单独的回调面；
+    /// - 物理网络变化：`NetworkWatcher.Changed()` → `guard.go:162-177`。
+    ///
+    /// 第 4 个上游复位事件——**relay 断连**（`conn.go:663-667` →
+    /// `guard.go:141-146`）——在本核心仍无对应调用点：ICE 平面只**读** WG seam
+    /// 的「本 peer 承载是否已挂」做分类（见 [`guard_tick`]），承载的挂/卸由
+    /// connector 的 [`RelayCarrier`](crate::connector::RelayCarrier) 在它自己的
+    /// 生命周期锁下完成，没有任何事件交到本编排。因此「承载卸掉 + 该 peer 已
+    /// 在每小时档」的恢复只能等下一个每小时跳（或上面两个复位事件之一），
+    /// 这一点与上游的差别是已知且刻意的（不引入跨模块回调＝不引入
+    /// 编排锁与承载生命周期锁的倒序风险）。
+    ///
+    /// 复位同时清零上游 `iceRetryState`（`guard.go:146`/`:153`/`:160`/`:177` 的
+    /// `iceState.reset()`）：`retries = 0` + `hourly.Stop()`
+    /// （`ice_retry_state.go:24-30`）→ 本字段 [`PeerConn::guard_ice_retries`] /
+    /// [`PeerConn::guard_hourly`] 一并归零。
     fn guard_reset(&mut self, idx: usize, now_ms: u64) {
         let timeout = self.peers[idx].timeout_ms;
         let mut bo = guard_backoff(GUARD_RECONNECT_MS, timeout);
@@ -1861,6 +2008,9 @@ impl PeerIceOrchestrator {
         let peer = &mut self.peers[idx];
         peer.guard = bo;
         peer.guard_next_at_ms = now_ms.saturating_add(delay);
+        // 上游复位分支里的 `iceState.reset()`（`ice_retry_state.go:24-30`）。
+        peer.guard_ice_retries = 0;
+        peer.guard_hourly = false;
     }
 
     /// 一拍的重连节拍（上游 `Guard.reconnectLoopWithRetry` 的 tick 分支，
@@ -1876,12 +2026,36 @@ impl PeerIceOrchestrator {
     ///   即「agent 已建、尚未连上」→ 也不发起。本架构的 agent 在**拿到远端
     ///   凭证**时才等价诞生（上游 `OnNewOffer` → `reCreateAgent` → `Dial`/`Accept`），
     ///   所以「有会话但还没有远端凭证」正是上游的「没有 agent」→ 继续发起；
+    ///   （上游 `evalConnStatus:1066,1072-1073` 把 `iceInProgress` 与
+    ///   `iceStatusConnected` 一视同仁为「ICE 在跑」→ 整体算 Connected。）
+    /// - **PartiallyConnected**（`guard.go:131-138`）：一路传输可用、另一路不
+    ///   可用。上游的判据是 `relayUsedAndUp = peerUsesRelay && relayConnected`
+    ///   且 ICE 未在跑（`conn.go:1052,1066,1074-1076`）；本架构的对应事实是
+    ///   **本 peer 的 relay 承载已挂在 WG seam 上**（
+    ///   [`WgPeerApplier::carrier_attached`]，即
+    ///   `wg_peers[].carrier_attached`，`connector_status()` 的
+    ///   `N13_WG|carrier-attach` 事件源）。此时按
+    ///   `iceRetryState.shouldRetry`（`ice_retry_state.go:35-48`）走 3 次预算
+    ///   （[`ICE_RETRY_MAX`]），耗尽即 `enterHourlyMode`：**不再发起**，下一跳
+    ///   换成 [`ICE_RETRY_HOURLY_MS`]，此后每小时一次；
     /// - **Disconnected**（`guard.go:129-130`）→ 回调 `conn.onGuardEvent`
     ///   （`conn.go:688-692`）→ `handshaker.SendOffer()`：重新广播本 peer 的
-    ///   OFFER（凭证 per-peer 稳定，`handshaker.go:232-237`）。
+    ///   OFFER（凭证 per-peer 稳定，`handshaker.go:232-237`）。没有承载的 peer
+    ///   保持原样：**指数退避、永不放弃**。
     ///
-    /// `PartiallyConnected` 的「3 次后转每小时」（`guard.go:131-138`）只适用于
-    /// 「relay 通、ICE 不通」，本核心无 relay 传输，故整支不搬。
+    /// 两个分类细节与上游逐字一致：
+    /// - 分类在**每跳**做（每小时档下就是每小时做一次）；`shouldRetry` 的预算
+    ///   计数只在 `PartiallyConnected` 分支发生（`guard.go:131-138`），
+    ///   Connected/Disconnected 分支都不动它；
+    /// - 每小时档下 `shouldRetry` 恒真（`ice_retry_state.go:36-39`
+    ///   `if s.hourly != nil { return true }`），即每小时那一跳照常发起，
+    ///   预算不再增长。
+    ///
+    /// signal 未就绪时的顺序也照上游：上游的分类与 `shouldRetry` 都在回调
+    /// **之前**，`SendOffer` 才在 signal 未就绪时返回 `ErrSignalIsNotReady`
+    /// （`handshaker.go:207-209`）——所以这一跳（以及它的预算）照样被消费，
+    /// 只是帧不发。本架构把未就绪的帧留在 outbox（显式失败，不静默丢），
+    /// 但节拍与预算都照上游前进。
     ///
     /// 发起失败（收集无 mux / 无可绑定候选）按既有错误面照常上报：上游的
     /// `connect()` 失败只 `closeAgent` + 日志（goroutine 无调用方可返回），
@@ -1892,18 +2066,18 @@ impl PeerIceOrchestrator {
             return Ok(());
         }
         // 每跳都推进（上游 ticker 的 send → NextBackOff 顺序，`ticker.go`）。
-        let delay = self.peers[idx]
-            .guard
-            .next_delay(&MonotonicClock, &mut *self.guard_rng);
-        if let Some(d) = delay {
-            let at = now_ms.saturating_add(delay_ms(d));
-            self.peers[idx].guard_next_at_ms = at;
-        }
-        // 上游 `SendOffer` 在 signal 未就绪时直接 `ErrSignalIsNotReady`
-        // （`handshaker.go:207-209`）：这一跳照样被消费掉，帧不发。本架构把
-        // 未就绪的帧留在 outbox（显式失败，不静默丢），但节拍照样前进。
-        if !self.signal_ready {
-            return Ok(());
+        // 每小时档下 ticker 已被换掉（`guard.go:136` `ticker.Stop()`），
+        // 退避 backoff 停在原处，下一跳按 `iceRetryInterval` 前进。
+        if self.peers[idx].guard_hourly {
+            self.peers[idx].guard_next_at_ms = now_ms.saturating_add(ICE_RETRY_HOURLY_MS);
+        } else {
+            let delay = self.peers[idx]
+                .guard
+                .next_delay(&MonotonicClock, &mut *self.guard_rng);
+            if let Some(d) = delay {
+                let at = now_ms.saturating_add(delay_ms(d));
+                self.peers[idx].guard_next_at_ms = at;
+            }
         }
         let connected = self.peers[idx].state == PeerIceState::Connected;
         // 上游 `InProgress()`：agent 存在且尚未连上。
@@ -1915,6 +2089,33 @@ impl PeerIceOrchestrator {
         // 本架构的纯应答方（`initiator=false`，仅测试用来钉住确定性角色划分）
         // 不主动发起——上游没有这个开关，两侧都会在未连上时发 OFFER。
         if !self.peers[idx].initiator {
+            return Ok(());
+        }
+        // `PartiallyConnected`：本 peer 的 relay 承载已挂（`conn.go:1052`
+        // 的 `relayConnected`），ICE 未连接也没在进行中（已在上面的早退里）。
+        if self.wg.carrier_attached(&self.peers[idx].key) {
+            if !self.peers[idx].guard_hourly {
+                self.peers[idx].guard_ice_retries += 1;
+                if self.peers[idx].guard_ice_retries > ICE_RETRY_MAX {
+                    // `shouldRetry` 返回 false → `enterHourlyMode`
+                    // （`guard.go:132-138` + `ice_retry_state.go:50-54`）：
+                    // 这一跳**不发起**，ticker 换成每小时一次（首跳在 1 h 后，
+                    // `time.NewTicker` 语义）。
+                    self.peers[idx].guard_hourly = true;
+                    self.peers[idx].guard_next_at_ms =
+                        now_ms.saturating_add(ICE_RETRY_HOURLY_MS);
+                    let peer_prefix = peer_short(&self.peers[idx].key);
+                    crate::hilog::emit(&format!(
+                        "N5c_ICE|guard|ice-retries-exhausted|peer={peer_prefix}|max_retries={ICE_RETRY_MAX}|hourly_ms={ICE_RETRY_HOURLY_MS}"
+                    ));
+                    return Ok(());
+                }
+            }
+            // 3 次预算内，或已在每小时档（`shouldRetry` 恒真）。
+        }
+        // 上游 `SendOffer` 在 signal 未就绪时直接 `ErrSignalIsNotReady`
+        // （`handshaker.go:207-209`）：这一跳照样被消费掉，帧不发。
+        if !self.signal_ready {
             return Ok(());
         }
         self.guard_offer(idx, now_ms, pass_start_ms)
@@ -4237,6 +4438,302 @@ mod tests {
             orch.peers[0].guard_next_at_ms, 6_800,
             "the sr-reconnect edge re-arms the ticker at +800 ms"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // guard `PartiallyConnected`（上游 guard.go:131-138 + ice_retry_state.go）
+    // -------------------------------------------------------------------
+
+    /// 只回答「本 peer 的 relay 承载是否已挂」的 guard seam：这正是上游分类
+    /// 用的 `relayUsedAndUp`（`conn.go:1052,1074-1076`），在本架构的事实源是
+    /// WG seam 的 `N13_WG|carrier-attach`（[`WgPeerApplier::carrier_attached`]）。
+    #[derive(Default)]
+    struct CarrierWg {
+        carriers: Mutex<Vec<String>>,
+    }
+
+    impl CarrierWg {
+        fn attach(&self, key: &str) {
+            self.carriers.lock().expect("carriers").push(key.to_string());
+        }
+
+        fn detach(&self, key: &str) {
+            self.carriers.lock().expect("carriers").retain(|k| k != key);
+        }
+    }
+
+    impl WgPeerApplier for CarrierWg {
+        fn apply_peers(&self, _peers: &[WgPeerEntry]) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear(&self) {}
+        fn carrier_attached(&self, pub_key_b64: &str) -> bool {
+            self.carriers
+                .lock()
+                .expect("carriers")
+                .iter()
+                .any(|k| k == pub_key_b64)
+        }
+    }
+
+    /// 一个 peer（"P"）的 guard 测试编排：定序熵源（裸间隔 3/6/12/24 s →
+    /// 37.5 s 封顶，见 [`seed_guard`]）+ 记录 signal 的 OFFER 数 + 可注入的
+    /// relay 承载表。
+    fn carrier_orch(signal: Arc<FrameLog>, carriers: Arc<CarrierWg>) -> PeerIceOrchestrator {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..64 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal as Arc<dyn SignalExchange>,
+            wg: carriers as Arc<dyn WgPeerApplier>,
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        seed_guard(&mut orch);
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        orch
+    }
+
+    /// 已发出的 OFFER 帧数（每个发起跳恰好一帧：`guard_offer` 的
+    /// start_locals / readvertise 各入列一帧 OFFER）。
+    fn offer_frames(signal: &FrameLog) -> usize {
+        signal
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter(|(_, kind, _)| *kind == PeerSignalKind::Offer)
+            .count()
+    }
+
+    /// 从当前档位把 peer 推到每小时档：连打 4 个**到点**跳——前 3 跳消费
+    /// 3 次预算（`maxICERetries`），第 4 跳 `shouldRetry` 为假 → 转每小时。
+    fn drive_to_hourly(orch: &mut PeerIceOrchestrator) {
+        for _ in 0..4 {
+            let at = orch.peers[0].guard_next_at_ms;
+            orch.run_once(at).expect("beat");
+        }
+        assert!(orch.peers[0].guard_hourly, "4 due beats exhaust the 3-retry budget");
+        assert_eq!(orch.peers[0].guard_ice_retries, 4);
+    }
+
+    /// **上游 `PartiallyConnected` 分支**（relay 承载已挂、ICE 未连）：3 次
+    /// 指数退避发起（`ice_retry_state.go:11` `maxICERetries = 3`），第 4 跳到点
+    /// **不发起**而是 `enterHourlyMode`（`guard.go:131-138`、
+    /// `ice_retry_state.go:50-54`），此后 `hourlyC()` 每小时一跳、每跳照常发起
+    /// （`ice_retry_state.go:36-39`）。
+    #[test]
+    fn partially_connected_peer_retries_three_times_then_switches_to_hourly() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        carriers.attach("P");
+        let mut orch = carrier_orch(signal.clone(), carriers.clone());
+        assert_eq!(orch.peers[0].timeout_ms, 37_500, "the seeded peer timeout");
+
+        // 第 1 跳（guard_next=0 的保证首跳）：预算 1/3，发起。
+        orch.run_once(1_000).expect("first hop");
+        assert_eq!(orch.peers[0].guard_ice_retries, 1);
+        assert!(!orch.peers[0].guard_hourly);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 4_000, "backoff +3 s");
+        assert_eq!(offer_frames(&signal), 1);
+        assert_eq!(
+            orch.peer_ice_detail("P").expect("peer").ice_retry,
+            IceRetryMode::Fast,
+            "the budget is not exhausted → fast"
+        );
+
+        // 第 2、3 跳：预算 2/3、3/3，仍发起（+6 s / +12 s）。
+        orch.run_once(4_000).expect("beat");
+        assert_eq!(orch.peers[0].guard_ice_retries, 2);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 10_000);
+        orch.run_once(10_000).expect("beat");
+        assert_eq!(orch.peers[0].guard_ice_retries, 3);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 22_000);
+        assert!(!orch.peers[0].guard_hourly, "3 attempts are still within the budget");
+        assert_eq!(offer_frames(&signal), 3);
+
+        // 第 4 跳（+24 s → t=22000）：预算已尽 → 这一跳不发起，切每小时；
+        // 上游 `time.NewTicker(1h)` 语义 ⇒ 下一次到点在 1 h 后。
+        orch.run_once(22_000).expect("the exhaust beat");
+        assert_eq!(orch.peers[0].guard_ice_retries, 4, "shouldRetry still counts this beat");
+        assert!(orch.peers[0].guard_hourly);
+        assert_eq!(
+            orch.peers[0].guard_next_at_ms,
+            22_000 + ICE_RETRY_HOURLY_MS,
+            "the ticker is the hourly one now"
+        );
+        assert_eq!(offer_frames(&signal), 3, "the exhaust beat itself sends NO offer");
+        assert_eq!(
+            orch.peer_ice_detail("P").expect("peer").ice_retry,
+            IceRetryMode::Hourly
+        );
+
+        // 1 h 之内不再有任何发起（旧行为会每 37.5 s 一跳）。
+        for t in [46_000u64, 83_500, 121_000, 600_000, 3_600_000] {
+            orch.run_once(t).expect("beat");
+            assert_eq!(offer_frames(&signal), 3, "no fast retry while hourly (t={t})");
+        }
+        assert_eq!(orch.peers[0].guard_ice_retries, 4, "the budget does not grow while hourly");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 22_000 + ICE_RETRY_HOURLY_MS);
+
+        // 每小时那一跳：发起一次，下一跳再 +1 h。
+        orch.run_once(22_000 + ICE_RETRY_HOURLY_MS).expect("hourly beat");
+        assert_eq!(offer_frames(&signal), 4, "one attempt per hour");
+        assert_eq!(
+            orch.peers[0].guard_next_at_ms,
+            22_000 + 2 * ICE_RETRY_HOURLY_MS
+        );
+
+        // 承载一卸：该 peer 立刻回到 `Disconnected` 语义（不再走每小时分支，
+        // 由下一个到点跳发起）——但档位与下一跳不由本分支改写（relay 断连
+        // 在上游是复位事件、本核心无调用点，见 `guard_reset` 文档）。
+        carriers.detach("P");
+        orch.run_once(22_000 + 2 * ICE_RETRY_HOURLY_MS).expect("post-detach beat");
+        assert_eq!(offer_frames(&signal), 5, "a peer with no carrier keeps offering");
+    }
+
+    /// 没有承载的 peer（上游 `Disconnected`）**永不**进每小时档：退避照旧
+    /// ×2 封顶在本 peer 的 timeout，预算计数不动（`shouldRetry` 只在
+    /// `PartiallyConnected` 分支被调用，`guard.go:131-138`），且永不放弃。
+    #[test]
+    fn peer_without_relay_carrier_keeps_the_normal_backoff_forever() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        let mut orch = carrier_orch(signal.clone(), carriers);
+        // 与既有 `guard_hops…` 用例同一阶梯（3/6/12/24 s → 37.5 s 封顶）。
+        let mut expected_next = 1_000u64;
+        for step in [3_000u64, 6_000, 12_000, 24_000, 37_500, 37_500] {
+            orch.run_once(expected_next).expect("beat");
+            expected_next += step;
+            assert_eq!(orch.peers[0].guard_next_at_ms, expected_next);
+            assert!(
+                !orch.peers[0].guard_hourly,
+                "a carrier-less peer never enters hourly mode"
+            );
+            assert_eq!(orch.peers[0].guard_ice_retries, 0, "no budget is consumed");
+            assert_eq!(
+                orch.peer_ice_detail("P").expect("peer").ice_retry,
+                IceRetryMode::Fast
+            );
+        }
+        // 6 h 之后照样发起（Disconnected 的语义是「退避、永不放弃」）。
+        let before = offer_frames(&signal);
+        orch.run_once(expected_next).expect("a beat 6 h later");
+        assert_eq!(offer_frames(&signal), before + 1);
+        assert!(!orch.peers[0].guard_hourly);
+    }
+
+    /// 上游的**复位事件**把每小时档拉回 fast（`guard.go:141-177` 的每个事件
+    /// 分支都调 `iceState.reset()` → `retries = 0` + `hourly.Stop()`，
+    /// `ice_retry_state.go:24-30`）：本核心的调用点是 ICE 断连
+    /// （`IceEvent::Disconnected` 的 `from_connected` 分支 / `break_ice` 的等价
+    /// 复位）、signal 流重连边沿与物理网络变化。
+    #[test]
+    fn hourly_peer_returns_to_fast_on_the_upstream_reset_events() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        carriers.attach("P");
+
+        // (1) signal 流重连边沿（false→true）= 上游 `srReconnectedChan`。
+        let mut orch = carrier_orch(signal.clone(), carriers.clone());
+        drive_to_hourly(&mut orch);
+        orch.set_signal_ready(false);
+        orch.set_signal_ready(true);
+        orch.run_once(100_000).expect("the reconnect beat");
+        assert!(!orch.peers[0].guard_hourly, "sr-reconnect resets the hourly mode");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 100_800, "back to the 800 ms ticker");
+        assert_eq!(
+            orch.peer_ice_detail("P").expect("peer").ice_retry,
+            IceRetryMode::Fast
+        );
+        // 复位之后预算从头开始：又能走满 3 次 fast 发起。
+        drive_to_hourly(&mut orch);
+
+        // (2) ICE 断连（`conn.go:537-540` 的同一复位）：`break_ice` 拆会话 +
+        // 复位节拍，与 `IceEvent::Disconnected` 的 `from_connected` 分支共用
+        // `guard_reset`。
+        assert!(orch.break_ice(200_000) > 0, "the peer has a live session to break");
+        assert!(!orch.peers[0].guard_hourly, "ICE disconnect resets the hourly mode");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 200_800);
+        drive_to_hourly(&mut orch);
+
+        // (3) 物理网络变化（`NetworkWatcher.Changed()`）。
+        orch.restart_for_network_change(300_000);
+        assert!(!orch.peers[0].guard_hourly, "a network change resets the hourly mode");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0);
+        assert_eq!(orch.peers[0].guard_next_at_ms, 300_800);
+        assert!(orch.peers[0].session.is_none(), "the stale-path session is dropped");
+
+        // 复位后的第一个到点跳照常发起（fast 语义回来了）。
+        let before = offer_frames(&signal);
+        orch.run_once(300_800).expect("the post-reset hop");
+        assert_eq!(offer_frames(&signal), before + 1);
+        assert_eq!(orch.peers[0].guard_ice_retries, 1);
+    }
+
+    /// ICE pump 拍计数（真机 0.0.27 CPU 报告 §1.1/§5.4）：每次 `run_once`
+    /// 就是一拍，累计总数单调；窗口与 [`HEALTH_SUMMARY_MS`] 同源，收口时按
+    /// **真实窗口毫秒**折算每 10 s 拍数；汇总面（`connector_status()` 的 `ice`
+    /// 字段的来源）如实给出这两个量。
+    #[test]
+    fn ice_pump_pass_counter_is_counted_and_surfaced_in_the_summary() {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks,
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        assert_eq!(orch.summary().pump_passes_total, 0, "no pass ran yet");
+
+        // 第一拍只开窗口（此时没有可用的分母，绝不编造速率）。
+        orch.run_once(1_000).expect("the first pass");
+        assert_eq!(orch.summary().pump_passes_total, 1);
+        assert_eq!(orch.summary().pump_passes_per_10s, 0, "the window is still open");
+
+        // 10 ms 节奏跑到 t=11000：窗口恰好在 10 000 ms 处收口。
+        for i in 1..=1_000u64 {
+            orch.run_once(1_000 + i * 10).expect("pass");
+        }
+        let s = orch.summary();
+        assert_eq!(s.pump_passes_total, 1_001, "every run_once is one pass");
+        // 窗口 [1000, 11000] 含两端 = 1001 拍 / 10 000 ms → 1001 拍/10 s。
+        assert_eq!(s.pump_passes_per_10s, 1_001);
+        assert!(s.to_json().contains("\"pump_passes_total\":1001"));
+        assert!(s.to_json().contains("\"pump_passes_per_10s\":1001"));
+        assert!(
+            crate::config::parse_document(&s.to_json()).is_ok(),
+            "strict reader must accept the appended counters: {}",
+            s.to_json()
+        );
+
+        // 周期行形状（与 `N5e_ICE|mux|…|periodic=1` 的兄弟行）被逐字钉住；
+        // 尾数截断：700 拍 / 14 s → 500 拍/10 s。
+        assert_eq!(
+            pump_stats_line(1_001, 1_001, 10_000),
+            "N5e_ICE|pump|passes_total=1001|passes_per_10s=1001|window_ms=10000|periodic=1"
+        );
+        assert_eq!(
+            pump_stats_line(700, 700, 14_000),
+            "N5e_ICE|pump|passes_total=700|passes_per_10s=500|window_ms=14000|periodic=1"
+        );
+        assert!(!pump_stats_line(1, 1, 0).contains("passes_per_10s=1"));
     }
 
     // -------------------------------------------------------------------
