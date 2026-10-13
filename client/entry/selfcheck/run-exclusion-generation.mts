@@ -597,12 +597,14 @@ try {
     'export const start = () => false;\n' +
     'export const stop = () => undefined;\n' +
     'export const isRunning = () => false;\n');
-  // 2026-10-13 (0.0.29): the REAL EntryAbility now starts the PC status-bar tray
-  // and reads the explicit-quit flag. Neither takes any part in route-exclusion
-  // generation, and the tray itself needs the PC-only status-bar kit this host
-  // fixture cannot load, so both specifiers are bridged by no-op modules with the
-  // same named exports the ability imports by value (both are host-checked by
-  // run-tray.mts / run-close-to-background.mts, never here).
+  // 2026-10-13 (0.0.29 → 0.0.31): the REAL EntryAbility now starts the PC
+  // status-bar tray (2in1 only), reads the shared quit flag and — since 0.0.31 —
+  // starts the unified quit flow from onPrepareToTerminate. None of that takes
+  // any part in route-exclusion generation, and the tray itself needs the PC-only
+  // status-bar kit this host fixture cannot load, so both specifiers are bridged
+  // by no-op modules with the same named exports the ability imports by value
+  // (both are host-checked by run-tray.mts / run-close-to-background.mts, never
+  // here).
   writeFileSync(join(dir, 'tray-NetBirdTrayService.shim.ts'),
     'export const startTray = async () => false;\n' +
     'export const setTrayActionListener = () => undefined;\n' +
@@ -612,8 +614,12 @@ try {
   writeFileSync(join(dir, 'tray-NetBirdQuitFlow.shim.ts'),
     'export const explicitQuitInProgress = () => false;\n' +
     'export const performExplicitQuit = async () => undefined;\n' +
+    'export const requestQuit = () => undefined;\n' +
+    'export const setQuitDisconnect = () => undefined;\n' +
+    'export const shouldVetoSystemExit = () => false;\n' +
     "export const QUIT_REASON_TRAY = 'tray-quit';\n" +
-    "export const QUIT_REASON_SETTINGS = 'settings-quit';\n");
+    "export const QUIT_REASON_SETTINGS = 'settings-quit';\n" +
+    "export const QUIT_REASON_SYSTEM = 'system-quit';\n");
 
   const mod = await import(pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href) as
     Record<string, unknown>;

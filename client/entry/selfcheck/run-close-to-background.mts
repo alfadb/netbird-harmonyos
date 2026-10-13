@@ -7,13 +7,18 @@
 //      window, both paths are try/caught and each leaves one diagnostic line —
 //      and the callback does NOT stop the VPN, the task or the ability (the X is
 //      a hide, not an exit).
-//   B. THE TERMINATE GUARD (0.0.30): onPrepareToTerminate() allows a termination
-//      while this process is running its own explicit quit AND whenever
-//      windowStageClose was registered (the device evidence shows the X reaches
-//      windowStageClose and the system tray 退出 reaches this callback) — it
-//      vetoes ONLY on the device where that registration failed, which is the
-//      fallback's whole reason to exist; the permission the callback needs is
-//      declared in module.json5.
+//   B. THE TERMINATE GUARD (0.0.30 → 0.0.31): onPrepareToTerminate() answers
+//      synchronously — it allows OUR OWN quit (the one-way flag), cancels the
+//      FIRST system exit request of the process and starts the unified quit flow
+//      right there (tray/NetBirdQuitFlow.requestQuit → disconnect first), and
+//      vetoes ONLY on the device where the windowStageClose registration failed
+//      (the fallback's whole reason to exist); the permission the callback needs
+//      is declared in module.json5.
+//   D. THE VETO-ONCE SAFEGUARD (0.0.31): the pure decision behind that answer
+//      (tray/NetBirdQuitPolicy.ets), imported BYTE-IDENTICAL and driven at its
+//      exact boundaries — first request cancelled once, a second attempt inside
+//      the window let through (an app that refuses to exit is the failure mode),
+//      our own quit always let through.
 //   C. KEEP-ALIVE MODE SELECTION: the pure decision (keepAliveModeFor /
 //      isKeepAliveMode, imported BYTE-IDENTICAL) plus the adapter wiring — the
 //      mode is chosen AT REQUEST TIME from deviceInfo.deviceType, both literals
@@ -97,21 +102,41 @@ check('the X stops NOTHING: no VPN stop, no keep-alive stop, no terminateSelf in
 // ---- B. the fallback guard --------------------------------------------------
 
 const terminateBody = sliceFrom(ABILITY_TEXT, 'onPrepareToTerminate(): boolean {',
-  'private persistCredentialOverrides(');
+  'onForeground(): void {');
 check('onPrepareToTerminate allows OUR OWN quit first (the app asked to leave)',
   terminateBody.indexOf('if (explicitQuitInProgress()) {') >= 0 &&
-  terminateBody.indexOf('if (explicitQuitInProgress()) {') < terminateBody.indexOf('return false;') &&
+  terminateBody.indexOf('if (explicitQuitInProgress()) {') <
+    terminateBody.indexOf("'allow-explicit-quit'") &&
+  terminateBody.indexOf("'allow-explicit-quit'") <
+    terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') &&
   terminateBody.indexOf('return false;') < terminateBody.indexOf('return true;'));
-check('0.0.30: a real termination request is allowed too, when windowStageClose is registered',
-  terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') >= 0 &&
-  terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') <
-    terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") &&
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >= 0 &&
-  terminateBody.indexOf("'allow-system-exit'") >= 0);
-check('the veto survives ONLY as the last arm (the device where the registration failed)',
-  terminateBody.indexOf('return true;') === terminateBody.lastIndexOf('return true;') &&
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") <
+check('0.0.31: a real system exit cancels ONCE and starts the FULL quit flow',
+  terminateBody.indexOf('if (shouldVetoSystemExit(Date.now())) {') >= 0 &&
+  terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') >
+    terminateBody.indexOf('if (shouldVetoSystemExit(Date.now())) {') &&
+  terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') <
+    terminateBody.indexOf('return true;') &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit'") >= 0 &&
+  terminateBody.indexOf("'veto-system-exit-quit'") >= 0);
+check('the answer is synchronous: no await anywhere in the guard',
+  terminateBody.indexOf('await ') < 0 && terminateBody.indexOf('async ') < 0 &&
+  terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') <
     terminateBody.indexOf('return true;'));
+check('a request that must not be cancelled is let through (second attempt / ours)',
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >
+    terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') &&
+  terminateBody.indexOf("'allow-system-exit'") >
+    terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);'));
+check('the veto survives ONLY as the last arm (the device where the registration failed)',
+  (terminateBody.match(/return true;/g) ?? []).length === 2 &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") >
+    terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") <
+    terminateBody.lastIndexOf('return true;'));
+check('the guard does the CLEANUP nowhere: the flow owns every step',
+  terminateBody.indexOf('stopKeepAlive') < 0 && terminateBody.indexOf('removeTray') < 0 &&
+  terminateBody.indexOf('vpnExtension') < 0 && terminateBody.indexOf('terminateSelf') < 0 &&
+  ABILITY_TEXT.indexOf("from '../tray/NetBirdQuitFlow';") >= 0);
 check('the flag is set only where the platform ACCEPTED the registration',
   guardBody.indexOf('this.closeToBackgroundRegistered = true;') >
     guardBody.indexOf("windowStage.on('windowStageClose'") &&
@@ -127,6 +152,52 @@ check('the permission the fallback needs is declared, inside requestPermissions'
   MODULE_JSON5.indexOf("name: 'ohos.permission.PREPARE_APP_TERMINATE'") >= 0 &&
   MODULE_JSON5.indexOf('requestPermissions') <
     MODULE_JSON5.indexOf('PREPARE_APP_TERMINATE'));
+
+// ---- D. the veto-once safeguard (pure decision) -----------------------------
+
+const QUIT_POLICY = join(ets, 'tray', 'NetBirdQuitPolicy.ets');
+const QUIT_POLICY_TEXT = readFileSync(QUIT_POLICY, 'utf8');
+const POLICY_FIXTURES = mkdtempSync(join(tmpdir(), 'nb-quit-policy-'));
+writeFileSync(join(POLICY_FIXTURES, 'NetBirdQuitPolicy.ts'), QUIT_POLICY_TEXT);
+
+check('the quit policy is a PURE module (no import, no platform call, no clock)',
+  /^\s*import\s/m.test(QUIT_POLICY_TEXT) === false &&
+  QUIT_POLICY_TEXT.indexOf('@ohos') < 0 && QUIT_POLICY_TEXT.indexOf('@kit') < 0 &&
+  QUIT_POLICY_TEXT.indexOf('Date.now') < 0);
+
+try {
+  const q: any = await import(pathToFileURL(join(POLICY_FIXTURES, 'NetBirdQuitPolicy.ts')).href);
+  const W: number = q.SYSTEM_EXIT_VETO_WINDOW_MS;
+  const NONE: number = q.SYSTEM_EXIT_VETO_NONE;
+  const decide = (vetoedAtMs: number, explicit: boolean, nowMs: number): any =>
+    q.systemExitVetoDecision(vetoedAtMs, explicit, nowMs);
+
+  check('the window is the bounded handful of seconds the guard promises',
+    W === 5000 && NONE === -1);
+  check('the FIRST system exit of a process is cancelled ONCE, and the time is kept',
+    decide(NONE, false, 1000).veto === true &&
+    decide(NONE, false, 1000).vetoedAtMs === 1000);
+  check('a SECOND attempt inside the window is let through (the user is never stuck)',
+    decide(1000, false, 1001).veto === false &&
+    decide(1000, false, 1001).vetoedAtMs === 1000 &&
+    decide(1000, false, 5999).veto === false);
+  check('the boundary is exact: at W ms the request counts as a FRESH one',
+    decide(1000, false, 1000 + W - 1).veto === false &&
+    decide(1000, false, 1000 + W).veto === true &&
+    decide(1000, false, 1000 + W).vetoedAtMs === 1000 + W);
+  check('our OWN quit always passes, whatever the clock says',
+    decide(NONE, true, 1000).veto === false &&
+    decide(1000, true, 1001).veto === false &&
+    decide(1000, true, 999999).veto === false &&
+    decide(NONE, true, 1000).vetoedAtMs === NONE);
+  check('it is pure: the caller carries the state, the decision invents none',
+    JSON.stringify(decide(NONE, false, 1000)) === JSON.stringify(decide(NONE, false, 1000)) &&
+    decide(1000, false, 1001).vetoedAtMs === 1000 &&
+    QUIT_POLICY_TEXT.indexOf('export function systemExitVetoDecision(') >= 0);
+} catch (error) {
+  check(`harness (quit policy) — ${(error as Error).message}`, false);
+}
+rmSync(POLICY_FIXTURES, { recursive: true, force: true });
 
 // ---- C. the borrowed background mode follows the device ---------------------
 

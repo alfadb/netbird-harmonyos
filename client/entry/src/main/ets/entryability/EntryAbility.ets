@@ -19,7 +19,8 @@ import { start as startSystemEvents,
 // kit's runtime module does not exist, startTray() answers false after one
 // diagnostic line and nothing else in this ability changes.
 import { startTray } from '../tray/NetBirdTrayService';
-import { explicitQuitInProgress } from '../tray/NetBirdQuitFlow';
+import { explicitQuitInProgress, QUIT_REASON_SYSTEM, requestQuit,
+  shouldVetoSystemExit } from '../tray/NetBirdQuitFlow';
 // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：借用 DATA_TRANSFER 长时任务让整个应用
 // 的进程不被挂起。长时任务只能由 UIAbility 申请，所以注册与注销都落在本 ability 的生命
 // 周期上；平台调用全部在 NetBirdKeepAliveService 里，本文件只做接线。
@@ -455,15 +456,16 @@ export default class EntryAbility extends UIAbility {
     diagnosticsEvent('ui_close_guard', fields);
   }
 
-  // 2026-10-13 关闭到后台（0.0.29）；2026-10-13 系统托盘退出修复（0.0.30）—— the guard
-  // that separates "the user closed the window" from "the user asked the app to
-  // exit", and the only place that knows whether a termination is OUR OWN.
+  // 2026-10-13 关闭到后台（0.0.29）；2026-10-13 系统托盘退出修复（0.0.30）；
+  // 2026-10-13 统一退出（0.0.31）—— the guard that separates "the user closed the
+  // window" from "the user asked the app to exit", and the only place that knows
+  // whether a termination is OUR OWN.
   //
   // onPrepareToTerminate(): @ohos.app.ability.UIAbility.d.ts:681, API 10,
   // @permission ohos.permission.PREPARE_APP_TERMINATE (normal / system_grant —
   // granted at install, no ACL), executed on 2in1 only. The SDK documents it as
   // "the user clicks the close button or exits from the dock / system tray", and
-  // returning true CANCELS the termination.
+  // returning true CANCELS the termination. It MUST answer synchronously.
   //
   // DEVICE EVIDENCE (0.0.29, PC, netbird-ui.log, UI pid 47704 — the user's test):
   //   * 15:45:40.884 / 15:45:49.209 / 15:45:57.054 — three clicks on the
@@ -481,27 +483,33 @@ export default class EntryAbility extends UIAbility {
   //      function is not executed" — holds for the X route only here; the system
   //      tray route still arrives.) So a termination request that arrives WHILE
   //      windowStageClose is registered cannot be the X: it is the user asking
-  //      the app to exit, and 0.0.29 was vetoing it. Do not do that again.
+  //      the app to exit.
   //
-  // WHAT IT ANSWERS HERE:
-  //   * false (allow) while THIS process is running the explicit quit flow (tray
-  //     退出并断开 / 设置 → 退出应用) — the app asked to leave, so the guard must
-  //     not fight it. By that point the flow has already disconnected the VPN,
-  //     released the continuous task and removed the tray icon
-  //     (tray/NetBirdQuitFlow.ets).
-  //   * false (allow) when closeToBackgroundRegistered is true: the X is already
-  //     intercepted above, so this request is the system's auto-generated tray
-  //     退出 (or a dock close) and it MUST go through — plain exit, with today's
-  //     onDestroy cleanup (release the continuous task, close the writer; the
-  //     status-bar icon dies with the process, and the :vpn extension process
-  //     keeps the tunnel). A user who wants the VPN gone uses 退出并断开.
-  //   * true (cancel) ONLY when the registration above FAILED (801 / no syscap):
-  //     there the X arrives HERE, and vetoing is what keeps "close = background"
-  //     on such a device. This is the fallback's whole reason to exist.
-  //     NOTE the deliberate asymmetry with PLAIN SYSTEM EXIT (force-stop, OOM,
-  //     device shutdown): those paths do not consult this callback at all, and
-  //     their semantics stay pre-0.0.29 — onDestroy's existing cleanup runs and
-  //     the VPN extension process (with a live tunnel) may survive the UI process.
+  // WHAT IT ANSWERS HERE (0.0.31: the system 退出 runs the FULL quit, exactly like
+  // the tray menu's 退出 row and 设置 → 退出应用 — there is no "exit but keep the
+  // tunnel" any more, see tray/NetBirdQuitFlow.ets for why):
+  //   * false (allow) while THIS process is running the quit flow — the app asked
+  //     to leave, so the guard must not fight it. By that point the flow has
+  //     already disconnected the VPN, released the continuous task and removed the
+  //     tray icon, and its terminateSelf() is what this request is about.
+  //   * true (cancel ONCE) when closeToBackgroundRegistered is true and this is
+  //     the first system exit request of the process: the cleanup is asynchronous
+  //     and this callback is not, so the request is cancelled here while
+  //     requestQuit() starts the flow synchronously (the flag is armed and the
+  //     disconnect is issued before requestQuit returns); the flow's own
+  //     terminateSelf() then ends the app. The bounded safeguard that keeps an
+  //     app from refusing to exit lives in tray/NetBirdQuitPolicy.ets: a SECOND
+  //     request inside SYSTEM_EXIT_VETO_WINDOW_MS is let through, as is any
+  //     request once our own quit is in flight.
+  //   * false (allow) when closeToBackgroundRegistered is true and the request is
+  //     not to be cancelled (the second attempt / a request after the flow).
+  //   * true (cancel) when the registration above FAILED (801 / no syscap): there
+  //     the X arrives HERE, and vetoing is what keeps "close = background" on such
+  //     a device. This is the fallback's whole reason to exist.
+  //     NOTE the deliberate asymmetry with a PLAIN PLATFORM KILL (force-stop, OOM,
+  //     device shutdown): those paths do not consult this callback at all, so
+  //     there is no code of ours to run — onDestroy's existing cleanup runs and
+  //     the platform takes the VPN down with the process.
   onPrepareToTerminate(): boolean {
     if (explicitQuitInProgress()) {
       hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=explicit-quit');
@@ -509,8 +517,19 @@ export default class EntryAbility extends UIAbility {
       return false;
     }
     if (this.closeToBackgroundRegistered) {
-      // 0.0.30: the X is covered by windowStageClose, so this is a REAL exit
-      // request (the system tray 退出 row / a dock close). Let it terminate.
+      // 0.0.31: the X is covered by windowStageClose, so this is a REAL exit
+      // request (the system tray 退出 row / a dock close). Cancel it ONCE so the
+      // unified quit flow can disconnect first, then end the app itself.
+      if (shouldVetoSystemExit(Date.now())) {
+        hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit');
+        this.recordCloseGuard('onPrepareToTerminate', 'veto-system-exit-quit');
+        // Synchronous kick-off: the flow arms its one-way flag and issues the
+        // page's requestStop() before this line returns.
+        requestQuit(this.context, QUIT_REASON_SYSTEM);
+        return true;
+      }
+      // The safeguard's other arm: let the platform terminate (the user asked
+      // again inside the veto window, or our own flow is already past its work).
       hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=system-exit');
       this.recordCloseGuard('onPrepareToTerminate', 'allow-system-exit');
       return false;

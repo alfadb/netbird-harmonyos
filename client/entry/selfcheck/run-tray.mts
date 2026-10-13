@@ -14,11 +14,13 @@
 //      load, the API-version guards exist, error 1010710004 is named, the
 //      updates are coalesced and fail-soft, and NO StatusBarViewExtensionAbility
 //      is registered (this iteration has no pop-up).
-//   C. the EXPLICIT QUIT flow and its wiring into the page: the bypass flag is
-//      set first, disconnect → keep-alive → tray removal → terminateSelf is the
-//      order, the page routes the tray's three action rows into the SAME
-//      requestStart/requestStop it already had, and the Settings entry runs the
-//      same flow.
+//   C. the QUIT flow and its wiring into the page and the ability: the bypass flag
+//      is set first, disconnect → keep-alive → tray removal → terminateSelf is the
+//      order, requestQuit() is the ONE way in, the page routes the tray's action
+//      rows into the SAME requestStart/requestStop it already had and registers its
+//      requestStop as the flow's disconnect step, the Settings entry runs the same
+//      flow, and 0.0.31's unified exit reaches the flow from
+//      EntryAbility.onPrepareToTerminate too (the system-generated tray 退出).
 //
 // Run: node client/entry/selfcheck/run-tray.mts
 // Exit 0 = all assertions pass.
@@ -158,10 +160,12 @@ try {
     m.trayMenuGroups('未连接')[0].length === 1 &&
     m.trayMenuGroups('未连接')[1][0].menuCode === m.TRAY_MENU_OPEN &&
     m.trayMenuGroups('未连接')[2][0].menuCode === m.TRAY_MENU_QUIT);
-  check('row titles are the upstream menu labels',
+  check('row titles are the upstream menu labels (0.0.31: ONE quit row, 退出)',
     rowsOf('未连接')[0].title === '连接' &&
     rowsOf('已连接')[1].title === '打开主窗口' &&
-    rowsOf('已连接')[2].title === '退出并断开');
+    rowsOf('已连接')[2].title === '退出' &&
+    MODEL_TEXT.indexOf('TRAY_TITLE_QUIT: string = \'退出\'') >= 0 &&
+    MODEL_TEXT.indexOf('退出并断开') < 0);
   check('the menu signature is stable per state and changes across the boundary',
     m.trayMenuSignature('已连接') === m.trayMenuSignature('连接中…') &&
     m.trayMenuSignature('已连接') !== m.trayMenuSignature('未连接') &&
@@ -279,7 +283,7 @@ check('the tray\'s action rows ride the page\'s OWN connect/stop paths',
   trayAction.indexOf('TRAY_MENU_DISCONNECT') >= 0 &&
   trayAction.indexOf('TRAY_MENU_DISCONNECT') < trayAction.indexOf('this.requestStop();') &&
   !trayAction.includes('vpnExtension.'));
-check('退出并断开 runs the shared quit flow, 打开主窗口 does not reach the page',
+check('退出 runs the shared quit flow, 打开主窗口 does not reach the page',
   trayAction.indexOf('TRAY_MENU_QUIT') >= 0 &&
   trayAction.indexOf('this.beginExplicitQuit(QUIT_REASON_TRAY);') >
     trayAction.indexOf('TRAY_MENU_QUIT') && !trayAction.includes('TRAY_MENU_OPEN'));
@@ -288,16 +292,27 @@ check('the Settings entry runs the SAME flow (设置 → 应用 → 退出应用
   PAGE.indexOf('this.beginExplicitQuit(QUIT_REASON_SETTINGS);') >= 0);
 check('one quit at a time: the page latches it before doing anything',
   PAGE.indexOf('private quitInFlight: boolean = false;') >= 0 &&
-  sliceFrom(PAGE, 'private beginExplicitQuit(reason: string): void {', 'performExplicitQuit(')
+  sliceFrom(PAGE, 'private beginExplicitQuit(reason: string): void {', 'private diagEvent(')
     .indexOf('this.quitInFlight = true;') >= 0);
-check('the quit flow is shared, not duplicated in the page',
-  PAGE.indexOf('performExplicitQuit(host, reason, (): void => {') >= 0 &&
-  (PAGE.match(/performExplicitQuit\(/g) ?? []).length === 1 &&
-  QUIT_TEXT.indexOf('export async function performExplicitQuit(') >= 0);
+check('the quit flow is shared, not duplicated: the page never reaches into it',
+  (PAGE.match(/performExplicitQuit\(/g) ?? []).length === 0 &&
+  PAGE.indexOf('requestQuit(host, reason);') >= 0 &&
+  QUIT_TEXT.indexOf('export async function performExplicitQuit(') >= 0 &&
+  QUIT_TEXT.indexOf('performExplicitQuit(context, reason, (): void => {') >= 0);
+check('the page owns the ONE extension-stop call site and registers it with the flow',
+  PAGE.indexOf('setQuitDisconnect((): void => {') >= 0 &&
+  PAGE.indexOf('this.requestStop();') > PAGE.indexOf('setQuitDisconnect((): void => {') &&
+  PAGE.indexOf('setQuitDisconnect(undefined);') >
+    PAGE.indexOf('setQuitDisconnect((): void => {') &&
+  PAGE.indexOf('setQuitDisconnect(undefined);') > PAGE.indexOf('setTrayActionListener(undefined);') &&
+  QUIT_TEXT.indexOf('setQuitDisconnect(disconnect: QuitDisconnect | undefined): void') >= 0 &&
+  QUIT_TEXT.indexOf('UI_QUIT_DISCONNECT_UNAVAILABLE') >= 0);
 check('the bypass flag is set FIRST, before the disconnect and before any await',
   QUIT_TEXT.indexOf('explicitQuitRequested = true;') >= 0 &&
-  QUIT_TEXT.indexOf('explicitQuitRequested = true;') < QUIT_TEXT.indexOf('disconnect();') &&
-  QUIT_TEXT.indexOf('explicitQuitRequested = true;') < QUIT_TEXT.indexOf('await sleep('));
+  QUIT_TEXT.indexOf('explicitQuitRequested = true;') <
+    QUIT_TEXT.indexOf('disconnect();', QUIT_TEXT.indexOf('export async function performExplicitQuit(')) &&
+  QUIT_TEXT.indexOf('explicitQuitRequested = true;') <
+    QUIT_TEXT.indexOf('await sleep(', QUIT_TEXT.indexOf('export async function performExplicitQuit(')));
 check('the exit order is upstream\'s: disconnect → keep-alive → icon → terminate',
   QUIT_TEXT.indexOf('disconnect();') < QUIT_TEXT.indexOf('stopKeepAlive(context') &&
   QUIT_TEXT.indexOf('stopKeepAlive(context') < QUIT_TEXT.indexOf('await removeTray(reason)') &&
@@ -305,25 +320,40 @@ check('the exit order is upstream\'s: disconnect → keep-alive → icon → ter
 check('the borrowed task is released as SHUTDOWN (no session left)',
   QUIT_TEXT.indexOf('KEEP_ALIVE_REVISION_SHUTDOWN') >= 0 &&
   QUIT_TEXT.indexOf('stopKeepAlive(context, KEEP_ALIVE_REVISION_SHUTDOWN, reason)') >= 0);
-check('the difference from a plain system exit is documented in the code',
-  QUIT_TEXT.indexOf('PLAIN SYSTEM EXIT') >= 0 &&
+check('the one path the app cannot act on is documented, not hidden',
+  QUIT_TEXT.indexOf('THE ONE PATH THE APP CANNOT ACT ON') >= 0 &&
+  QUIT_TEXT.indexOf('platform stops the VPN when the app process exits') >= 0 &&
   QUIT_TEXT.indexOf('onDestroy') >= 0 &&
-  QUIT_TEXT.indexOf('0.0.30 only made the') >= 0 &&
-  QUIT_TEXT.indexOf('vetoes only on the device where that registration failed') >= 0);
+  ABILITY.indexOf('PLAIN PLATFORM KILL') >= 0 &&
+  ABILITY.indexOf('no code of ours to run') >= 0);
 check('the keep-alive and tray steps of the quit cannot block the exit',
   (QUIT_TEXT.match(/try \{/g) ?? []).length >= 4 &&
   QUIT_TEXT.indexOf('await removeTray(reason);') > QUIT_TEXT.indexOf('catch (error'));
-check('the ability reads the bypass flag from the quit flow',
-  ABILITY.indexOf("import { explicitQuitInProgress } from '../tray/NetBirdQuitFlow';") >= 0 &&
-  ABILITY.indexOf('explicitQuitInProgress()') >= 0);
-check('the version is 30 / 0.0.30 in both profiles',
-  /versionCode: 30/.test(BUILD_PROFILE) && /versionName: '0\.0\.30'/.test(BUILD_PROFILE) &&
-  /versionCode: 30/.test(APP_JSON5) && /versionName: '0\.0\.30'/.test(APP_JSON5));
-check('0.0.30 fixes the system tray 退出: the guard is gated on the registration',
+check('the ability reads the bypass flag and starts the flow from the quit module',
+  ABILITY.indexOf("from '../tray/NetBirdQuitFlow';") >= 0 &&
+  ABILITY.indexOf('import { explicitQuitInProgress,') >= 0 &&
+  ABILITY.indexOf('explicitQuitInProgress()') >= 0 &&
+  ABILITY.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') >= 0 &&
+  ABILITY.indexOf('QUIT_REASON_SYSTEM') < ABILITY.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);'));
+check('the version is 31 / 0.0.31 in both profiles',
+  /versionCode: 31/.test(BUILD_PROFILE) && /versionName: '0\.0\.31'/.test(BUILD_PROFILE) &&
+  /versionCode: 31/.test(APP_JSON5) && /versionName: '0\.0\.31'/.test(APP_JSON5));
+check('0.0.31: the system tray 退出 takes the SAME full-quit path (veto once, then quit)',
   ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
   ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&
   ABILITY.indexOf('if (this.closeToBackgroundRegistered) {') >= 0 &&
+  ABILITY.indexOf('if (shouldVetoSystemExit(Date.now())) {') >= 0 &&
+  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit'") >= 0 &&
+  ABILITY.indexOf("'veto-system-exit-quit'") >= 0 &&
   ABILITY.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >= 0);
+check('the veto-once decision is a pure module, carried by the flow (not re-derived)',
+  QUIT_TEXT.indexOf("from './NetBirdQuitPolicy'") >= 0 &&
+  QUIT_TEXT.indexOf('systemExitVetoDecision(systemExitVetoAtMs,') >= 0 &&
+  QUIT_TEXT.indexOf('explicitQuitRequested, nowMs);') >= 0 &&
+  QUIT_TEXT.indexOf('systemExitVetoAtMs: number = SYSTEM_EXIT_VETO_NONE;') >= 0 &&
+  QUIT_TEXT.indexOf('SYSTEM_EXIT_VETO_WINDOW_MS: number =') < 0 &&
+  readFileSync(join(ets, 'tray', 'NetBirdQuitPolicy.ets'), 'utf8')
+    .indexOf('SYSTEM_EXIT_VETO_WINDOW_MS: number = 5000') >= 0);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) { process.exitCode = 1; }

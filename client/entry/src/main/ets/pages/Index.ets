@@ -129,17 +129,21 @@ import { keepAliveTaskPresent, refreshKeepAlive, refreshKeepAliveText,
   stopKeepAlive, takeKeepAliveCancels } from '../vpnextensionability/NetBirdKeepAliveService';
 import { KEEP_ALIVE_DEFAULT_ENABLED, loadKeepAliveEnabled,
   saveKeepAliveEnabled } from '../vpnextensionability/NetBirdKeepAliveStore';
-// 2026-10-13 PC 托盘（0.0.29）: the status-bar icon's menu actions and the state it
-// shows. 连接/断开 ride exactly the two methods the page's own toggle uses
-// (requestStart / requestStop) — the tray is a second ENTRY POINT, never a second
-// control path; 打开主窗口 is handled inside the tray service (startAbility);
-// 退出并断开 runs the shared explicit-quit flow, which disconnects first, exactly
-// like upstream's tray handleQuit(). On a phone none of this is ever live: the
-// service answers false once and its state push is a no-op.
+// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）: the status-bar icon's
+// menu actions and the state it shows. 连接/断开 ride exactly the two methods the
+// page's own toggle uses (requestStart / requestStop) — the tray is a second
+// ENTRY POINT, never a second control path; 打开主窗口 is handled inside the tray
+// service (startAbility); 退出 runs the shared quit flow, which disconnects
+// first, exactly like upstream's tray handleQuit(). This page also OWNS the one
+// vpnExtension stop call site (requestStop) and registers it as the quit flow's
+// disconnect step, so the system-generated tray 退出 (which arrives at
+// EntryAbility.onPrepareToTerminate) tears down the VPN the same way. On a phone
+// none of the tray part is ever live: the service answers false once and its
+// state push is a no-op.
 import { TRAY_MENU_CONNECT, TRAY_MENU_DISCONNECT, TRAY_MENU_QUIT }
   from '../tray/NetBirdTrayModel';
 import { setTrayActionListener, updateTrayState } from '../tray/NetBirdTrayService';
-import { performExplicitQuit, QUIT_REASON_SETTINGS, QUIT_REASON_TRAY }
+import { QUIT_REASON_SETTINGS, QUIT_REASON_TRAY, requestQuit, setQuitDisconnect }
   from '../tray/NetBirdQuitFlow';
 
 const DOMAIN: number = 0x2900;
@@ -1125,6 +1129,14 @@ struct Index {
     setTrayActionListener((menuCode: string): void => {
       this.onTrayAction(menuCode);
     });
+    // 2026-10-13 统一退出（0.0.31）: the quit flow's disconnect step IS this page's
+    // requestStop() — the ONE vpnExtension-stop call site stays here, and the flow
+    // never talks to the extension itself. Registered next to the tray listener
+    // (same lifetime discipline), so the system-generated tray 退出, the tray menu
+    // and 设置 → 退出应用 all end the VPN the same way.
+    setQuitDisconnect((): void => {
+      this.requestStop();
+    });
     this.pollConnectorStatus();
     this.pollTimer = setInterval((): void => {
       this.pollConnectorStatus();
@@ -1142,6 +1154,10 @@ struct Index {
     // icon may outlive this page (it belongs to the process), but the
     // connect/stop/quit actions must not point at a page that is gone.
     setTrayActionListener(undefined);
+    // 2026-10-13 统一退出（0.0.31）: and the same for the quit flow's disconnect
+    // step (the flow reports a missing one honestly instead of inventing a second
+    // extension-stop call site).
+    setQuitDisconnect(undefined);
     if (!this.accountLoginCommitting) {
       this.cancelAccountLogin(false);
     }
@@ -3613,10 +3629,11 @@ struct Index {
     // 打开主窗口 never arrives here: the tray service opens the window itself.
   }
 
-  // The EXPLICIT exit — the tray's 退出并断开 row and 设置 → 应用 → 退出应用. See
+  // The EXPLICIT exit — the tray's 退出 row and 设置 → 应用 → 退出应用. See
   // ../tray/NetBirdQuitFlow.ets for the upstream contract this mirrors
   // (client/ui/tray.go handleQuit(): disconnect first by default, then quit) and
-  // for the difference from a plain system exit.
+  // for the third entry point that shares it (the system-generated tray 退出, via
+  // EntryAbility.onPrepareToTerminate → requestQuit(QUIT_REASON_SYSTEM)).
   private beginExplicitQuit(reason: string): void {
     if (this.quitInFlight) {
       // One quit, no second: a repeated click must not issue a second disconnect.
@@ -3624,19 +3641,13 @@ struct Index {
     }
     this.quitInFlight = true;
     const host: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-    // The disconnect is the page's own requestStop() — the ONE extension-stop call
-    // site stays in this file. requestStop() is itself a no-op when nothing was
-    // requested (the tunnel is already down), which is exactly the desired
-    // "disconnect on quit" semantics.
-    performExplicitQuit(host, reason, (): void => {
-      this.requestStop();
-    }).catch((error: Error): void => {
-      // performExplicitQuit already records every step it could not complete; this
-      // only keeps a rejected promise from escaping.
-      hilog.error(DOMAIN, TAG, 'UI_QUIT_FAILED|reason=%{public}s|code=%{public}s',
-        reason, String((error as BusinessFailure).code ?? 'none'));
-      this.quitInFlight = false;
-    });
+    // The disconnect is the page's own requestStop(), registered with the flow in
+    // aboutToAppear (setQuitDisconnect) — the ONE extension-stop call site stays in
+    // this file. requestStop() is itself a no-op when nothing was requested (the
+    // tunnel is already down), which is exactly the desired "disconnect on quit"
+    // semantics. requestQuit() returns before the flow's first await, so the flow
+    // is already armed and the stop already issued when this returns.
+    requestQuit(host, reason);
   }
 
   // ---- 诊断日志导出（设置 → 诊断日志）-------------------------------------
@@ -4747,9 +4758,10 @@ struct Index {
           .onClick(() => {
             this.openRouteSelection();
           })
-          // 2026-10-13 PC 托盘（0.0.29）: the explicit exit, the same flow the tray's
-          // 退出并断开 row runs. It is deliberately NOT "close the window" — this
-          // app's window X hides to the background and keeps the tunnel up (see
+          // 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）: the explicit
+          // exit, the same flow the tray's 退出 row and the system-generated tray
+          // 退出 run. It is deliberately NOT "close the window" — this app's window
+          // X hides to the background and keeps the tunnel up (see
           // EntryAbility.registerCloseToBackground), so the only way to really
           // leave AND disconnect must be visible in the app itself.
           this.sectionTitle('应用')
@@ -4769,7 +4781,7 @@ struct Index {
           .onClick(() => {
             this.beginExplicitQuit(QUIT_REASON_SETTINGS);
           })
-          Text('关闭窗口只是隐藏到后台，连接保持；「退出应用」会先断开 VPN 并停止后台保活，再结束应用。')
+          Text('关闭窗口只是隐藏到后台，连接保持；「退出应用」和状态栏图标菜单里的「退出」都会先断开 VPN 并停止后台保活，再结束应用。')
             .fontSize(12)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')

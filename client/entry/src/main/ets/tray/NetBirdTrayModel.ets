@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
-// 2026-10-13 PC 托盘（0.0.29）—— PURE LOGIC only.
+// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）—— PURE LOGIC only.
 //
 // WHAT THIS FILE IS: every tray decision that can be made without a device —
 // what the right-click menu contains for a given connection state, what the
@@ -56,10 +56,13 @@ export const TRAY_MENU_OPEN: string = 'nb_tray_open';
 export const TRAY_MENU_QUIT: string = 'nb_tray_quit';
 
 // The row titles: upstream's tray.menu.connect / .disconnect / .open / .quit.
+// 0.0.31: the Quit row is 退出 — the plain label upstream uses, because quitting
+// now ALWAYS disconnects first (there is no "keep the tunnel" variant left to
+// distinguish it from; see tray/NetBirdQuitFlow.ets).
 export const TRAY_TITLE_CONNECT: string = '连接';
 export const TRAY_TITLE_DISCONNECT: string = '断开';
 export const TRAY_TITLE_OPEN: string = '打开主窗口';
-export const TRAY_TITLE_QUIT: string = '退出并断开';
+export const TRAY_TITLE_QUIT: string = '退出';
 
 // The state vocabulary of the page (NetBirdUiModel.homeStateText) — the ONLY
 // labels this module recognises. Anything else is 未连接 (never a guess).
