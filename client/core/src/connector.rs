@@ -1498,8 +1498,13 @@ struct ConnectorShared {
     /// `relay` — never the reverse.
     relay: Mutex<RelaySlot>,
     /// N13-D2: the WG relay-carrier orchestrator (created at the first relay
-    /// client start; only when the WG seam is carrier-capable).
-    relay_carrier: std::sync::OnceLock<std::sync::Arc<RelayCarrier>>,
+    /// client start; only when the WG seam is carrier-capable). Held through
+    /// an `Arc` slot (not a bare `OnceLock`) because the SIGNAL runtime shares
+    /// it: a received OFFER/ANSWER must reach
+    /// [`RelayCarrier::request_lane`] — the upstream `WorkerRelay.OnNewOffer`
+    /// trigger, worker_relay.go:44-90 — and the signal runtime is built before
+    /// the carrier exists.
+    relay_carrier: Arc<std::sync::OnceLock<std::sync::Arc<RelayCarrier>>>,
     /// N13-D2: the WG seam the carrier lanes attach to (set at spawn, with
     /// the relay opt-in only).
     relay_wg: std::sync::OnceLock<std::sync::Arc<dyn WgPeerApplier>>,
@@ -1693,7 +1698,7 @@ impl ConnectorShared {
             relay_enabled,
             relay_attach,
             relay: Mutex::new(RelaySlot::default()),
-            relay_carrier: std::sync::OnceLock::new(),
+            relay_carrier: Arc::new(std::sync::OnceLock::new()),
             relay_wg: std::sync::OnceLock::new(),
             relay_runtime: std::sync::OnceLock::new(),
             relay_ads: Arc::new(Mutex::new(HashMap::new())),
@@ -2801,14 +2806,16 @@ impl ConnectorShared {
 pub struct RelayCarrierStats {
     /// `open_conn` calls that saw `PeersOnline` (§4.1).
     pub lanes_open_ok: u64,
-    /// `open_conn` failures (typed; retried on the next pump pass).
+    /// `open_conn` failures (typed; logged once — the NEXT received
+    /// OFFER/ANSWER is what retries, upstream `worker_relay.go:71-74`).
     pub lanes_open_failed: u64,
     /// Lane handles actually attached to the WG seam.
     pub attach_ok: u64,
     /// WG seam carrier-attach refusals (e.g. unregistered peer — config bug).
     pub attach_err: u64,
     /// Lane detachments (revocation / relay-down fail-closed / stop /
-    /// peer went offline — the presence reconcile in [`RelayCarrier::ensure_lane`]).
+    /// peer went offline — the presence reconcile in
+    /// [`RelayCarrier::reconcile_presence`]).
     pub detach_ok: u64,
     /// Inbound relay datagrams fed to the WG device (matched senders).
     pub frames_in: u64,
@@ -2826,15 +2833,6 @@ pub struct RelayCarrierStats {
     /// server disconnect).
     pub foreign_closed: u64,
 }
-
-/// Retry backoff for a lane whose `open_conn` failed (e.g. the peer stays
-/// offline and the 30s §4.1 window timed out). This port re-opens lanes on
-/// the pump reconcile where upstream re-opens strictly on demand, so
-/// without it a fast-failing open would retry every pump pass; with it an
-/// offline peer costs one attempt per backoff window (the blocking 30s
-/// window itself stays the dominant rate limiter). Cost: recovery after a
-/// FAILED open is delayed by up to one window.
-const LANE_OPEN_RETRY: Duration = Duration::from_secs(5);
 
 /// Foreign-relay idle policy — official `shared/relay/client/manager.go`:
 /// `relayCleanupInterval = 60s` (sweep cadence) and
@@ -2971,10 +2969,18 @@ pub struct RelayCarrier {
     /// re-opened on the new choice. Identity for idempotent attach/detach
     /// bookkeeping remains the carrier handle.
     attached: Mutex<HashMap<String, (std::sync::Arc<crate::relay_client::RelayWgCarrier>, String)>>,
-    /// Per-peer earliest instant the next `open_conn` attempt is allowed
-    /// ([`LANE_OPEN_RETRY`] backoff after a failed open; entries clear on
-    /// success).
-    open_retry_after: Mutex<HashMap<String, std::time::Instant>>,
+    /// Peers whose fresh OFFER/ANSWER arrived on the signal link — the ONLY
+    /// trigger that opens a lane (upstream `WorkerRelay.OnNewOffer`,
+    /// worker_relay.go:44-90, wired at conn.go:258 and fired by the
+    /// handshaker on a received OFFER *or* ANSWER, handshaker.go:127-151).
+    /// Written by [`RelayCarrier::request_lane`] (the signal receive path
+    /// calls it for every OFFER/ANSWER it routes) and consumed by the pump's
+    /// pass, which is why a peer that never sends anything costs ZERO relay
+    /// subscriptions. A request that finds a live lane or an in-flight open
+    /// is reused/coalesced, exactly like upstream's `ErrConnAlreadyExists`
+    /// (worker_relay.go:60-64) and `AsyncOfferListener`'s `latest`
+    /// (handshaker_listener.go:29-53).
+    lane_requests: Mutex<std::collections::HashSet<String>>,
     /// Lifecycle guard (T0-0018 follow-up): the lane-open COMMIT — validity
     /// re-check + WG attach + attached-table insert, see
     /// [`RelayCarrier::commit_lane_open`] — and every invalidating transition
@@ -2985,7 +2991,7 @@ pub struct RelayCarrier {
     /// then removes it — a removed/stopped carrier can never be resurrected
     /// by a late open. `true` = armed (between attach_client and shutdown).
     /// LOCK ORDER: `lifecycle` first, then one leaf lock at a time
-    /// (client/peers/attached/pending_opens/open_retry_after/ads/
+    /// (client/peers/attached/pending_opens/lane_requests/ads/
     /// foreign_ctx/foreign); never held across an await; no leaf holder
     /// ever acquires `lifecycle` (no ABBA).
     lifecycle: Mutex<bool>,
@@ -3088,7 +3094,7 @@ impl RelayCarrier {
             wg,
             peers: Mutex::new(Vec::new()),
             attached: Mutex::new(HashMap::new()),
-            open_retry_after: Mutex::new(HashMap::new()),
+            lane_requests: Mutex::new(std::collections::HashSet::new()),
             lifecycle: Mutex::new(false),
             pending_opens: Mutex::new(HashMap::new()),
             next_open_gen: std::sync::atomic::AtomicU64::new(0),
@@ -3195,10 +3201,13 @@ impl RelayCarrier {
 
     /// (Re)arm with a relay client: detaches all lanes (presence does not
     /// survive a relay reconnect), aborts any pump AND any pending lane open
-    /// of a PREVIOUS client. Runs under the lifecycle lock: mutually exclusive
-    /// with the lane-open commit — an old client's open that already passed
-    /// its await either commits BEFORE this (and is detached right here) or
-    /// sees the swapped client in its commit check and drops.
+    /// of a PREVIOUS client, and forgets every outstanding lane request — a
+    /// re-armed client opens a conn only from a NEWLY received OFFER/ANSWER
+    /// (upstream worker_relay.go:44-90 has no other trigger). Runs under the
+    /// lifecycle lock: mutually exclusive with the lane-open commit — an old
+    /// client's open that already passed its await either commits BEFORE
+    /// this (and is detached right here) or sees the swapped client in its
+    /// commit check and drops.
     pub fn attach_client(&self, client: crate::relay_client::RelayClient) {
         let mut lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
         *lifecycle = true;
@@ -3207,9 +3216,39 @@ impl RelayCarrier {
             h.abort();
         }
         self.abort_pending_lanes();
+        self.lane_requests.lock().unwrap_or_else(PoisonError::into_inner).clear();
         *self.client.lock().unwrap_or_else(PoisonError::into_inner) = Some(client);
         drop(lifecycle);
         hilog::emit("connector: relay carrier armed with the relay client");
+    }
+
+    /// A fresh OFFER/ANSWER for `key` was received on the signal link — the
+    /// upstream `WorkerRelay.OnNewOffer` trigger (worker_relay.go:44-90;
+    /// wired at conn.go:258, fired by the handshaker for a received OFFER
+    /// *or* ANSWER, handshaker.go:127-151). Recording the request is ALL this
+    /// does: the pump's next pass opens the lane (single-flight per peer, and
+    /// a request that finds a live lane or an in-flight open is
+    /// reused/coalesced like upstream's `ErrConnAlreadyExists` /
+    /// `AsyncOfferListener`).
+    ///
+    /// A key outside the lane universe is DROPPED here: upstream's relay
+    /// listener belongs to the peer's `Conn`, and a `Conn` exists only for a
+    /// network-map peer (engine.go:1955-1990) — so an OFFER from a key the map
+    /// does not carry can neither open a lane nor accumulate a request.
+    pub fn request_lane(&self, key: &str) {
+        let known = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(k, _)| k == key);
+        if !known {
+            return;
+        }
+        self.lane_requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.to_string());
     }
 
     /// The connectable peer set from the last network map (lane universe).
@@ -3237,19 +3276,13 @@ impl RelayCarrier {
         };
         // A removed peer's pending open must never fire into a late attach:
         // abort the task (a task already past its last await is unaffected by
-        // abort — its commit sees the peer gone and drops); also drop its
-        // backoff entry — the map must not remember a peer the lane universe
-        // forgot.
+        // abort — its commit sees the peer gone and drops).
         for key in &removed {
             if let Some((_, h)) =
                 self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).remove(key)
             {
                 h.abort();
             }
-            self.open_retry_after
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(key);
         }
         let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
         let stale: Vec<String> = attached
@@ -3270,6 +3303,13 @@ impl RelayCarrier {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|k, _| keys.contains(k));
+        // Same bound for the lane requests: a request is only meaningful for
+        // a peer of the lane universe (upstream's relay listener belongs to
+        // the peer's conn, which exists only for map peers).
+        self.lane_requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|k| keys.contains(k));
         drop(lifecycle);
     }
 
@@ -3292,22 +3332,25 @@ impl RelayCarrier {
     /// relay client when it differs from home, official
     /// `Manager.OpenConn(serverAddress, peerKey)`).
     ///
-    /// Presence reconcile (upstream client lifecycle): an attached lane
-    /// whose peer the server reported OFFLINE (`PeersWentOffline`) is
-    /// detached here — the offline check runs on the lane's OWN client
-    /// (foreign lanes report presence on the foreign client, not home).
-    /// The relay server's came-online interest is ONE-SHOT
-    /// (consumed by the first `PeersOnline` delivery — only a NEW
-    /// `SubscribePeerState` re-arms it), so a lane kept attached across the
-    /// peer's offline window can never see the peer's return: this is the
-    /// upstream "went-offline → close per-peer connection → re-`OpenConn`
-    /// on demand" half our port was missing. The re-open below IS that
-    /// fresh `open_conn`: it blocks in the §4.1 wait until the peer returns
-    /// (fresh subscribe re-arms the interest → `PeersOnline` → presence
-    /// restored → lane re-attached, egress accepted again), or fails typed
-    /// and backs off [`LANE_OPEN_RETRY`] before the next attempt. The same
-    /// detach+re-open runs when the peer's advertised relay CHANGED (a
-    /// stale lane on the wrong server can never meet the peer).
+    /// Called ONLY for a peer with a fresh lane request — a received
+    /// OFFER/ANSWER (upstream `WorkerRelay.OnNewOffer`, worker_relay.go:44-90;
+    /// the pump pass in [`RelayCarrier::spawn_requested_lanes`]). Nothing here
+    /// retries on a timer: a failed `open_conn` is logged once and stays
+    /// failed until the NEXT received OFFER/ANSWER (`worker_relay.go:71-74`
+    /// logs and returns; the peer guard's re-offer is what produces the next
+    /// attempt, `guard.go:186-210` → `conn.go:686-692`).
+    ///
+    /// Stale-lane reconcile on the way in: a lane whose peer the server
+    /// reported OFFLINE (`PeersWentOffline`) or whose advertised relay CHANGED
+    /// is detached here so the fresh `open_conn` below re-subscribes on the
+    /// CURRENT server (idempotent: the attached table is keyed, open_conn
+    /// guards duplicate pending subscribes, and the WG seam attach is an
+    /// upsert). Upstream closes the per-peer conn on the offline edge itself
+    /// (`client.go:787-807` `closeConnsByPeerID`) and RE-OPENS it only when a
+    /// new OFFER/ANSWER arrives (`worker_relay.go:44-90`) — the eager detach
+    /// of an offline-announced lane lives in
+    /// [`RelayCarrier::reconcile_presence`], this path only handles the
+    /// request that arrived.
     pub async fn ensure_lane(self: &std::sync::Arc<Self>, key: &str) -> bool {
         let Some(home) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
         else {
@@ -3323,6 +3366,8 @@ impl RelayCarrier {
             let attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some((lane, lane_via)) = attached.get(key) {
                 if lane_via == &via && !lane.client().is_offline(&pid) {
+                    // Upstream `ErrConnAlreadyExists` (worker_relay.go:60-64):
+                    // the existing relay conn is reused as-is.
                     return true;
                 }
             }
@@ -3346,15 +3391,6 @@ impl RelayCarrier {
                 pid, via
             ));
         }
-        if self
-            .open_retry_after
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(key)
-            .is_some_and(|t| std::time::Instant::now() < *t)
-        {
-            return false;
-        }
         // The per-peer relay selection line (task requirement): which relay
         // URL this peer's lane uses, and whether it is our home relay.
         let is_home = client.same_client(&home);
@@ -3363,22 +3399,14 @@ impl RelayCarrier {
             pid, via, is_home
         ));
         match client.open_conn(&pid).await {
-            Ok(()) => {
-                self.open_retry_after
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(key);
-                self.commit_lane_open(key, pid, client, via)
-            }
+            Ok(()) => self.commit_lane_open(key, pid, client, via),
             Err(e) => {
-                self.open_retry_after
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(key.to_string(), std::time::Instant::now() + LANE_OPEN_RETRY);
                 self.bump(|s| {
                     s.lanes_open_failed += 1;
                     s.last_open_error = Some(relay_error_class_token(e.class()));
                 });
+                // Logged ONCE (worker_relay.go:71-74); no backoff entry, no
+                // pump retry — the next received OFFER/ANSWER is the retry.
                 hilog::emit(&format!(
                     "connector: relay lane open failed|peer={} relay={} class={}",
                     pid,
@@ -3772,8 +3800,75 @@ impl RelayCarrier {
         }
     }
 
-    /// Fan the lane universe out into managed per-peer open tasks (the pump's
-    /// per-pass pass; 0018 fix). NEVER awaits an open: the pre-fix version
+    /// Detach every attached lane whose peer the relay server declared
+    /// OFFLINE on that lane's OWN client — upstream `closeConnsByPeerID`
+    /// (client.go:787-807, the offline callback of `PeersStateSubscription`,
+    /// peer_subscription.go:61-76), i.e. the per-peer relay conn is freed the
+    /// moment `PeersWentOffline` arrives, not when a new offer shows up. The
+    /// WG seam must follow: a lane the relay no longer has would keep
+    /// accepting egress that can never arrive. The lane is RE-OPENED only by
+    /// the next received OFFER/ANSWER ([`RelayCarrier::ensure_lane`]), again
+    /// as upstream does (the relay `Conn` is gone; only `OnNewOffer` opens a
+    /// new one, worker_relay.go:44-90).
+    ///
+    /// The offline check runs on the lane's OWN client: foreign lanes report
+    /// presence on the foreign relay client, so asking the home client would
+    /// either freeze a lane the foreign relay already declared offline or
+    /// detach one it still serves. Takes one leaf at a time (never nested).
+    fn reconcile_presence(&self) {
+        let attached: Vec<(String, crate::relay_client::RelayClient)> = self
+            .attached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(k, (lane, _))| (k.clone(), lane.client().clone()))
+            .collect();
+        for (key, lane_client) in attached {
+            let pid = crate::relay::PeerId::from_wg_pubkey_string(&key);
+            if !lane_client.is_offline(&pid) {
+                continue;
+            }
+            // Re-check under the attached lock before detaching: the peer may
+            // have been reported online again (or the lane moved) in between,
+            // and the via in the log needs the entry's own value.
+            let via = {
+                let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+                match attached.get(&key) {
+                    Some((lane, via)) if lane.client().is_offline(&pid) => {
+                        let via = via.clone();
+                        attached.remove(&key);
+                        Some(via)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(via) = via {
+                self.wg.detach_carrier(&key);
+                self.bump(|s| s.detach_ok += 1);
+                hilog::emit(&format!(
+                    "connector: relay carrier lane detached (offline or relay changed)|peer={}|relay={}",
+                    pid, via
+                ));
+            }
+        }
+    }
+
+    /// Forget every outstanding lane request. Called when the relay is NOT
+    /// Ready: upstream cannot open a conn without a live relay instance —
+    /// `RelayInstanceAddress` errors and `OnNewOffer` logs and RETURNS
+    /// (worker_relay.go:53-57); the offer is NOT remembered for the next
+    /// Ready window. A request that outlived the outage would otherwise open
+    /// a conn no live OFFER/ANSWER asked for.
+    fn drop_lane_requests(&self) {
+        self.lane_requests.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
+    /// Fan the peers with an outstanding lane REQUEST out into managed
+    /// per-peer open tasks (the pump's per-pass pass; 0018 fix). The request
+    /// set is written only by a received OFFER/ANSWER
+    /// ([`route_signal_message`] → [`RelayCarrier::request_lane`], upstream
+    /// `WorkerRelay.OnNewOffer`, worker_relay.go:44-90) — the network map
+    /// alone NEVER opens a lane. NEVER awaits an open: the pre-fix version
     /// awaited every peer's `open_conn` sequentially here, so one peer that
     /// never came online parked the whole pump for the 30s §4.1 budget per
     /// pass — inbound frames of already-connected lanes starved behind it
@@ -3788,12 +3883,15 @@ impl RelayCarrier {
     /// overwriting a registered handle. `spawn` neither awaits nor polls the
     /// child, so holding the std mutex across it is safe (a child that races
     /// ahead parks on the same lock until the insert is done).
-    /// Discipline per peer: skip if a lane is live (presence reconcile still
-    /// runs inside `ensure_lane` for an offline-announced lane), if an open
-    /// is already in flight, or inside the [`LANE_OPEN_RETRY`] backoff — so
-    /// opens are neither duplicated nor re-spammed per tick. Lock order:
-    /// lifecycle first, then one leaf at a time, never nested leaves.
-    fn spawn_pending_lanes(self: &std::sync::Arc<Self>) {
+    /// Discipline per peer, mirroring upstream: a request that finds a live
+    /// lane on the CURRENT choice is consumed and reused (upstream
+    /// `ErrConnAlreadyExists`, worker_relay.go:60-64); a request that finds an
+    /// open already in flight is LEFT in the set and retried by a later pass
+    /// once that open finishes (upstream `AsyncOfferListener` keeps the latest
+    /// offer while the callback runs, handshaker_listener.go:29-53) — so opens
+    /// are neither duplicated nor re-spammed per tick. Lock order: lifecycle
+    /// first, then one leaf at a time, never nested leaves.
+    fn spawn_requested_lanes(self: &std::sync::Arc<Self>) {
         let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
         if !*lifecycle {
             return;
@@ -3803,27 +3901,17 @@ impl RelayCarrier {
             return;
         };
         let keys: Vec<String> = self
-            .peers
+            .lane_requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .map(|(k, _)| k.clone())
+            .cloned()
             .collect();
         for key in keys {
-            // leaf checks first — each taken and released before the next
-            if self
-                .open_retry_after
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&key)
-                .is_some_and(|t| std::time::Instant::now() < *t)
-            {
-                continue;
-            }
             let pid = crate::relay::PeerId::from_wg_pubkey_string(&key);
-            // A live lane is skipped only while it is BOTH healthy on ITS OWN
-            // relay client — a foreign lane reports presence on the foreign
-            // client, so asking the home client would freeze a lane the
+            // A live lane consumes the request only while it is BOTH healthy on
+            // ITS OWN relay client — a foreign lane reports presence on the
+            // foreign client, so asking the home client would freeze a lane the
             // foreign relay already declared offline — AND still on the relay
             // server the CURRENT choice resolves to: a changed advertisement
             // (or a home/foreign flip) must move the lane, and `ensure_lane`
@@ -3840,22 +3928,32 @@ impl RelayCarrier {
                 if !lane_client.is_offline(&pid)
                     && self.lane_via(&client, &key).as_deref() == Some(lane_via.as_str())
                 {
+                    // Upstream reuse: consume the offer, keep the conn.
+                    self.lane_requests
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&key);
                     continue;
                 }
             }
             // Single short critical section: vacant check → spawn → insert
             // (generational entry — see `finish_open`; an aborted-but-never-
             // yielded old task finishing late removes only its OWN (key, gen)
-            // entry, never a newer task's).
+            // entry, never a newer task's). An in-flight open LEAVES the
+            // request in place (coalesced, see the doc above).
             let mut pending =
                 self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
             if pending.contains_key(&key) {
                 continue;
             }
+            self.lane_requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&key);
             // Bounded metadata (0018 diagnostics): distinguishes "pump never
             // ran" from "open never resolved". Rate-limited by the per-peer
-            // single-flight guard + backoff; the peer id is the public
-            // `sha-` form — no payload, no key material.
+            // single-flight guard; the peer id is the public `sha-` form — no
+            // payload, no key material.
             hilog::emit(&format!("connector: relay lane open waiting|peer={}", pid));
             let gen = self.next_open_gen.fetch_add(1, Ordering::Relaxed);
             let this = self.clone();
@@ -4033,9 +4131,11 @@ impl RelayCarrier {
 
 /// The production pump loop: lane opens are FANNED OUT as managed per-peer
 /// tasks (never awaited inline — a pending open must not park the pump, 0018)
-/// while (and only while) the relay is Ready; inbound frames are pumped
-/// between passes. Exits when the client stops (recv drained to `None`) or
-/// the state machine reaches `Dead` — teardown additionally aborts this task.
+/// while (and only while) the relay is Ready, and only for peers a received
+/// OFFER/ANSWER asked for (upstream `WorkerRelay.OnNewOffer`,
+/// worker_relay.go:44-90); inbound frames are pumped between passes. Exits
+/// when the client stops (recv drained to `None`) or the state machine
+/// reaches `Dead` — teardown additionally aborts this task.
 async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
     loop {
         let Some(client) = carrier
@@ -4052,10 +4152,21 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
                 carrier.abort_pending_lanes();
                 return;
             }
-            // spawns only — no open is awaited on the pump's path
-            crate::relay_client::RelayState::Ready => carrier.spawn_pending_lanes(),
-            // relay down: no lane may look like a path (fail-closed)
-            _ => carrier.detach_all(),
+            crate::relay_client::RelayState::Ready => {
+                // upstream client.go:787-807: the peer the server declared
+                // offline loses its relay conn NOW (the presence callback),
+                // not at the next offer.
+                carrier.reconcile_presence();
+                // spawns only — no open is awaited on the pump's path
+                carrier.spawn_requested_lanes();
+            }
+            // relay down: no lane may look like a path (fail-closed) and no
+            // offer can open one (upstream worker_relay.go:53-57 logs and
+            // returns) — outstanding requests die with the outage.
+            _ => {
+                carrier.detach_all();
+                carrier.drop_lane_requests();
+            }
         }
         tokio::select! {
             // pump inbound frames as they arrive; `false` = client gone
@@ -4072,8 +4183,9 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
                 }
             }
             _ = tokio::time::sleep(core::time::Duration::from_millis(500)) => {
-                // periodic re-check: lanes to open / relay state changes; also
-                // reaps open tasks that died without bookkeeping
+                // periodic re-check: requested lanes to open / presence edges /
+                // relay state changes; also reaps open tasks that died without
+                // bookkeeping
                 carrier.reap_finished_lanes();
             }
         }
@@ -5281,6 +5393,13 @@ struct SignalRuntime {
     /// OFFER/ANSWER `relayServerAddress` here, and the relay carrier reads
     /// the SAME map for its per-peer relay-server choice.
     ads: Arc<Mutex<HashMap<String, String>>>,
+    /// N13-D4: the connector's relay-carrier slot — the receive path calls
+    /// [`RelayCarrier::request_lane`] on it for every OFFER/ANSWER it routes
+    /// (the upstream `WorkerRelay.OnNewOffer` trigger, worker_relay.go:44-90).
+    /// The slot is shared with the connector because the signal runtime is
+    /// built before the carrier exists; `None` (carrier never armed) makes the
+    /// trigger a no-op — exactly upstream's "no relay conn listener".
+    carrier: Arc<std::sync::OnceLock<std::sync::Arc<RelayCarrier>>>,
 }
 
 impl SignalRuntime {
@@ -5289,6 +5408,7 @@ impl SignalRuntime {
         exchange: Arc<RealSignalExchange>,
         outbox: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
         ads: Arc<Mutex<HashMap<String, String>>>,
+        carrier: Arc<std::sync::OnceLock<std::sync::Arc<RelayCarrier>>>,
     ) -> Self {
         SignalRuntime {
             materials: {
@@ -5304,6 +5424,7 @@ impl SignalRuntime {
             outbox: Arc::new(tokio::sync::Mutex::new(outbox)),
             state: Arc::new(Mutex::new(SignalLinkStatus::default())),
             ads,
+            carrier,
         }
     }
 
@@ -5365,6 +5486,7 @@ impl SignalRuntime {
         let state = self.state.clone();
         let orch_cb = orch.clone();
         let ads_cb = self.ads.clone();
+        let carrier_cb = self.carrier.clone();
         let on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync> = Arc::new(move |ev| match ev {
             SignalLinkEvent::DialFailed(_) => {
                 // 初始受保护拨号失败：fail-closed，记录分类后由 worker 退避重试
@@ -5375,7 +5497,9 @@ impl SignalRuntime {
                 orch_cb.lock_poison().set_signal_ready(true);
                 hilog::emit("connector: signal stream registered (ice initiation armed)");
             }
-            SignalLinkEvent::Message(m) => route_signal_message(&orch_cb, &ads_cb, &m),
+            SignalLinkEvent::Message(m) => {
+                route_signal_message(&orch_cb, &ads_cb, carrier_cb.get(), &m)
+            }
             SignalLinkEvent::Malformed => {
                 // 帧级失败已上报、流保持（crate::signal；grpc.go:600-602）
                 hilog::emit("connector: signal malformed frame (stream stays up)");
@@ -5436,6 +5560,7 @@ impl SignalRuntime {
 fn route_signal_message(
     orch: &Mutex<PeerIceOrchestrator>,
     ads: &Mutex<HashMap<String, String>>,
+    carrier: Option<&std::sync::Arc<RelayCarrier>>,
     m: &SignalMessage,
 ) {
     use crate::signal::proto::body::Type;
@@ -5451,10 +5576,18 @@ fn route_signal_message(
     // lane toward us on the strength of a non-empty value
     // (worker_relay.go:122-127 → :69); CANDIDATE/HEARTBEAT frames never carry
     // it. Recording first means the lane-decision input can never lag the
-    // frame that announced it; the lane itself is still opened (and, for an
-    // already attached lane, re-decided — see `spawn_pending_lanes`) on the
-    // carrier's own clock, so an advertisement that arrives after the first
-    // lane attempt moves the lane instead of being lost.
+    // frame that announced it.
+    //
+    // N13-D4 (upstream alignment): the SAME frame is the lane-open trigger.
+    // Upstream's `WorkerRelay.OnNewOffer` is wired as the handshaker's relay
+    // listener (conn.go:258) and therefore fires on a received OFFER *or*
+    // ANSWER (handshaker.go:127-151) — never on a map update, never on a
+    // timer (worker_relay.go:44-90: on error it logs and returns). This call
+    // is what makes a lane open; the carrier's pump consumes the request
+    // (single-flight per peer, reuse when a lane is already up, coalesced
+    // while an open is in flight — see `spawn_requested_lanes`). No request
+    // is made for CANDIDATE frames: upstream's listener never sees them, and
+    // a key outside the lane universe is refused by `request_lane` itself.
     if matches!(kind, PeerSignalKind::Offer | PeerSignalKind::Answer) {
         let advertised = m.relay_server_address.as_deref().map(str::trim).filter(|u| !u.is_empty());
         if let Some(url) = advertised {
@@ -5469,6 +5602,9 @@ fn route_signal_message(
                     url
                 ));
             }
+        }
+        if let Some(carrier) = carrier {
+            carrier.request_lane(&m.from_key);
         }
     }
     let now = crate::sys::mono_ms();
@@ -5837,6 +5973,7 @@ impl ConnectorHandle {
                                 exchange.clone(),
                                 rx,
                                 shared.relay_ads.clone(),
+                                shared.relay_carrier.clone(),
                             ));
                             let _ = shared.signal.set(rt);
                             exchange
@@ -12143,6 +12280,7 @@ mod tests {
             exchange,
             rx,
             shared.relay_ads.clone(),
+            shared.relay_carrier.clone(),
         ));
         let _ = shared.signal.set(rt);
         let login = crate::grpc::proto::LoginResponse {
@@ -12565,6 +12703,7 @@ mod tests {
             exchange.clone(),
             rx,
             shared.relay_ads.clone(),
+            shared.relay_carrier.clone(),
         ));
         let _ = rt.orch.set(orch.clone());
         let _ = shared.signal.set(rt.clone());
@@ -13203,6 +13342,7 @@ mod tests {
             exchange.clone(),
             rx,
             shared.relay_ads.clone(),
+            shared.relay_carrier.clone(),
         ));
         let _ = shared.signal.set(rt);
         let wg = WgPeerRegistry::new();
@@ -13437,7 +13577,11 @@ mod tests {
             .await
             .expect("fake relay server");
         let unix_base: u64 = 1_800_000_000;
-        let token = relay_fabricated_token(unix_base + 3_600);
+        // A DAY-long fabricated token: the injected clock may be advanced by
+        // an hour (the upstream "a silent peer costs zero subscribes" test),
+        // and token expiry would otherwise end the relay session mid-test
+        // (`relay_client.rs`: `unix_now >= expires_at_unix` ⇒ TokenExpired).
+        let token = relay_fabricated_token(unix_base + 86_400);
         let clock = std::sync::Arc::new(crate::relay_client::VirtualClock::new(unix_base));
         let pub_self = relay_lane_key(0xC3);
         let client = crate::relay_client::RelayClient::start(
@@ -13466,11 +13610,178 @@ mod tests {
         (server, clock, carrier, wg, client)
     }
 
+    /// THE UPSTREAM TRIGGER (N13-D4): a lane is opened ONLY by a received
+    /// OFFER/ANSWER (`WorkerRelay.OnNewOffer`, worker_relay.go:44-90) — the
+    /// network map alone never subscribes, however long it stands — and a
+    /// failed open is logged once and NOT retried by a timer
+    /// (worker_relay.go:71-74 "log and return"; the retry is the peer guard's
+    /// next OFFER, guard.go:118-139 → conn.go:686-692). Deterministic over the
+    /// frozen §4.1 budget of the virtual-clock fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_lane_opens_only_on_a_received_offer_and_never_retries_on_a_timer() {
+        let (server, clock, carrier, _wg, client) = relay_starvation_fixture().await;
+        let pub_idle = relay_lane_key(0xE1);
+        let pub_online = relay_lane_key(0xA1);
+        let pub_self = relay_lane_key(0xC3);
+        let pid_online = PeerId::from_wg_pubkey_string(&pub_online);
+        let pid_self = PeerId::from_wg_pubkey_string(&pub_self);
+
+        // The online peer is already authenticated on the relay server: its
+        // open resolves as soon as it is requested.
+        let mut online =
+            relay_remote(&server, &pid_online, &relay_fabricated_token(1_800_003_600)).await;
+
+        // The LANE UNIVERSE holds both peers (the network map), and the
+        // production pump runs.
+        carrier.set_peers(&[pub_idle.clone(), pub_online.clone()]);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+
+        // (1) ONE INJECTED HOUR with the map as the only input → ZERO relay
+        //     subscribes: the universe alone opens nothing (the old pump
+        //     subscribed here within one 500ms pass).
+        relay_advance_an_hour(&clock, &client, &mut online, &pid_self).await;
+        assert_eq!(
+            server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE),
+            0,
+            "a mapped peer that never sends an OFFER/ANSWER must cost ZERO relay subscribes \
+             (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(carrier.stats().lanes_open_failed, 0);
+        assert_eq!(carrier.lane_count(), 0);
+
+        // (2) an incoming OFFER opens EXACTLY ONE lane. The idle peer is not
+        //     on the relay, so the §4.1 wait times out (typed, logged once).
+        carrier.request_lane(&pub_idle); // ≡ route_signal_message(offer)
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) == 1
+            })
+            .await,
+            "the received OFFER must open exactly one lane (stats={:?})",
+            carrier.stats(),
+        );
+        relay_liveness_ping(&client, &mut online, &pid_self).await;
+        clock.advance(OPEN_CONN_TIMEOUT + Duration::from_secs(1));
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.stats().lanes_open_failed == 1)
+                .await,
+            "the idle peer's open must time out once virtual time crosses the budget \
+             (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(carrier.stats().last_open_error, Some("open-conn-timeout"));
+
+        // (3) NO timer retry. The retired flat `LANE_OPEN_RETRY` was a REAL
+        //     5s Instant: the old pump would have put a second
+        //     SubscribePeerState on the wire within ~5s even with the §4.1
+        //     budget frozen — 7s of real time must show silence.
+        assert!(
+            relay_stays_false_for(Duration::from_secs(7), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) > 1
+            })
+            .await,
+            "a failed open must NOT be retried by a timer (stats={:?})",
+            carrier.stats(),
+        );
+
+        // (4) the NEXT received OFFER is the retry — exactly one more lane.
+        carrier.request_lane(&pub_idle);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) == 2
+            })
+            .await,
+            "the next received OFFER must retry the open (stats={:?})",
+            carrier.stats(),
+        );
+        relay_liveness_ping(&client, &mut online, &pid_self).await;
+        clock.advance(OPEN_CONN_TIMEOUT + Duration::from_secs(1));
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.stats().lanes_open_failed == 2)
+                .await,
+            "the retried open must time out too (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(
+            carrier.stats().last_open_error,
+            Some("open-conn-timeout"),
+            "the retry must fail on the SAME §4.1 budget, not on a dead relay session"
+        );
+
+        // (5) an ONLINE peer still attaches on its requested lane.
+        carrier.request_lane(&pub_online);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.stats().lanes_open_ok == 1).await,
+            "an online peer must attach on the requested lane (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(carrier.lane_count(), 1);
+        assert_eq!(carrier.stats().attach_ok, 1);
+
+        carrier.shutdown();
+    }
+
+    /// Refresh the relay session's liveness with ONE real inbound frame and
+    /// wait until the client processed it (`relay_client.rs` §5: 35s without
+    /// inbound ⇒ the session is declared dead). Used before every injected
+    /// time jump that is not itself short enough.
+    async fn relay_liveness_ping(
+        client: &crate::relay_client::RelayClient,
+        remote: &mut crate::ws::WsClient<tokio::net::TcpStream>,
+        self_id: &PeerId,
+    ) {
+        let before = client.stats().transport_rx_bytes;
+        remote
+            .write_binary(
+                &crate::relay::Frame::Transport {
+                    peer_id: self_id.clone(),
+                    payload: vec![0x5A],
+                }
+                .encode()
+                .expect("liveness frame encodes"),
+            )
+            .await
+            .expect("liveness frame send");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                client.stats().transport_rx_bytes > before
+            })
+            .await,
+            "the relay session must stay alive across the injected time jump"
+        );
+    }
+
+    /// Advance the injected clock by one hour WITHOUT letting the §5 keepalive
+    /// watchdog kill the relay session: `relay_client.rs` declares the session
+    /// dead after 35s without inbound, so a single hour-long jump would end the
+    /// session and make any "no retry" assertion vacuous. Each 30s slice is
+    /// followed by a liveness frame; the wait on `transport_rx_bytes` proves
+    /// the client PROCESSED it before the next slice (ordering matters — the
+    /// watchdog re-reads `last_inbound` on every wake).
+    async fn relay_advance_an_hour(
+        clock: &crate::relay_client::VirtualClock,
+        client: &crate::relay_client::RelayClient,
+        remote: &mut crate::ws::WsClient<tokio::net::TcpStream>,
+        self_id: &PeerId,
+    ) {
+        let step = Duration::from_secs(30);
+        let mut advanced = Duration::ZERO;
+        while advanced < Duration::from_secs(3_600) {
+            clock.advance(step);
+            advanced += step;
+            relay_liveness_ping(client, remote, self_id).await;
+        }
+    }
+
     /// THE 0018 REGRESSION: an already-connected peer's inbound frame must be
     /// ingested in bounded real time (far below the 30s §4.1 window) even
     /// while ANOTHER peer's lane open is pending. The pre-fix pump ran
     /// `ensure_lanes` sequentially to completion BEFORE pumping, so the
     /// pending open parked the whole pump for the open budget per pass.
+    /// Both lanes are requested the way production requests them — a received
+    /// OFFER/ANSWER (`RelayCarrier::request_lane`, upstream
+    /// `WorkerRelay.OnNewOffer`, worker_relay.go:44-90).
     #[tokio::test(flavor = "multi_thread")]
     async fn relay_pump_ingests_inbound_while_another_lane_open_is_still_pending() {
         let (server, clock, carrier, wg, client) = relay_starvation_fixture().await;
@@ -13489,8 +13800,13 @@ mod tests {
             relay_remote(&server, &pid_online, &relay_fabricated_token(1_800_003_600)).await;
 
         // Lane universe ORDER mirrors 0018: a connected peer listed before a
-        // dead one. Production wiring: the pump task via `ensure_pump`.
+        // dead one. Production wiring: the pump task via `ensure_pump`, and
+        // the lane requests a received OFFER/ANSWER produces
+        // (`RelayCarrier::request_lane` ≡ upstream `WorkerRelay.OnNewOffer`,
+        // worker_relay.go:44-90) — the map alone opens nothing.
         carrier.set_peers(&[pub_online.clone(), pub_silent.clone()]);
+        carrier.request_lane(&pub_online);
+        carrier.request_lane(&pub_silent);
         carrier.ensure_pump(&tokio::runtime::Handle::current());
 
         assert!(
@@ -13615,6 +13931,10 @@ mod tests {
         let pid_silent = PeerId::from_wg_pubkey_string(&pub_silent);
 
         carrier.set_peers(&[pub_silent.clone()]);
+        // The lane request a received OFFER/ANSWER produces
+        // (`RelayCarrier::request_lane`), not the bare map — upstream opens a
+        // conn only from `WorkerRelay.OnNewOffer` (worker_relay.go:44-90).
+        carrier.request_lane(&pub_silent);
         carrier.ensure_pump(&tokio::runtime::Handle::current());
 
         // The open actually went out (server saw the subscribe) and parks.
@@ -13647,10 +13967,12 @@ mod tests {
 
         // Connector-stop shape: went-offline first (the §4.1 came-online
         // interest is one-shot in faithful mode), a fresh open goes out for
-        // the re-added peer, then teardown aborts it — the peer coming
-        // online afterwards must never produce a late attach.
+        // the re-added peer because a NEW OFFER/ANSWER arrived for it, then
+        // teardown aborts it — the peer coming online afterwards must never
+        // produce a late attach.
         assert!(server.set_peer_online(&pid_silent, false), "went-offline must fire");
         carrier.set_peers(&[pub_silent.clone()]);
+        carrier.request_lane(&pub_silent);
         assert!(
             relay_wait_until(Duration::from_secs(5), || {
                 server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 2
@@ -13805,8 +14127,12 @@ mod tests {
     ) {
         let pub_silent = relay_lane_key(0xB2);
         let pid_silent = PeerId::from_wg_pubkey_string(&pub_silent);
-        carrier.set_peers(&[pub_silent]);
+        carrier.set_peers(&[pub_silent.clone()]);
         carrier.attach_client(client.clone());
+        // The lane request a received OFFER/ANSWER produces (production
+        // trigger: upstream `WorkerRelay.OnNewOffer`, worker_relay.go:44-90)
+        // — recorded AFTER arming, as on the wire (arming forgets requests).
+        carrier.request_lane(&pub_silent);
         carrier.ensure_pump(&tokio::runtime::Handle::current());
 
         // The open goes out; the peer comes online; open_conn resolves Ok;
@@ -14049,11 +14375,12 @@ mod tests {
         );
     }
 
-    /// Registration atomicity + lifecycle gate (T0 residual): repeated spawn
-    /// passes for the same key register exactly ONE pending open — the second
-    /// pass sees it vacant-checked under the same lock and neither duplicates
-    /// nor overwrites the generation — and a pass after shutdown registers
-    /// nothing (unarmed gate).
+    /// Registration atomicity + lifecycle gate (T0 residual): a spawn pass
+    /// registers exactly ONE pending open per requested peer, and a SECOND
+    /// OFFER/ANSWER arriving while that open is in flight NEITHER duplicates
+    /// NOR overwrites the registration (upstream `AsyncOfferListener` keeps
+    /// the latest offer while the callback runs, handshaker_listener.go:29-53)
+    /// — and a pass after shutdown registers nothing (unarmed gate).
     #[tokio::test(flavor = "multi_thread")]
     async fn pending_open_registration_is_atomic_and_gated() {
         let (_server, _clock, carrier, _wg, client) = relay_starvation_fixture().await;
@@ -14062,24 +14389,27 @@ mod tests {
         // The fixture arms the carrier; disarm it to exercise the gate.
         carrier.shutdown();
 
-        // Unarmed: a pass must register nothing.
+        // Unarmed: a requested lane open must register nothing.
         carrier.set_peers(&[pub_silent.clone()]);
-        carrier.spawn_pending_lanes();
+        carrier.request_lane(&pub_silent);
+        carrier.spawn_requested_lanes();
         assert!(
             carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
             "an unarmed carrier must not register lane opens"
         );
 
-        // Armed: two consecutive passes for the same key — one registration,
-        // stable generation (no duplicate, no overwrite).
+        // Armed: the requested open registers once; a second offer for the
+        // same peer while it is in flight must not duplicate or overwrite it.
         carrier.attach_client(client.clone());
-        carrier.spawn_pending_lanes();
+        carrier.request_lane(&pub_silent);
+        carrier.spawn_requested_lanes();
         let gen_after_first = {
             let pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
             assert_eq!(pending.len(), 1, "the first pass must register exactly one open");
             pending.values().next().map(|(g, _)| *g)
         };
-        carrier.spawn_pending_lanes();
+        carrier.request_lane(&pub_silent);
+        carrier.spawn_requested_lanes();
         {
             let pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
             assert_eq!(
@@ -14093,6 +14423,15 @@ mod tests {
                 "a second pass must not overwrite the registered generation"
             );
         }
+        assert!(
+            carrier
+                .lane_requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&pub_silent),
+            "the offer that arrived during an in-flight open must stay queued for \
+             the coalesced follow-up"
+        );
 
         // Teardown drains the registration; a post-shutdown pass stays empty.
         carrier.shutdown();
@@ -14100,7 +14439,8 @@ mod tests {
             carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
             "shutdown must drain the pending open"
         );
-        carrier.spawn_pending_lanes();
+        carrier.request_lane(&pub_silent);
+        carrier.spawn_requested_lanes();
         assert!(
             carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
             "a pass on a disarmed carrier must not register lane opens"
@@ -14186,6 +14526,42 @@ mod tests {
             net_bird_version: String::new(),
             session_id: None,
             relay_server_address: advertised.map(str::to_string),
+        }
+    }
+
+    /// Replay the peer guard's re-offers while waiting for a lane: upstream's
+    /// guard re-sends OFFERs on its backoff ladder while the peer conn is not
+    /// connected (`guard.go:118-139` → `guard.go:186-210` → `conn.go:686-692`)
+    /// and THAT is what produces the next relay `OpenConn` after a failed one
+    /// (`WorkerRelay.OnNewOffer`, worker_relay.go:44-90 — the relay path
+    /// itself has no timer). Re-routing the same OFFER is exactly what the
+    /// wire delivers; the request is consumed per attempt (and coalesced
+    /// while one is in flight), so a re-offer never opens two lanes.
+    async fn relay_reoffers_until(
+        fx: &RelayWiringFixture,
+        keys: &[String],
+        advertised: Option<&str>,
+        fuse: Duration,
+        mut pred: impl FnMut() -> bool,
+    ) -> bool {
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        let deadline = Instant::now() + fuse;
+        loop {
+            if pred() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            for key in keys {
+                route_signal_message(
+                    &ice,
+                    &fx.shared.relay_ads,
+                    fx.shared.relay_carrier.get(),
+                    &relay_offer_from(key, advertised),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -14282,11 +14658,17 @@ mod tests {
     /// proven end to end over real sockets: the sync path arms the carrier
     /// with the connector's shared advertisement map and the foreign spawn
     /// context, the signal receive path records each peer's advertised relay
-    /// ([`route_signal_message`], the worker's message arm), and the lane
-    /// then dials a REAL second relay client to a REAL second fake relay
-    /// server for the remote-controller peers only. Two peers advertising the
-    /// same URL share ONE client, and connector teardown closes it
-    /// gracefully with no lane and no client left behind.
+    /// AND its lane request ([`route_signal_message`], the worker's message
+    /// arm), and the lane then dials a REAL second relay client to a REAL
+    /// second fake relay server for the remote-controller peers only. Two peers
+    /// advertising the same URL share ONE client, and connector teardown closes
+    /// it gracefully with no lane and no client left behind.
+    ///
+    /// ORDER FIXTURE (upstream-aligned): the map is applied FIRST (upstream
+    /// creates the peer's `Conn` from the map, engine.go:1955-1990) and the
+    /// OFFER — the only lane trigger (worker_relay.go:44-90) — arrives after,
+    /// whereas this test used to route the offers before `set_peers` and rely
+    /// on the map alone opening lanes.
     #[tokio::test(flavor = "multi_thread")]
     async fn relay_sync_advertisement_moves_the_lane_to_the_controller_relay() {
         let fx = relay_wiring_fixture().await;
@@ -14300,11 +14682,25 @@ mod tests {
         assert!(remote_is_controller(&fx.local_key, &pub_ctrl_b), "premise: peer sorts above us");
         assert!(!remote_is_controller(&fx.local_key, &pub_ours), "premise: we control this peer");
 
+        // the lane universe the sync path feeds from the network map …
+        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl_a.clone(), pub_ctrl_b.clone()]);
+        // … and NOTHING is opened off it: the map alone must never subscribe.
+        assert!(
+            relay_stays_false_for(Duration::from_millis(600), || {
+                fx.home.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) > 0
+                    || fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) > 0
+            })
+            .await,
+            "the network map alone must not open a relay lane (upstream worker_relay.go:44-90)"
+        );
+
+        // the two OFFERs arrive over the signal link (the lane trigger)
         let ice = fx.shared.ice.get().expect("orchestrator").clone();
         for key in [&pub_ctrl_a, &pub_ctrl_b, &pub_ours] {
             route_signal_message(
                 &ice,
                 &fx.shared.relay_ads,
+                fx.shared.relay_carrier.get(),
                 &relay_offer_from(key, Some(&fx.foreign_canonical)),
             );
         }
@@ -14318,18 +14714,20 @@ mod tests {
             assert_eq!(ads.len(), 3);
         }
 
-        // the lane universe the sync path feeds from the network map
-        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl_a.clone(), pub_ctrl_b.clone()]);
-
         // each peer comes online on the relay its lane dialed. The
         // remote-controller lanes need the SECOND client to have dialed and
         // subscribed first: the first attempt races the fresh client's dial
-        // (typed `not-ready`, observed) and the retry lands after
-        // LANE_OPEN_RETRY — hence the wider fuse here.
+        // (typed `not-ready`, observed), and the retry comes from the peer
+        // guard's next OFFER — replayed here by `relay_reoffers_until`.
+        let ctrl_keys = vec![pub_ours.clone(), pub_ctrl_a.clone(), pub_ctrl_b.clone()];
         assert!(
-            relay_wait_until(Duration::from_secs(20), || {
-                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 2
-            })
+            relay_reoffers_until(
+                &fx,
+                &ctrl_keys,
+                Some(&fx.foreign_canonical),
+                Duration::from_secs(20),
+                || fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 2
+            )
             .await,
             "both remote-controller peers must subscribe on the advertised relay"
         );
@@ -14411,22 +14809,32 @@ mod tests {
         foreign.shutdown().await;
     }
 
-    /// The ordering case the lane wiring must tolerate: the lane can attach
-    /// on OUR relay BEFORE the peer's advertisement has arrived (the sync
-    /// starts lanes off the network map; the OFFER/ANSWER that carries
-    /// `relayServerAddress` comes later over the signal link). When the
-    /// advertisement lands, the next pump pass must MOVE that lane to the
-    /// controller's relay — detaching the home lane and re-opening it on a
-    /// REAL second relay client; without that reconcile the lane would stay
-    /// on a relay the controller is not on for the whole session.
+    /// The ordering case the lane wiring must tolerate: a lane can attach on
+    /// OUR relay BEFORE the peer's advertisement has arrived (an OFFER that
+    /// carries no `relayServerAddress` is still an OFFER — upstream stamps the
+    /// field into every OFFER/ANSWER, handshaker.go:211,218, but a peer on the
+    /// same relay advertises the URL we already use, and the controller rule
+    /// then resolves to home). When a LATER OFFER carries the advertisement,
+    /// that same frame's lane request must MOVE the lane to the controller's
+    /// relay — detaching the home lane and re-opening it on a REAL second relay
+    /// client; without that reconcile the lane would stay on a relay the
+    /// controller is not on for the whole session.
     #[tokio::test(flavor = "multi_thread")]
     async fn advertisement_arriving_after_the_lane_moves_it_to_the_controller_relay() {
         let fx = relay_wiring_fixture().await;
         let pub_ctrl = relay_lane_key(0x50);
         assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
 
-        // 1. no advertisement yet: the lane opens on OUR relay
+        // 1. the map, then an OFFER with no advertisement: the lane opens on
+        //    OUR relay (the controller rule has nothing else to meet on)
         fx.carrier.set_peers(&[pub_ctrl.clone()]);
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        route_signal_message(
+            &ice,
+            &fx.shared.relay_ads,
+            fx.shared.relay_carrier.get(),
+            &relay_offer_from(&pub_ctrl, None),
+        );
         assert!(
             relay_wait_until(Duration::from_secs(5), || {
                 fx.home.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
@@ -14447,21 +14855,27 @@ mod tests {
             assert!(lane.client().same_client(&fx.home_client));
         }
 
-        // 2. the advertisement arrives over the signal link
-        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        // 2. a LATER OFFER carries the advertisement over the signal link
         route_signal_message(
             &ice,
             &fx.shared.relay_ads,
+            fx.shared.relay_carrier.get(),
             &relay_offer_from(&pub_ctrl, Some(&fx.foreign_canonical)),
         );
 
         // 3. the reconcile: the home lane is detached and re-opened on the
         //    controller's relay (the fresh client's first attempt races its
-        //    dial and retries after LANE_OPEN_RETRY — wider fuse).
+        //    dial, and the retry comes from the peer guard's next OFFER —
+        //    replayed by `relay_reoffers_until`).
+        let ctrl_keys = vec![pub_ctrl.clone()];
         assert!(
-            relay_wait_until(Duration::from_secs(20), || {
-                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
-            })
+            relay_reoffers_until(
+                &fx,
+                &ctrl_keys,
+                Some(&fx.foreign_canonical),
+                Duration::from_secs(20),
+                || fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            )
             .await,
             "the changed advertisement must move the lane to the controller's relay"
         );
@@ -14519,20 +14933,28 @@ mod tests {
         let pub_ctrl = relay_lane_key(0x50);
         assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
 
+        // the map first (upstream creates the peer's conn from it), then the
+        // OFFER that requests the lane (worker_relay.go:44-90)
+        fx.carrier.set_peers(&[pub_ctrl.clone()]);
         let ice = fx.shared.ice.get().expect("orchestrator").clone();
         route_signal_message(
             &ice,
             &fx.shared.relay_ads,
+            fx.shared.relay_carrier.get(),
             &relay_offer_from(&pub_ctrl, Some(&fx.foreign_canonical)),
         );
-        fx.carrier.set_peers(&[pub_ctrl.clone()]);
 
+        let ctrl_keys = vec![pub_ctrl.clone()];
         assert!(
-            relay_wait_until(Duration::from_secs(20), || {
-                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
-            })
+            relay_reoffers_until(
+                &fx,
+                &ctrl_keys,
+                Some(&fx.foreign_canonical),
+                Duration::from_secs(20),
+                || fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            )
             .await,
-            "the lane open must reach the advertised relay (retry after LANE_OPEN_RETRY)"
+            "the lane open must reach the advertised relay (a fresh OFFER retries it)"
         );
         let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl), true);
         assert!(
@@ -14627,17 +15049,20 @@ mod tests {
         assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
         assert!(!remote_is_controller(&fx.local_key, &pub_ours), "premise: we control this peer");
 
-        // BOTH peers advertise the FOREIGN relay — only the controller's lane
-        // may actually ride it.
+        // the MAP first, then the OFFERs that request the two lanes (upstream
+        // creates the peer conn from the map; only a received OFFER/ANSWER
+        // opens a relay conn, worker_relay.go:44-90). BOTH peers advertise the
+        // FOREIGN relay — only the controller's lane may actually ride it.
+        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl.clone()]);
         let ice = fx.shared.ice.get().expect("orchestrator").clone();
         for key in [&pub_ctrl, &pub_ours] {
             route_signal_message(
                 &ice,
                 &fx.shared.relay_ads,
+                fx.shared.relay_carrier.get(),
                 &relay_offer_from(key, Some(&fx.foreign_canonical)),
             );
         }
-        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl.clone()]);
 
         // the controlled peer's lane lands on OUR relay
         assert!(
@@ -14649,11 +15074,17 @@ mod tests {
         );
         let _ = fx.home.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ours), true);
         // the controller peer's lane lands on ITS advertised (foreign) relay —
-        // the fresh client's first attempt races its dial and retries
+        // the fresh client's first attempt races its dial, and the peer
+        // guard's next OFFER (replayed here) is what retries it
+        let ctrl_keys = vec![pub_ours.clone(), pub_ctrl.clone()];
         assert!(
-            relay_wait_until(Duration::from_secs(20), || {
-                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
-            })
+            relay_reoffers_until(
+                &fx,
+                &ctrl_keys,
+                Some(&fx.foreign_canonical),
+                Duration::from_secs(20),
+                || fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            )
             .await,
             "the controller peer must subscribe on its advertised relay"
         );

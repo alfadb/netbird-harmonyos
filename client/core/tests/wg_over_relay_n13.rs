@@ -26,7 +26,13 @@
 //!   carrier handle BEFORE any wire byte;
 //! - **revocation cleanup**: `connector_stop()` tears the relay client AND
 //!   every attached lane down (server sees the relay Close, no new outbound
-//!   connection, no carrier left on the WG seam);
+//!   connection, no carrier left on the WG seam). This harness has no signal
+//!   link, so no lane can be REQUESTED here (a lane opens only from a received
+//!   OFFER/ANSWER, upstream worker_relay.go:44-90) — the attached-lane case is
+//!   pinned in-crate by `connector::tests::
+//!   relay_lane_open_commit_is_atomic_against_shutdown` and
+//!   `connector::tests::
+//!   status_peer_relays_exports_the_actual_attached_lane_and_clears_on_detach`;
 //! - **fd contract**: the relay path touches NO platform fd — the TUN/WG
 //!   stand-in raw fds stay open (F_GETFD) across relay traffic AND across
 //!   the connector/device teardown (only `VpnConnection.destroy()`-style
@@ -1077,8 +1083,7 @@ async fn connector_stop_drops_the_relay_bearer() {
     )]);
     let addr = spawn_mock(mock).await;
 
-    // the remote peer is already online at the relay → the connector's
-    // carrier pump can open the lane right after the first sync
+    // the remote peer is already online at the relay.
     let pid_remote = PeerId::from_wg_pubkey_string(remote_key);
     let _remote_ws = connect_remote(&relay_server, &pid_remote).await;
 
@@ -1086,11 +1091,28 @@ async fn connector_stop_drops_the_relay_bearer() {
     let (handle, host) = spawn_connector(addr, stub.clone(), true);
 
     wait_for(FUSE, || host.serials.lock().expect("serials").contains(&1), "map applied");
-    // the production pump: relay Ready → open_conn(remote online) → lane
-    // attached to the WG seam
-    wait_for(FUSE, || stub.attaches() >= 1, "the carrier pump attached the lane");
-    assert_eq!(stub.carrier_count(), 1);
-    assert_eq!(handle.relay_carrier_lanes(), Some(1), "lanes observable through the handle");
+    // UPSTREAM TRIGGER (N13-D4): "relay Ready + peer in the map + peer online
+    // at the relay" is NOT enough any more — a lane opens ONLY from a received
+    // OFFER/ANSWER (`WorkerRelay.OnNewOffer`, worker_relay.go:44-90). This
+    // harness gives the connector no signal link (no signal material), so no
+    // OFFER can ever arrive and NOTHING may attach; before this change the
+    // production pump subscribed within one 500 ms pass here. A lane that IS
+    // attached and then torn down by the connector stop is pinned in-crate
+    // (`connector::tests::relay_lane_open_commit_is_atomic_against_shutdown`
+    // and `…::status_peer_relays_exports_the_actual_attached_lane_and_clears_
+    // on_detach`), both driving the SAME carrier + stop path with a request on
+    // the wire.
+    assert_stays_false(
+        Duration::from_millis(1_200),
+        || stub.attaches() >= 1,
+        "the map alone must never open a relay lane (no OFFER/ANSWER reached this connector)",
+    );
+    assert_eq!(stub.carrier_count(), 0);
+    assert_eq!(handle.relay_carrier_lanes(), Some(0), "lanes observable through the handle");
+    assert!(
+        handle.relay_carrier_stats().is_some(),
+        "the carrier orchestrator IS armed (the pump runs, it just has nothing to open)"
+    );
     // 2 accepted connections: the raw remote + the connector's relay client
     assert_eq!(
         relay_server.stats().connections_accepted,
