@@ -270,7 +270,7 @@ try {
   check('S6 the switch report precedes the re-feed, carries the identity baseline and owns the gate',
     ability.indexOf('    const gated: boolean = netId !== 0 && this.n2CdOnSwitch(netId);') > 0 &&
     ability.indexOf('    const gated: boolean = netId !== 0 && this.n2CdOnSwitch(netId);') <
-      ability.indexOf("    connectorPhysicalNetworkChanged('');") &&
+      ability.indexOf('\n    this.notifyCoreNetworkChanged();') &&
     ability.includes('const identity: Record<string, Object> = JSON.parse(core.n2_cd_identity(this.n2CdKind)) as') &&
     ability.includes("identityFd = Number(identity['fd'] ?? -1);") &&
     ability.includes('JSON.parse(core.n2_cd_switch_identified(id, direction,') &&
@@ -345,8 +345,8 @@ try {
     'arm ordering');
   check('G3 the pre control is owed on the new network AFTER the core cleanup, never at acceptance ' +
     'and never from the switch report',
-    ability.indexOf("    connectorPhysicalNetworkChanged('');") > 0 &&
-    ability.indexOf("    connectorPhysicalNetworkChanged('');") <
+    ability.indexOf('\n    this.notifyCoreNetworkChanged();') > 0 &&
+    ability.indexOf('\n    this.notifyCoreNetworkChanged();') <
       ability.indexOf('    if (gated) {\n      this.pollN2CdStep();\n    }') &&
     ability.indexOf('    this.n2CdBeforeBearer = after;\n' +
       '    // The gate stays \'blocked\' here; the pre control is owed on the NEW network') > 0 &&
@@ -384,7 +384,7 @@ try {
     policy.includes('productionGateBlocked: boolean;') &&
     policy.includes("if (gate.productionGateBlocked) { return 'production-gate'; }") &&
     policy.indexOf("if (gate.productionGateBlocked) { return 'production-gate'; }") <
-      policy.indexOf('if (gate.networkDirty && gate.networkRecoveryReady &&'),
+      policy.indexOf('if (gate.networkUnusableNow && gate.networkRecoveryReady)'),
     'policy');
 
   // ---------------- H: the loader mocks stay in sync ---------------------

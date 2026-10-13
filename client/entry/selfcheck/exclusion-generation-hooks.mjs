@@ -531,8 +531,13 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   // N2 first batch C/D columns (2026-09-29): the observer's switch path calls
   // the connector's "the physical network changed" seam; the N19/N22 fixtures
   // drive `physicalNetworkAvailable` directly, so it must exist and be counted.
-  '  connector_physical_network_changed: () => {\n' +
+  '  connector_physical_network_changed: (addressJson) => {\n' +
   '    g().__NB_PHYSICAL_CHANGED = (g().__NB_PHYSICAL_CHANGED || 0) + 1;\n' +
+  // F3 (v0.0.27 outage REPORT.md §5): the ARGUMENT is recorded verbatim. The
+  // pre-F3 shell sent `''` here on every switch, which made the core empty its
+  // DNS + STUN-DNS lists; `run-network-recovery.mts` asserts the seam now always
+  // carries a resolved address.
+  '    g().__NB_PHYSICAL_CHANGED_ARG = String(addressJson);\n' +
   // 2026-09-30: the ordered trace the gate's own sequence is judged on (the
   // core cleanup must precede the new network's pre control).
   '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["physical-changed"]);\n' +

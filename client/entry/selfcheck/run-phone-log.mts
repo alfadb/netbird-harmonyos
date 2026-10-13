@@ -547,7 +547,13 @@ try {
     'VPN_ICE_MUX_ARMED', 'VPN_ICE_MUX_FAIL', 'VPN_CREATE_BEGIN',
     'VPN_CREATE_RESOLVED', 'VPN_CREATE_REJECTED', 'VPN_CREATE_INVALID_FD',
     'VPN_CONNECTION_CREATED', 'VPN_START_FLOW_REJECTED', 'VPN_DESTROY_BEGIN',
-    'VPN_DESTROY_RESOLVED', 'VPN_DESTROY_REJECTED', 'VPN_DESTROY_SKIPPED'
+    'VPN_DESTROY_RESOLVED', 'VPN_DESTROY_REJECTED', 'VPN_DESTROY_SKIPPED',
+    // F2 (v0.0.27 outage REPORT.md §5): the physical-recovery abort stage. It was
+    // the ONE shell fact that capture had to DERIVE — every abort was a silent
+    // `break` (13 of them) — so the stage token now travels the same mirrored
+    // path as the markers above and lands in netbird-vpn.log as
+    // `detail=VPN_NETWORK_RECOVERY_ABORT:stage=<token>`.
+    'VPN_NETWORK_RECOVERY_ABORT'
   ];
   const badMirrored = mirroredMarkers
     .filter((mk: string) => core.isPublicEventName(mk.toLowerCase()) !== true);

@@ -5947,6 +5947,21 @@ impl ConnectorHandle {
     /// Called only after the replacement WG socket has been protected and fed.
     /// Old queued sockets belong to the previous physical network and must not
     /// be used for any new management, signal or ICE dial.
+    ///
+    /// F3 (v0.0.27 outage REPORT.md §5): a network change NEVER empties the
+    /// resolver lists. The pre-F3 shape cleared the shell-fed DNS server list
+    /// and the STUN-DNS warming list whenever the caller carried no new
+    /// management address (`management_addr.is_none()`), i.e. on EVERY switch
+    /// the shell reported with `''` — and the shell could only refill them from
+    /// inside a recovery that the same switch's first failed step then aborted,
+    /// which left the core unable to resolve anything (the capture's six
+    /// `dns:no-physical-server` lines sit exactly in that gap; REPORT.md §2.5,
+    /// §3 R3). `ice::refresh_stun_dns` already treats an empty list as a no-op
+    /// for the same reason (ice.rs:776); this makes the two halves consistent.
+    /// Upstream has no such wipe at all — a network change goes through
+    /// `netevents` and never touches the OS resolver (REPORT.md §4.2). The
+    /// address parameter still updates the management dial target when the
+    /// shell HAS resolved one.
     pub fn physical_network_changed(&self, management_addr: Option<SocketAddr>) -> Result<(), &'static str> {
         if !self.is_running() { return Err("connector-stopped"); }
         dns_lookups().lock_poison().clear();
@@ -5956,7 +5971,6 @@ impl ConnectorHandle {
         if let Some(source) = &self.socket_source {
             if let Some(supply) = source.socket_supply() {
                 supply.cancel_pending_for_network_change();
-                if management_addr.is_none() { supply.set_dns_servers(Vec::new()); }
             }
             source.clear_pending();
         }
@@ -5964,9 +5978,11 @@ impl ConnectorHandle {
         if let Some(source) = &self.ice_sockets { source.clear_pending(); }
         self.ice.lock_poison().restart_for_network_change(crate::sys::mono_ms());
         if let Some(source) = &self.ice_sockets {
-            let servers = if management_addr.is_some() {
-                self.ice.lock_poison().stuns().to_vec()
-            } else { Vec::new() };
+            // The STUN host WARM cache only; the configured STUN URI list lives
+            // in the ICE config and is untouched. The live list is always
+            // passed: an empty one is a no-op inside `refresh_stun_dns` anyway,
+            // and keeping the new network's names warm is the point.
+            let servers = self.ice.lock_poison().stuns().to_vec();
             source.refresh_stun_dns(&servers);
         }
         if let Some(rt) = self.shared.signal.get() {
