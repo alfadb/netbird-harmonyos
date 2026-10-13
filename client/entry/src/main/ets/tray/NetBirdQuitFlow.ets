@@ -200,10 +200,18 @@ export async function performExplicitQuit(context: common.UIAbilityContext, reas
       reason, String((error as BusinessFailure).code ?? 'none'));
   }
   // 4. Remove the status-bar icon. Best effort: the platform refuses the removal
-  //    while no window is in the foreground (error 1010710004) and the icon dies
-  //    with this process anyway, so a refusal is logged and never blocks the
-  //    exit. removeTray() never throws.
-  await removeTray(reason);
+  //    while no window is in the foreground (error 1010710004) — and since
+  //    0.0.32 a quit from the HIDDEN state is exactly that case — and the icon
+  //    dies with this process anyway, so a refusal is logged for what it is and
+  //    never blocks the exit. removeTray() never throws; the try here is the
+  //    belt to that brace, so no future refusal inside it can skip step 5 and
+  //    leave the app alive-but-half-quit.
+  try {
+    await removeTray(reason);
+  } catch (error) {
+    hilog.warn(DOMAIN, TAG, 'UI_QUIT_TRAY_REMOVE_FAILED|reason=%{public}s|code=%{public}s',
+      reason, String((error as BusinessFailure).code ?? 'none'));
+  }
   record('ok', reason);
   // 5. The ordinary ability teardown: terminateSelf() destroys this UIAbility,
   //    onDestroy runs its usual cleanup, and the platform ends the process once

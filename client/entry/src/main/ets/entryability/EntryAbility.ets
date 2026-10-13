@@ -18,7 +18,7 @@ import { start as startSystemEvents,
 // phone, on a ROM without the PC status-bar capability, or on a device where the
 // kit's runtime module does not exist, startTray() answers false after one
 // diagnostic line and nothing else in this ability changes.
-import { startTray } from '../tray/NetBirdTrayService';
+import { startTray, trayStarted } from '../tray/NetBirdTrayService';
 import { explicitQuitInProgress, QUIT_REASON_SYSTEM, requestQuit,
   shouldVetoSystemExit } from '../tray/NetBirdQuitFlow';
 // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：借用 DATA_TRANSFER 长时任务让整个应用
@@ -34,6 +34,18 @@ import { KEEP_ALIVE_RESUME_FOREGROUND } from '../vpnextensionability/NetBirdKeep
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
+
+// 2026-10-14 关闭到托盘（0.0.32）—— is a UIAbilityContext.hideAbility() in effect
+// for THIS process? PROCESS-scoped on purpose, not a field of the ability
+// instance: the hide is a session-visibility change owned by the process, and if
+// the platform destroys and re-creates the ability instance while the process
+// lives (the borrowed continuous task can outlive the window), the new instance
+// must still lift the hide — that is exactly why onCreate below consults it. A
+// fresh process reads false, so nothing on the launch path ever hides a window
+// on its own (V7). Written only by the three outcomes that know the truth: a
+// hide that was ACCEPTED, a show that was ACCEPTED, and onForeground (the
+// platform has already put us back in front).
+let windowHidden: boolean = false;
 
 // Theme (2026-10-09): the base/dark color resources the window's system bars are
 // derived from. They live in entry/src/main/resources/base/element/color.json
@@ -211,6 +223,12 @@ export default class EntryAbility extends UIAbility {
     // app-scoped only, no device-wide theme is touched. Placed after the
     // existing diagnostic / credential steps so those run exactly as before.
     this.followSystemColorMode();
+    // 0.0.32 关闭到托盘: the LAUNCH path consults the hide flag too (onCreate).
+    // A genuine cold start reads false here — nothing on this path hides a window
+    // — so this line cannot alter a normal launch (V7); it acts only when the
+    // process was already hidden and the ability instance was re-created inside
+    // it, where the new window would otherwise come up behind a stale hide.
+    this.showHiddenWindow('onCreate');
   }
 
   // Lifecycle observations carry ONE whitelisted scalar field, `stage`, with
@@ -346,6 +364,12 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, 'ENTRY_ONNEWWANT|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
     this.recordLifecycle('onNewWant');
     this.persistCredentialOverrides(want);
+    // 0.0.32 关闭到托盘: this is the callback EVERY reopen route that starts this
+    // ability produces while the process lives — the tray's left click and
+    // 打开主窗口 (NetBirdTrayService.openMainWindow → startAbility), the desktop
+    // icon, and the keep-alive notification's wantAgent (START_ABILITY on this
+    // same ability). If a hide is in effect, it is lifted here (V6).
+    this.showHiddenWindow('onNewWant');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -368,18 +392,30 @@ export default class EntryAbility extends UIAbility {
   }
 
   // ---------------------------------------------------------------------------
-  // 2026-10-13 关闭到后台（0.0.29）—— "X hides the app, it does not quit it".
+  // 2026-10-13 关闭到后台（0.0.29）→ 2026-10-14 关闭到托盘（0.0.32）—— "X hides
+  // the app, it does not quit it".
   //
   // THE UPSTREAM CONTRACT (client/ui/main.go:293-299, :382-388): the desktop
   // client sets DisableQuitOnLastWindowClosed (macOS:
   // ApplicationShouldTerminateAfterLastWindowClosed=false) and a WindowClosing
   // hook that simply forgets the main window — the app keeps running, the tunnel
-  // is a separate daemon and is untouched. HarmonyOS has no "hide" for a main
-  // window (no Window.hide()), so the equivalent is: REFUSE the close and
-  // MINIMISE the window ourselves. The ability, the UI process, the page, its
-  // 2 s tick, the continuous task, the notification and the :vpn extension all
-  // stay exactly as they were; the app stays in the Dock and comes back when it
-  // is clicked (onForeground / onPageShow).
+  // is a separate daemon and is untouched.
+  //
+  // HOW IT IS HONOURED (0.0.32): the close is REFUSED and the window is HIDDEN
+  // WITH ITS DOCK ENTRY. @ohos.window has no Window.hide(), but the hide belongs
+  // to the CONTEXT: UIAbilityContext.hideAbility() (SDK d.ts
+  // .../ets/api/application/UIAbilityContext.d.ts, `hideAbility(): Promise<void>`,
+  // @since 12, documented for PC/2-in-1 and tablets, 801 elsewhere; showAbility()
+  // is its twin at the same place). It is the public recipe the vendor support
+  // gives for "minimise to the tray", and its ONE precondition is that the
+  // application has been added to the status bar (error 16000067 otherwise) —
+  // which addToStatusBar() in onCreate already did on this device.
+  // The ability, the UI process, the page, its 2 s tick, the continuous task, the
+  // notification and the :vpn extension all stay exactly as they were; the app
+  // leaves the dock but keeps its tray icon and comes back through it.
+  // The 0.0.29 route is kept as the FALLBACK and as the phone behaviour: when the
+  // tray is not up (a phone, or a failed addToStatusBar) the pre-0.0.32
+  // MINIMISE runs, so the worst case is never worse than before.
   //
   // THE API: windowStage.on('windowStageClose', cb) — @ohos.window.d.ts:9610
   // (off :9630), API 14, SystemCapability.Window.SessionManager, no permission.
@@ -405,7 +441,7 @@ export default class EntryAbility extends UIAbility {
         // One line per path, in the existing diagnostic shape: `stage` is the
         // callback's own name.
         this.recordLifecycle('windowStageClose');
-        this.minimizeOnClose(windowStage);
+        this.hideOnClose(windowStage);
         // true = do not close the main window.
         return true;
       });
@@ -426,9 +462,82 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
-  // The X really is a "hide to background": minimise the main window. Failure is
-  // contained (the window simply stays open, which is the pre-0.0.29 behaviour)
-  // and reported with the platform's own code.
+  // 2026-10-14 关闭到托盘（0.0.32）: the X hides the window AND its dock entry,
+  // while the ability, the page and the borrowed continuous task stay alive.
+  //
+  // THE GATE is the ONE fact that makes the call legal: hideAbility() requires
+  // the application to be on the status bar (16000067 otherwise), and
+  // trayStarted() is true only after addToStatusBar() was ACCEPTED — which
+  // NetBirdTrayService does on a 2in1 only. So: tray up ⇒ try hide; phone, or
+  // icon not up ⇒ today's minimise, with no new diagnostic line (the phone
+  // behaviour is deliberately unchanged).
+  //
+  // FAILURE NEVER STRANDS THE WINDOW: any refusal (801 on a non-2in1, 16000067
+  // when the icon is not really there, 16000050 internal) falls back to
+  // minimizeOnClose() — the pre-0.0.32 behaviour, which still keeps the app
+  // running — and says so in ONE diagnostic line. hideAbility() is a promise
+  // (@since 12), so the callback itself still answers synchronously with `true`.
+  private hideOnClose(windowStage: window.WindowStage): void {
+    if (!trayStarted()) {
+      this.minimizeOnClose(windowStage);
+      return;
+    }
+    try {
+      this.context.hideAbility().then((): void => {
+        windowHidden = true;
+        hilog.info(DOMAIN, TAG, 'UI_CLOSE_HIDE|result=ok|note=window-and-dock-entry-gone');
+        this.recordCloseGuard('hide', 'ok');
+      }).catch((error: Error): void => {
+        const code: number | undefined = (error as BusinessFailure).code;
+        hilog.warn(DOMAIN, TAG, 'UI_CLOSE_HIDE|result=error|code=%{public}s|fallback=minimize',
+          String(code ?? 'none'));
+        this.recordCloseGuard('hide', 'fallback-minimize',
+          code === undefined ? 'none' : String(code));
+        this.minimizeOnClose(windowStage);
+      });
+    } catch (error) {
+      const code: number | undefined = (error as BusinessFailure).code;
+      hilog.warn(DOMAIN, TAG,
+        'UI_CLOSE_HIDE|result=error|code=%{public}s|fallback=minimize|note=sync-throw',
+        String(code ?? 'none'));
+      this.recordCloseGuard('hide', 'fallback-minimize', code === undefined ? 'none' : String(code));
+      this.minimizeOnClose(windowStage);
+    }
+  }
+
+  // 2026-10-14 关闭到托盘（0.0.32）: the ONE reopen primitive. Only a process that
+  // is really hidden acts; a cold start, a phone and a merely-backgrounded window
+  // all read windowHidden=false and this is a silent no-op. A refusal (801 on a
+  // device without the capability) is logged and ignored — the flag STAYS set so
+  // the next reopen attempt tries again — and the caller's own route (the
+  // windowStageClose-free hot start / the tray's startAbility) has already run.
+  private showHiddenWindow(trigger: string): void {
+    if (!windowHidden) {
+      return;
+    }
+    try {
+      this.context.showAbility().then((): void => {
+        windowHidden = false;
+        hilog.info(DOMAIN, TAG, 'UI_CLOSE_SHOW|trigger=%{public}s|result=ok', trigger);
+        this.recordCloseGuard('show', 'ok');
+      }).catch((error: Error): void => {
+        const code: number | undefined = (error as BusinessFailure).code;
+        hilog.warn(DOMAIN, TAG, 'UI_CLOSE_SHOW|trigger=%{public}s|result=error|code=%{public}s',
+          trigger, String(code ?? 'none'));
+        this.recordCloseGuard('show', 'error', code === undefined ? 'none' : String(code));
+      });
+    } catch (error) {
+      const code: number | undefined = (error as BusinessFailure).code;
+      hilog.warn(DOMAIN, TAG, 'UI_CLOSE_SHOW|trigger=%{public}s|result=error|code=%{public}s',
+        trigger, String(code ?? 'none'));
+      this.recordCloseGuard('show', 'error', code === undefined ? 'none' : String(code));
+    }
+  }
+
+  // The FALLBACK of the X (0.0.29 behaviour, still used on a phone and whenever
+  // hideAbility() refuses): minimise the main window. Failure is contained (the
+  // window simply stays open, which is the pre-0.0.29 behaviour) and reported
+  // with the platform's own code.
   private minimizeOnClose(windowStage: window.WindowStage): void {
     try {
       windowStage.getMainWindowSync().minimize().then((): void => {
@@ -449,17 +558,29 @@ export default class EntryAbility extends UIAbility {
   // `ui_close_guard`: which close path ran and what it answered. Both fields are
   // bounded tokens (a callback name, `ok` or the platform's numeric code) — never
   // platform text.
-  private recordCloseGuard(path: string, result: string): void {
+  private recordCloseGuard(path: string, result: string, reason?: string): void {
     const fields: DiagFields = {};
     fields['stage'] = path;
     fields['result'] = result;
+    if (reason !== undefined) {
+      // 0.0.32: the third slot carries the platform's numeric refusal on the
+      // `hide`/`show` arms (the same bounded-code discipline as `ui_tray`), so
+      // one line says both what was chosen and how it went.
+      fields['reason'] = reason;
+    }
     diagnosticsEvent('ui_close_guard', fields);
   }
 
   // 2026-10-13 关闭到后台（0.0.29）；2026-10-13 系统托盘退出修复（0.0.30）；
-  // 2026-10-13 统一退出（0.0.31）—— the guard that separates "the user closed the
-  // window" from "the user asked the app to exit", and the only place that knows
-  // whether a termination is OUR OWN.
+  // 2026-10-13 统一退出（0.0.31）；2026-10-14 关闭到托盘（0.0.32）—— the guard
+  // that separates "the user closed the window" from "the user asked the app to
+  // exit", and the only place that knows whether a termination is OUR OWN.
+  // Since 0.0.32 every UI_TERMINATE_GUARD line also carries `hidden=true|false`
+  // (the process-scoped hide flag), because the SYSTEM tray 退出 arriving while
+  // the window is hidden is the one case the platform may answer differently
+  // (the automatic pid→icon attachment can turn it into a plain kill): the log
+  // must show whether this callback was reached at all in the hidden state (V8).
+  // No behaviour depends on the field.
   //
   // onPrepareToTerminate(): @ohos.app.ability.UIAbility.d.ts:681, API 10,
   // @permission ohos.permission.PREPARE_APP_TERMINATE (normal / system_grant —
@@ -512,7 +633,8 @@ export default class EntryAbility extends UIAbility {
   //     the platform takes the VPN down with the process.
   onPrepareToTerminate(): boolean {
     if (explicitQuitInProgress()) {
-      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=explicit-quit');
+      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=explicit-quit|hidden=%{public}s',
+        String(windowHidden));
       this.recordCloseGuard('onPrepareToTerminate', 'allow-explicit-quit');
       return false;
     }
@@ -521,7 +643,8 @@ export default class EntryAbility extends UIAbility {
       // request (the system tray 退出 row / a dock close). Cancel it ONCE so the
       // unified quit flow can disconnect first, then end the app itself.
       if (shouldVetoSystemExit(Date.now())) {
-        hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit');
+        hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit|hidden=%{public}s',
+          String(windowHidden));
         this.recordCloseGuard('onPrepareToTerminate', 'veto-system-exit-quit');
         // Synchronous kick-off: the flow arms its one-way flag and issues the
         // page's requestStop() before this line returns.
@@ -530,17 +653,24 @@ export default class EntryAbility extends UIAbility {
       }
       // The safeguard's other arm: let the platform terminate (the user asked
       // again inside the veto window, or our own flow is already past its work).
-      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=system-exit');
+      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=system-exit|hidden=%{public}s',
+        String(windowHidden));
       this.recordCloseGuard('onPrepareToTerminate', 'allow-system-exit');
       return false;
     }
-    hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|note=close-is-background');
+    hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|note=close-is-background|hidden=%{public}s',
+      String(windowHidden));
     this.recordCloseGuard('onPrepareToTerminate', 'veto');
     return true;
   }
 
   onForeground(): void {
     this.recordLifecycle('onForeground');
+    // 0.0.32: the platform has just put this process's window back in front, so
+    // whatever hide was in effect is over — whatever route produced it (our
+    // showAbility(), the tray's own showAbility(), a dock/desktop click). This
+    // is the third and last writer of the flag.
+    windowHidden = false;
     // 0.0.21（挂起长窗口后的恢复复查）：本进程又跑起来了——真机上被平台挂起的那一段可以
     // 长达 7362 s（0.0.20：17:08 VPN 被相机清理后 1 h16 m 无人重连，直到用户点开应用）。
     // 这里只转发这一个事实；重读状态文档、重新判重连仍是页面自己的事（本文件不读任何状态

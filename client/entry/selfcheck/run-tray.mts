@@ -20,7 +20,10 @@
 //      rows into the SAME requestStart/requestStop it already had and registers its
 //      requestStop as the flow's disconnect step, the Settings entry runs the same
 //      flow, and 0.0.31's unified exit reaches the flow from
-//      EntryAbility.onPrepareToTerminate too (the system-generated tray 退出).
+//      EntryAbility.onPrepareToTerminate too (the system-generated tray 退出);
+//      0.0.32 adds the reopen primitive to 打开主窗口 / the left click: the
+//      context's showAbility() (the twin of the X's hideAbility) runs FIRST and
+//      the hot start stays as the second, unchanged route.
 //
 // Run: node client/entry/selfcheck/run-tray.mts
 // Exit 0 = all assertions pass.
@@ -326,26 +329,44 @@ check('the one path the app cannot act on is documented, not hidden',
   QUIT_TEXT.indexOf('onDestroy') >= 0 &&
   ABILITY.indexOf('PLAIN PLATFORM KILL') >= 0 &&
   ABILITY.indexOf('no code of ours to run') >= 0);
-check('the keep-alive and tray steps of the quit cannot block the exit',
-  (QUIT_TEXT.match(/try \{/g) ?? []).length >= 4 &&
-  QUIT_TEXT.indexOf('await removeTray(reason);') > QUIT_TEXT.indexOf('catch (error'));
+check('the keep-alive and tray steps of the quit cannot block the exit (R5: the hidden-state ' +
+  '1010710004 refusal is tolerated, never a skipped terminate)',
+  (QUIT_TEXT.match(/try \{/g) ?? []).length >= 5 &&
+  QUIT_TEXT.indexOf('await removeTray(reason);') > QUIT_TEXT.indexOf('catch (error') &&
+  QUIT_TEXT.indexOf('UI_QUIT_TRAY_REMOVE_FAILED') >= 0 &&
+  QUIT_TEXT.indexOf('await removeTray(reason);') < QUIT_TEXT.indexOf('await context.terminateSelf()') &&
+  SERVICE_TEXT.indexOf('code === 1010710004') >= 0 &&
+  SERVICE_TEXT.indexOf("'no-foreground-window'") >= 0);
 check('the ability reads the bypass flag and starts the flow from the quit module',
   ABILITY.indexOf("from '../tray/NetBirdQuitFlow';") >= 0 &&
   ABILITY.indexOf('import { explicitQuitInProgress,') >= 0 &&
   ABILITY.indexOf('explicitQuitInProgress()') >= 0 &&
   ABILITY.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') >= 0 &&
   ABILITY.indexOf('QUIT_REASON_SYSTEM') < ABILITY.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);'));
-check('the version is 31 / 0.0.31 in both profiles',
-  /versionCode: 31/.test(BUILD_PROFILE) && /versionName: '0\.0\.31'/.test(BUILD_PROFILE) &&
-  /versionCode: 31/.test(APP_JSON5) && /versionName: '0\.0\.31'/.test(APP_JSON5));
+check('0.0.32: 打开主窗口 / the tray left click lift a hide FIRST, then hot-start',
+  SERVICE_TEXT.indexOf('context.showAbility()') >= 0 &&
+  SERVICE_TEXT.indexOf('context.showAbility()') < SERVICE_TEXT.indexOf('context.startAbility(want)') &&
+  SERVICE_TEXT.indexOf("'UI_TRAY_OPEN|result=show|bundle=%{public}s'") >= 0 &&
+  SERVICE_TEXT.indexOf("record(TRAY_STAGE_CLICK, TRAY_RESULT_OK, 'show')") >= 0 &&
+  SERVICE_TEXT.indexOf("'UI_TRAY_OPEN|result=start|bundle=%{public}s'") >= 0);
+check('0.0.32: a refused showAbility on the reopen path is contained, never thrown',
+  ((): boolean => {
+    const open = sliceFrom(SERVICE_TEXT, 'function openMainWindow(): void {',
+      'export async function removeTray(');
+    return open.indexOf('try {') >= 0 && open.indexOf('catch (error)') >= 0 &&
+      (open.match(/\.catch\(\(error: Error\)/g) ?? []).length === 2;
+  })());
+check('the version is 32 / 0.0.32 in both profiles',
+  /versionCode: 32/.test(BUILD_PROFILE) && /versionName: '0\.0\.32'/.test(BUILD_PROFILE) &&
+  /versionCode: 32/.test(APP_JSON5) && /versionName: '0\.0\.32'/.test(APP_JSON5));
 check('0.0.31: the system tray 退出 takes the SAME full-quit path (veto once, then quit)',
   ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
   ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&
   ABILITY.indexOf('if (this.closeToBackgroundRegistered) {') >= 0 &&
   ABILITY.indexOf('if (shouldVetoSystemExit(Date.now())) {') >= 0 &&
-  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit'") >= 0 &&
+  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit|hidden=%{public}s'") >= 0 &&
   ABILITY.indexOf("'veto-system-exit-quit'") >= 0 &&
-  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >= 0);
+  ABILITY.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit|hidden=%{public}s'") >= 0);
 check('the veto-once decision is a pure module, carried by the flow (not re-derived)',
   QUIT_TEXT.indexOf("from './NetBirdQuitPolicy'") >= 0 &&
   QUIT_TEXT.indexOf('systemExitVetoDecision(systemExitVetoAtMs,') >= 0 &&

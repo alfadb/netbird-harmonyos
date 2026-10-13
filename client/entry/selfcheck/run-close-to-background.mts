@@ -1,19 +1,28 @@
-// 2026-10-13 关闭到后台 + PC 长时任务类型（0.0.29）— host-side checks.
+// 2026-10-13 关闭到后台 + PC 长时任务类型（0.0.29）；2026-10-14 关闭到托盘（0.0.32）
+// — host-side checks.
 //
 // Three parts, all against shipped sources, no device, no build, no compiler:
 //   A. CLOSE-TO-BACKGROUND: EntryAbility registers windowStageClose inside
 //      onWindowStageCreate and BEFORE loadContent (so the X button is covered
-//      from the first frame), the callback returns true and minimises the main
-//      window, both paths are try/caught and each leaves one diagnostic line —
-//      and the callback does NOT stop the VPN, the task or the ability (the X is
-//      a hide, not an exit).
-//   B. THE TERMINATE GUARD (0.0.30 → 0.0.31): onPrepareToTerminate() answers
+//      from the first frame), the callback returns true and — since 0.0.32 —
+//      runs the hide/show pair: hideAbility() when the status-bar icon is up
+//      (window AND dock entry gone) with the 0.0.29 minimise kept as the
+//      fallback for every refusal and as the phone behaviour, both paths
+//      try/caught and each leaving one diagnostic line — and the callback does
+//      NOT stop the VPN, the task or the ability (the X is a hide, not an exit).
+//   A2. THE REOPEN PRIMITIVE AND THE HIDDEN FLAG (0.0.32): the process-scoped
+//      flag defaults false (a cold start never hides), is written by exactly the
+//      three outcomes that know the truth, and the one showAbility() primitive is
+//      wired on onNewWant (tray click / 打开主窗口 / notification want / desktop
+//      icon hot start), on onCreate, and cleared by onForeground.
+//   B. THE TERMINATE GUARD (0.0.30 → 0.0.32): onPrepareToTerminate() answers
 //      synchronously — it allows OUR OWN quit (the one-way flag), cancels the
 //      FIRST system exit request of the process and starts the unified quit flow
 //      right there (tray/NetBirdQuitFlow.requestQuit → disconnect first), and
 //      vetoes ONLY on the device where the windowStageClose registration failed
-//      (the fallback's whole reason to exist); the permission the callback needs
-//      is declared in module.json5.
+//      (the fallback's whole reason to exist); every guard line carries the
+//      hidden=true|false field (V8: was this callback reached while hidden?);
+//      the permission the callback needs is declared in module.json5.
 //   D. THE VETO-ONCE SAFEGUARD (0.0.31): the pure decision behind that answer
 //      (tray/NetBirdQuitPolicy.ets), imported BYTE-IDENTICAL and driven at its
 //      exact boundaries — first request cancelled once, a second attempt inside
@@ -66,7 +75,9 @@ function sliceFrom(src: string, begin: string, end: string): string {
 const stageBody = sliceFrom(ABILITY_TEXT, 'onWindowStageCreate(windowStage: window.WindowStage): void {',
   'onForeground(): void {');
 const guardBody = sliceFrom(ABILITY_TEXT, 'private registerCloseToBackground(',
-  'private minimizeOnClose(');
+  'private hideOnClose(');
+const hideBody = sliceFrom(ABILITY_TEXT, 'private hideOnClose(', 'private showHiddenWindow(');
+const showBody = sliceFrom(ABILITY_TEXT, 'private showHiddenWindow(', 'private minimizeOnClose(');
 const minimizeBody = sliceFrom(ABILITY_TEXT, 'private minimizeOnClose(', 'private recordCloseGuard(');
 const closeCallback = sliceFrom(ABILITY_TEXT, "windowStage.on('windowStageClose', (): boolean => {",
   '});');
@@ -77,12 +88,26 @@ check('the interceptor is registered inside onWindowStageCreate, before loadCont
     stageBody.indexOf("windowStage.loadContent('pages/Index'"));
 check('it is windowStageClose (API 14, no permission) and its callback refuses the close',
   ABILITY_TEXT.indexOf("windowStage.on('windowStageClose', (): boolean => {") >= 0 &&
-  closeCallback.indexOf('this.minimizeOnClose(windowStage);') >= 0 &&
-  closeCallback.indexOf('return true;') > closeCallback.indexOf('this.minimizeOnClose(windowStage);'));
+  closeCallback.indexOf('this.hideOnClose(windowStage);') >= 0 &&
+  closeCallback.indexOf('return true;') > closeCallback.indexOf('this.hideOnClose(windowStage);'));
 check('the async twin is deliberately NOT registered (only one of the two is answered)',
   ABILITY_TEXT.indexOf("on('windowWillClose'") < 0);
-check('the X is turned into a MINIMISE of the main window',
-  minimizeBody.indexOf('windowStage.getMainWindowSync().minimize()') >= 0);
+check('0.0.32: the X runs hideAbility() on this context (the Context-level hide, @since 12)',
+  hideBody.indexOf('this.context.hideAbility()') >= 0 &&
+  ABILITY_TEXT.indexOf("import { startTray, trayStarted } from '../tray/NetBirdTrayService';") >= 0);
+check('the pre-0.0.32 MINIMISE survives, unchanged, as the fallback and the phone behaviour',
+  minimizeBody.indexOf('windowStage.getMainWindowSync().minimize()') >= 0 &&
+  ABILITY_TEXT.indexOf("'UI_CLOSE_MINIMIZE|result=ok|note=background-kept'") >= 0);
+check('the hide is GATED on the status-bar icon (hideAbility needs addToStatusBar: 16000067)',
+  hideBody.indexOf('if (!trayStarted()) {') >= 0 &&
+  hideBody.indexOf('if (!trayStarted()) {') < hideBody.indexOf('this.context.hideAbility()') &&
+  hideBody.indexOf('this.minimizeOnClose(windowStage);') < hideBody.indexOf('this.context.hideAbility()'));
+check('every hide refusal (801 / 16000067 / 16000050 / sync throw) falls back to minimize',
+  (hideBody.match(/this\.minimizeOnClose\(windowStage\);/g) ?? []).length === 3 &&
+  hideBody.indexOf('this.minimizeOnClose(windowStage);') < hideBody.indexOf('this.context.hideAbility()') &&
+  (hideBody.match(/this\.recordCloseGuard\('hide', 'fallback-minimize'/g) ?? []).length === 2 &&
+  hideBody.indexOf("this.recordCloseGuard('hide', 'ok')") >= 0 &&
+  hideBody.indexOf('windowHidden = true;') > hideBody.indexOf('this.context.hideAbility()'));
 check('a refused registration (801 / no syscap) is caught, logged and does not throw',
   guardBody.indexOf('try {') >= 0 && guardBody.indexOf('catch (error)') > guardBody.indexOf('try {') &&
   guardBody.indexOf('801') >= 0);
@@ -92,12 +117,42 @@ check('a refused minimise is contained too (the window simply stays open)',
 check('one diagnostic line per path, in the existing shapes',
   ABILITY_TEXT.indexOf("this.recordLifecycle('windowStageClose');") >= 0 &&
   ABILITY_TEXT.indexOf("'UI_CLOSE_GUARD|mode=windowStageClose|result=registered'") >= 0 &&
-  ABILITY_TEXT.indexOf("'UI_CLOSE_MINIMIZE|result=ok|note=background-kept'") >= 0 &&
+  ABILITY_TEXT.indexOf("'UI_CLOSE_HIDE|result=ok|note=window-and-dock-entry-gone'") >= 0 &&
+  ABILITY_TEXT.indexOf("'UI_CLOSE_SHOW|trigger=%{public}s|result=ok'") >= 0 &&
   ABILITY_TEXT.indexOf("diagnosticsEvent('ui_close_guard', fields);") >= 0);
 check('the X stops NOTHING: no VPN stop, no keep-alive stop, no terminateSelf in it',
   closeCallback.indexOf('stopKeepAlive') < 0 && closeCallback.indexOf('vpnExtension') < 0 &&
   closeCallback.indexOf('terminateSelf') < 0 &&
   closeCallback.indexOf('stopBackgroundRunning') < 0);
+
+// ---- A2. the reopen primitive and the hidden flag (0.0.32) ------------------
+
+check('the hidden flag is process-scoped and starts FALSE (a cold start never hides: V7)',
+  ABILITY_TEXT.indexOf('let windowHidden: boolean = false;') >= 0 &&
+  ABILITY_TEXT.indexOf('private windowHidden') < 0 &&
+  ABILITY_TEXT.indexOf('let windowHidden: boolean = false;') <
+    ABILITY_TEXT.indexOf('this.context.hideAbility()'));
+check('the THREE writers of the flag are exactly the outcomes that know the truth',
+  (ABILITY_TEXT.match(/windowHidden = true;/g) ?? []).length === 1 &&
+  (ABILITY_TEXT.match(/windowHidden = false;/g) ?? []).length === 2 &&
+  hideBody.indexOf('windowHidden = true;') >= 0 &&
+  showBody.indexOf('windowHidden = false;') >= 0 &&
+  sliceFrom(ABILITY_TEXT, 'onForeground(): void {', 'onBackground(): void {')
+    .indexOf('windowHidden = false;') >= 0);
+check('showHiddenWindow() is the ONE reopen primitive (showAbility + contained refusal)',
+  showBody.indexOf('if (!windowHidden) {') >= 0 &&
+  showBody.indexOf('this.context.showAbility()') >= 0 &&
+  showBody.indexOf('this.recordCloseGuard(\'show\', \'ok\')') >= 0 &&
+  (showBody.match(/\.catch\(\(error: Error\): void => \{/g) ?? []).length === 1 &&
+  showBody.indexOf('catch (error)') > showBody.indexOf('this.context.showAbility()'));
+check('the reopen is WIRED on onNewWant (tray click / menu / notification / desktop icon)',
+  ABILITY_TEXT.indexOf("this.showHiddenWindow('onNewWant');") >= 0 &&
+  sliceFrom(ABILITY_TEXT, 'onNewWant(want: Want,', 'onWindowStageCreate(')
+    .indexOf("this.showHiddenWindow('onNewWant');") >= 0);
+check('the reopen is WIRED on onCreate after the launch steps (stale hide in a live process)',
+  ABILITY_TEXT.indexOf("this.showHiddenWindow('onCreate');") >= 0 &&
+  ABILITY_TEXT.indexOf("this.showHiddenWindow('onCreate');") >
+    ABILITY_TEXT.indexOf('this.followSystemColorMode();'));
 
 // ---- B. the fallback guard --------------------------------------------------
 
@@ -116,22 +171,26 @@ check('0.0.31: a real system exit cancels ONCE and starts the FULL quit flow',
     terminateBody.indexOf('if (shouldVetoSystemExit(Date.now())) {') &&
   terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') <
     terminateBody.indexOf('return true;') &&
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit'") >= 0 &&
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|reason=system-exit-quit|hidden=%{public}s'") >= 0 &&
   terminateBody.indexOf("'veto-system-exit-quit'") >= 0);
 check('the answer is synchronous: no await anywhere in the guard',
   terminateBody.indexOf('await ') < 0 && terminateBody.indexOf('async ') < 0 &&
   terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') <
     terminateBody.indexOf('return true;'));
+check('0.0.32 V8 evidence: EVERY UI_TERMINATE_GUARD line carries hidden=true|false',
+  (ABILITY_TEXT.match(/UI_TERMINATE_GUARD\|[^']*\|hidden=%\{public\}s/g) ?? []).length === 4 &&
+  (terminateBody.match(/String\(windowHidden\)/g) ?? []).length === 4 &&
+  ABILITY_TEXT.indexOf('let windowHidden: boolean = false;') >= 0);
 check('a request that must not be cancelled is let through (second attempt / ours)',
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit'") >
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=allow|reason=system-exit|hidden=%{public}s'") >
     terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);') &&
   terminateBody.indexOf("'allow-system-exit'") >
     terminateBody.indexOf('requestQuit(this.context, QUIT_REASON_SYSTEM);'));
 check('the veto survives ONLY as the last arm (the device where the registration failed)',
   (terminateBody.match(/return true;/g) ?? []).length === 2 &&
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") >
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background|hidden=%{public}s'") >
     terminateBody.indexOf('if (this.closeToBackgroundRegistered) {') &&
-  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background'") <
+  terminateBody.indexOf("'UI_TERMINATE_GUARD|result=veto|note=close-is-background|hidden=%{public}s'") <
     terminateBody.lastIndexOf('return true;'));
 check('the guard does the CLEANUP nowhere: the flow owns every step',
   terminateBody.indexOf('stopKeepAlive') < 0 && terminateBody.indexOf('removeTray') < 0 &&

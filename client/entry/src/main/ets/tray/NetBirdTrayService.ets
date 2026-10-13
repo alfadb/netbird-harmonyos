@@ -19,11 +19,13 @@
 // Disconnect / Open / Quit, and Quit that disconnects first. Upstream keeps its
 // window alive with DisableQuitOnLastWindowClosed and a
 // WindowClosing hook; on HarmonyOS the same "X hides, the app keeps running"
-// behaviour is EntryAbility's windowStageClose interceptor, and THIS icon dies
-// with the process — the tray does NOT keep the app alive (the borrowed
-// continuous task does, see NetBirdKeepAliveService). A tray icon on a device
-// whose process was killed is gone, and that is the platform's documented
-// behaviour, not a defect.
+// behaviour is EntryAbility's windowStageClose interceptor, which since 0.0.32
+// hides the window (and its dock entry) with UIAbilityContext.hideAbility() and
+// brings it back through showAbility() — the pair this module's openMainWindow()
+// also drives — and this icon dies with the process: it does NOT keep the app alive
+// (the borrowed continuous task does, see NetBirdKeepAliveService). A
+// tray icon on a device whose process was killed is gone, and that is the
+// platform's documented behaviour, not a defect.
 //
 // FAIL-SOFT, ALWAYS: every platform touch is wrapped, every refusal is one
 // `ui_tray` diagnostic record (a repeated one is recorded once per process) and
@@ -368,16 +370,36 @@ function onPlatformEvent(platformEvent: TrayPlatformEvent): void {
 // startAbility on our own EntryAbility: a hot start when the ability is still
 // alive (it is — the icon only exists while the process does), so the page's
 // onNewWant path runs and the window comes back to the foreground.
+//
+// 0.0.32 关闭到托盘: a window hidden by hideAbility() is NOT brought back by a
+// hot start alone — its session stays invisible — so the CONTEXT is asked to
+// show it first (UIAbilityContext.showAbility(), the twin of the hide the X
+// runs). This is a "show", not a rebuild: the same window, page and state come
+// back. The call is made unconditionally because this module cannot see the
+// ability's hide flag; when nothing is hidden it answers either nothing or an
+// error (801 on a device without the capability, 16000050) that is logged and
+// IGNORED — the hot start below is what restores a merely-backgrounded window,
+// exactly as before.
 function openMainWindow(): void {
   const context: common.UIAbilityContext | undefined = state.context;
   if (context === undefined) {
     record(TRAY_STAGE_CLICK, TRAY_RESULT_SKIPPED, 'no-context');
     return;
   }
+  try {
+    context.showAbility().then((): void => {
+      hilog.info(DOMAIN, TAG, 'UI_TRAY_OPEN|result=show|bundle=%{public}s', BUNDLE_NAME);
+      record(TRAY_STAGE_CLICK, TRAY_RESULT_OK, 'show');
+    }).catch((error: Error): void => {
+      record(TRAY_STAGE_CLICK, TRAY_RESULT_ERROR, failureToken(error));
+    });
+  } catch (error) {
+    record(TRAY_STAGE_CLICK, TRAY_RESULT_ERROR, failureToken(error as Error));
+  }
   const want: Want = { bundleName: BUNDLE_NAME, abilityName: ENTRY_ABILITY_NAME };
   try {
     context.startAbility(want).then((): void => {
-      hilog.info(DOMAIN, TAG, 'UI_TRAY_OPEN|bundle=%{public}s', BUNDLE_NAME);
+      hilog.info(DOMAIN, TAG, 'UI_TRAY_OPEN|result=start|bundle=%{public}s', BUNDLE_NAME);
     }).catch((error: Error): void => {
       record(TRAY_STAGE_CLICK, TRAY_RESULT_ERROR, failureToken(error));
     });
