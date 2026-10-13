@@ -96,7 +96,7 @@ try {
 
   const T0 = 1800000000000;
   const base = {
-    nowMs: T0, enabled: true, vpnActive: true, userStopRecent: false,
+    nowMs: T0, enabled: true, vpnActive: true, intentOn: false, userStopRecent: false,
     loggedOut: false, startInFlight: false,
     vpnInactiveSinceMs: 0, reconnectGaveUp: false
   };
@@ -139,7 +139,7 @@ try {
       p.KEEP_ALIVE_REASON_USER_STOP);
   check('a logout stops it',
     decided(fresh(), { loggedOut: true }).reason === p.KEEP_ALIVE_REASON_LOGOUT);
-  check('no live tunnel stops it: the task follows a live tunnel, never a reconnect',
+  check('no live tunnel and NO user intent stops it (0.0.28: with the intent on it is kept)',
     decided(fresh(), { vpnActive: false }).action === p.KEEP_ALIVE_ACTION_STOP &&
     decided(fresh(), { vpnActive: false }).reason === p.KEEP_ALIVE_REASON_VPN_INACTIVE);
   check('a start with no live tunnel yet is not even considered',
@@ -199,6 +199,84 @@ try {
   check('the two new reason tokens are the documented closed set',
     p.KEEP_ALIVE_REASON_GRACE === 'grace' &&
     p.KEEP_ALIVE_REASON_RECONNECT_GAVE_UP === 'reconnect-gave-up');
+
+  // -- 0.0.28: the keep-alive follows the user's INTENT, not a 2-minute clock ---
+  // v027-diag-pc REPORT §A.3 / item 10(a), HarmonyOS PC, all times CST: the
+  // connector went `-> reconnecting` at 11:32:08 (netLost; the machine then slept,
+  // so the extension published no document and the reader aged it out to null),
+  // and the first tick after KEEP_ALIVE_GRACE_MS closed withdrew the borrowed
+  // task:
+  //   ui_bg_task stage=stop reason=vpn-inactive  11:48:34
+  // The network came back at 19:42:36 — 8 h 10 m later. No kill happened in
+  // between, so it stayed harmless; had the EXTENSION been killed in that window
+  // the UI process was freezable and the tunnel unrecoverable until someone
+  // foregrounded the app — the same failure class 253dca5 fixed for the restart
+  // leg. Upstream Android does not do this: its VPN foreground service lives for
+  // as long as the ENGINE does, and only the engine stopping (user stop /
+  // needs-login) takes it down (android-client@147bb4f VPNService
+  // ServiceStateListener.onStopped → stopForeground; a DISCONNECTED report in
+  // between only repaints the notification). The bound is therefore the fact
+  // `intentOn`, and the page owns it (pinned further down).
+  const netLostAt = T0 - 986000;      // 11:32:08 → the 11:48:34 stop tick
+  const reconnecting = decided(held, { vpnActive: false, intentOn: true,
+    vpnInactiveSinceMs: netLostAt });
+  check('a reconnecting tunnel with the user\'s intent on KEEPS the task past the grace',
+    reconnecting.action === p.KEEP_ALIVE_ACTION_NONE &&
+    reconnecting.reason === p.KEEP_ALIVE_REASON_GRACE &&
+    reconnecting.state.taskPresent === true, JSON.stringify(reconnecting));
+  check('... and the PRE-0.0.28 facts still reproduce the 11:48:34 device line',
+    netLostAt === T0 - 986000 &&
+    decided(held, { vpnActive: false, vpnInactiveSinceMs: netLostAt })
+      .reason === p.KEEP_ALIVE_REASON_VPN_INACTIVE &&
+    decided(held, { vpnActive: false, vpnInactiveSinceMs: netLostAt })
+      .action === p.KEEP_ALIVE_ACTION_STOP &&
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt })
+      .action !== p.KEEP_ALIVE_ACTION_STOP);
+  check('... and 8 h 10 m later (the whole PC outage) it is STILL held',
+    decided(held, { nowMs: netLostAt + 29400000, vpnActive: false, intentOn: true,
+      vpnInactiveSinceMs: netLostAt }).reason === p.KEEP_ALIVE_REASON_GRACE &&
+    decided(held, { nowMs: netLostAt + 29400000, vpnActive: false, intentOn: true,
+      vpnInactiveSinceMs: netLostAt }).state.taskPresent === true);
+  check('... with no intent-at-all stamp needed (the netLost tick may be the only tick)',
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: 0 })
+      .reason === p.KEEP_ALIVE_REASON_GRACE);
+  check('a task that is gone is NOT resurrected by the intent either (no start without a live tunnel)',
+    decided(fresh(), { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt })
+      .action === p.KEEP_ALIVE_ACTION_NONE &&
+    decided(fresh(), { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt })
+      .action !== p.KEEP_ALIVE_ACTION_START);
+  // -- the ending facts: each one is an EXPLICIT page write (pinned below) ------
+  check('a terminal stop (needs-login: the page cleared the intent) releases the task',
+    decided(held, { vpnActive: false, intentOn: false, vpnInactiveSinceMs: netLostAt })
+      .action === p.KEEP_ALIVE_ACTION_STOP &&
+    decided(held, { vpnActive: false, intentOn: false, vpnInactiveSinceMs: netLostAt })
+      .reason === p.KEEP_ALIVE_REASON_VPN_INACTIVE);
+  check('a reconnect that gave up beats the intent, and names itself',
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      reconnectGaveUp: true }).action === p.KEEP_ALIVE_ACTION_STOP &&
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      reconnectGaveUp: true }).reason === p.KEEP_ALIVE_REASON_RECONNECT_GAVE_UP);
+  check('a REAL user stop releases it even with the intent still on',
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      userStopRecent: true }).action === p.KEEP_ALIVE_ACTION_STOP &&
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      userStopRecent: true }).reason === p.KEEP_ALIVE_REASON_USER_STOP);
+  check('the switch off and a logout release it even with the intent on',
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      enabled: false }).reason === p.KEEP_ALIVE_REASON_DISABLED &&
+    decided(held, { vpnActive: false, intentOn: true, vpnInactiveSinceMs: netLostAt,
+      loggedOut: true }).reason === p.KEEP_ALIVE_REASON_LOGOUT);
+  check('the platform\'s verdicts still have the last word with the intent on',
+    ((): boolean => {
+      const gone = p.keepAliveWithTask(
+        cancelled(held, p.KEEP_ALIVE_CANCEL_SYSTEM, 0, T0), false);
+      const d = decided(gone, { nowMs: T0 + 1000, intentOn: true });
+      return gone.taskPresent === false && d.action === p.KEEP_ALIVE_ACTION_NONE &&
+        d.reason === p.KEEP_ALIVE_REASON_BACKOFF;
+    })());
+  check('the intent is a first-class fact of the closed fact set, documented in the policy',
+    POLICY_TEXT.indexOf('intentOn: boolean;') >= 0 &&
+    POLICY_TEXT.indexOf('facts.intentOn') >= 0);
 
   // -- 0.0.28: a kill -> automatic reconnect (stop-then-start) keeps the task ---
   // v027b device log (netbird-ui.log, 2026-10-13, all times CST): a `SwapFull`
@@ -736,6 +814,36 @@ check('the page maintains the tunnel\'s last-active moment and hands it over as 
 check('the reconnect budget is handed over as a fact (not re-decided here)',
   syncBody.indexOf('reconnectGaveUp: this.reconnectState.attempts >= RECONNECT_MAX_ATTEMPTS') >= 0 &&
   PAGE.indexOf("'../vpnextensionability/NetBirdReconnectPolicy'") >= 0);
+// 0.0.28: the keep-alive's bound is the USER'S INTENT, and the page owns that
+// latch. It is SET in exactly one place — a live ACTIVE document, i.e. a tunnel
+// really ran in this process — and CLEARED in exactly five: the engine's own
+// DEAD state, a connect-failure verdict (the VPN never came up; needs-login is
+// one of its classes), a real user stop, a logout, and the switch going off.
+// The counts are pinned so a new writer cannot appear unnoticed: `= true` twice
+// (the declaration is `vpnIntentOn: boolean = false;`, which does not match) and
+// `= false` six times.
+const refreshFailureBody = sliceFrom(PAGE, 'private refreshConnectFailure(): void {',
+  'private notifyFailureOnce(');
+const requestStopBody = sliceFrom(PAGE, 'private requestStop(): void {',
+  '// ---- 诊断日志导出');
+const performLogoutBody = sliceFrom(PAGE, 'private performLogout(): void {',
+  'private writeLogoutTicket(');
+const toggleBodyEarly = sliceFrom(PAGE, 'private onKeepAliveToggle(isOn: boolean): void {',
+  '// ---- derived view state');
+check('the page hands the user\'s VPN-on intent over as the policy\'s fact',
+  syncBody.indexOf('intentOn: this.vpnIntentOn') >= 0 &&
+  pollBody.indexOf('this.vpnIntentOn = true;') >= 0 &&
+  PAGE.indexOf('private vpnIntentOn: boolean = false;') >= 0);
+check('... set by ONE fact (a live tunnel) and cleared by exactly the five that end the intent',
+  PAGE.split('this.vpnIntentOn = true;').length === 2 &&
+  PAGE.split('this.vpnIntentOn = false;').length === 6 &&
+  pollBody.indexOf('this.vpnIntentOn = false;') >= 0 &&
+  refreshFailureBody.indexOf('this.vpnIntentOn = false;') >= 0 &&
+  requestStopBody.indexOf('this.vpnIntentOn = false;') >= 0 &&
+  performLogoutBody.indexOf('this.vpnIntentOn = false;') >= 0 &&
+  toggleBodyEarly.indexOf('this.vpnIntentOn = false;') >= 0,
+  String([PAGE.split('this.vpnIntentOn = true;').length,
+    PAGE.split('this.vpnIntentOn = false;').length]));
 check('the grace republishes the live view with the reconnecting body',
   syncBody.indexOf('refreshKeepAliveText(') >= 0 &&
   syncBody.indexOf('KEEP_ALIVE_NOTIFICATION_RECONNECTING') >= 0 &&

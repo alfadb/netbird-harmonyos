@@ -997,6 +997,18 @@ struct Index {
   // grace is measured from that moment, so this page is the only clock it needs.
   private vpnActiveSeen: boolean = false;
   private vpnInactiveSinceMs: number = 0;
+  // 0.0.28（保活跟随用户意图，而不是连接器的瞬时状态）：用户「VPN 开着」的意图锁存器。
+  // 一旦本进程真的见过一次在跑的隧道就是 true，直到有事实结束这个意图才回落：真正的用户
+  // 断开（requestStop）、登出（performLogout）、后台保活开关被关掉（onKeepAliveToggle）、
+  // 引擎自己报出的死亡状态（failed/disconnected/closed/stopped 的活文档），或一条「这次
+  // 连接根本没起来」的失败裁决（connect-failure 通知，needs-login 属于其中）。
+  // 它故意跨过一切 TRANSIENT 状态：connecting / reconnecting / netLost / 扩展被挂起或被杀
+  // ——那正是借来的长时任务必须活下来的窗口（见 0.0.28 真机数据：PC 在 11:32:08 进入
+  // reconnecting，随后机器睡去、扩展不再发布文档，第一个越过 2 min 宽限的节拍就在 11:48:34
+  // 把任务撤销成 vpn-inactive，而网络要到 8 h 10 m 后才回来）。上游 Android 的前台服务就是
+  // 按这个界活的：只要引擎还在跑，服务就一直在前台（android-client@147bb4f VPNService）。
+  // vpnActiveSeen 不能当这个事实用：它见过就永不回落，用户断开后也还是 true。
+  private vpnIntentOn: boolean = false;
   // 0.0.21（挂起长窗口后的恢复复查）：上一拍的时刻（0 = 本进程还没拍过）。平台可以把整个
   // UI 进程挂起很久（0.0.20 真机上这次是 7362 s：2 s 轮询与 30 s 实况窗整段停摆，VPN 被
   // 相机清理后 1 h16 m 无人重连），因此"两拍相隔异常远"本身就是"进程刚回来"的证据。
@@ -1284,6 +1296,10 @@ struct Index {
     this.lastLiveState = live.state;
     if (vpnActiveState(live.state)) {
       this.requestSent = true;
+      // 0.0.28: a tunnel is RUNNING in this process — the user's VPN-on intent
+      // holds from here on, across every transient loss, until one of the
+      // ending facts below fires (see vpnIntentOn).
+      this.vpnIntentOn = true;
       // a live session means any recorded failure belongs to a PREVIOUS
       // attempt — never render it over a running connection
       this.connectFailureClass = '';
@@ -1306,6 +1322,11 @@ struct Index {
       // A live document in a dead state (failed/disconnected/closed/stopped):
       // the tunnel is not coming back on its own — re-arm the switch.
       this.requestSent = false;
+      // 0.0.28: the ENGINE itself reported that it is not running any more
+      // (needs-login / a terminal death leaves exactly this document before its
+      // process goes). That is a terminal stop, not a transient loss: the
+      // keep-alive must not outlive the business.
+      this.vpnIntentOn = false;
       this.stopSent = false;
       this.requestId = `ui-${Date.now()}`;
     }
@@ -1355,6 +1376,14 @@ struct Index {
       // read, never a second one per tick.
       this.connectFailureAtMs = notice.at_ms;
       this.requestSent = false;
+      // 0.0.28: a notice that belongs to THIS attempt is the extension's own
+      // verdict that the VPN never reached a live tunnel (missing credentials,
+      // a refused start, the network-map box expiring, a terminal core death —
+      // needs-login among them). There is no business to keep a task for, and
+      // the automatic reconnect refuses to start over it too
+      // (NetBirdReconnectPolicy gate (5)), so the user's VPN-on intent ends
+      // here as well: "the extension is gone and no reconnect is intended".
+      this.vpnIntentOn = false;
       this.notifyFailureOnce(notice);
     } else {
       if (this.connectFailureClass.length > 0) {
@@ -1574,6 +1603,11 @@ struct Index {
       nowMs: nowMs,
       enabled: this.bgKeepAliveEnabled,
       vpnActive: vpnActive,
+      // 0.0.28: the user still wants this VPN — a tunnel ran in this process and
+      // none of the ending facts has fired since (see vpnIntentOn). This is what
+      // keeps the borrowed task alive across a transient loss, however long the
+      // connector takes; the pure policy owns the decision.
+      intentOn: this.vpnIntentOn,
       // The page's own user-stop guard (8 s), the same one the disconnect notice
       // uses: a stop the user just asked for must never be answered with a task.
       // 0.0.28: the derivation is the pure policy's, so "which latch counts as a
@@ -1695,6 +1729,12 @@ struct Index {
     this.bgKeepAliveEnabled = isOn;
     if (isOn) {
       this.bgKeepAliveState = keepAliveOnUserConnect(this.bgKeepAliveState);
+    } else {
+      // 0.0.28: the switch is one of the user's own instruments — turning the
+      // background keep-alive off ends the VPN-on intent too, so a task that is
+      // somehow still held cannot be kept by it. (The `enabled` fact already
+      // releases the task on this same call; this latch makes the intent honest.)
+      this.vpnIntentOn = false;
     }
     saveKeepAliveEnabled(getContext(this).filesDir, isOn).then((ok: boolean): void => {
       if (!ok) {
@@ -3050,6 +3090,10 @@ struct Index {
 
   private performLogout(): void {
     const vpnLive: boolean = this.logoutRemoteActive();
+    // 0.0.28: an explicit logout ends the user's VPN-on intent whether or not a
+    // tunnel is still live (the keep-alive fact `loggedOut` only guards the
+    // 25 s around it; this latch is what must not survive it).
+    this.vpnIntentOn = false;
     if (!vpnLive) {
       hilog.info(DOMAIN, TAG, 'UI_LOGOUT_LOCAL_ONLY|reason=vpn-not-running');
       this.finishLogout(false);
@@ -3483,6 +3527,10 @@ struct Index {
     // not answered yet (the adapter withdraws that task rather than adopting it).
     this.bgKeepAliveState = keepAliveOnUserStop(this.bgKeepAliveState);
     this.stopKeepAliveNow(KEEP_ALIVE_REASON_USER_STOP);
+    // 0.0.28: the user themselves ended this connection — the VPN-on intent goes
+    // with it (the 8 s user-stop guard answers the next ticks; this latch is what
+    // keeps the task from being held again once that guard has lapsed).
+    this.vpnIntentOn = false;
     hilog.info(DOMAIN, TAG, 'UI_STOP_REQUEST|bundle=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, this.requestId);
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {

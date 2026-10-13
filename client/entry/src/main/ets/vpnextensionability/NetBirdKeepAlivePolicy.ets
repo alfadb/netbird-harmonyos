@@ -50,6 +50,24 @@
 // (switch off, logout, a disconnect just asked for) still stop the task at once:
 // the grace is for a tunnel that was taken away, never for one the user ended.
 //
+// 0.0.28 (INTENT, NOT A CLOCK): 2 minutes was the wrong bound for a state that
+// lasts hours. On the PC the connector went `reconnecting` at 11:32:08, the
+// machine then slept (so the extension published nothing and the document aged
+// out), and the first tick after the window closed withdrew the borrowed task as
+// `ui_bg_task stage=stop reason=vpn-inactive` at 11:48:34 — 8 h 10 m before the
+// network came back (v027-diag-pc §A.3). With the task gone the UI process may be
+// frozen, so a kill of the extension in that window would have been unrecoverable
+// until someone brought the app to the foreground — the same failure class
+// 253dca5 fixed for the restart leg. The bound is therefore the USER'S INTENT, not
+// a clock: while `intentOn` (see KeepAliveFacts) is true the task is kept however
+// long the connector takes, exactly like upstream Android's foreground service —
+// android-client@147bb4f VPNService keeps it up for as long as the ENGINE runs,
+// and only the engine stopping (user stop / needs-login) reaches
+// ServiceStateListener.onStopped → stopForeground(); a DISCONNECTED report in
+// between only repaints the notification. The 2-minute grace stays as the
+// fallback for a task held with no recorded intent, and a reconnect that gave up
+// still ends it at once — that is the app's own "no reconnect is intended".
+//
 // WHY SUPPRESSION IS SESSION-SCOPED: if the user cancels the task (or removes
 // its notification — removing the notification stops the task by platform
 // rule), that is an explicit instruction about THIS connection: no automatic
@@ -70,8 +88,10 @@
 //                       arms the page's restart-leg latch instead, 0.0.28)
 //   vpn-inactive        no fresh status document reports an active tunnel, and the
 //                       reconnect grace is over (or never started)
-//   grace               the tunnel is inactive but the reconnect still has time
-//                       left: the task is KEPT, nothing is asked for (0.0.20)
+//   grace               the tunnel is inactive but the task is KEPT and nothing is
+//                       asked for (0.0.20): inside the 2-minute window, or — with
+//                       the user's intent on — for as long as the user wants this
+//                       VPN, however long the connector takes (0.0.28)
 //   reconnect-gave-up   the automatic reconnect has spent its attempt budget: the
 //                       tunnel is not coming back by itself, so the task goes
 //                       (0.0.20)
@@ -231,6 +251,17 @@ export interface KeepAliveFacts {
   // A FRESH status document reports an active tunnel (connected/connecting/
   // reconnecting). A stale or absent document is false.
   vpnActive: boolean;
+  // 0.0.28（保活跟随用户意图，而不是连接器的瞬时状态）: the user still wants this
+  // VPN. True once a tunnel has been seen RUNNING in this UI process, and until
+  // something ends that intent: a real user stop (requestStop), a logout, the
+  // settings switch turned off, a terminal verdict ("the VPN never came up" — a
+  // connect-failure notice, needs-login included) or a document that reports a
+  // DEAD state (the engine itself said it stopped). It deliberately stays TRUE
+  // across every TRANSIENT loss — connecting, reconnecting, netLost, a suspended
+  // or killed extension — because that is exactly the window in which the
+  // borrowed task has to survive (see the 0.0.28 note at the top of this file).
+  // The page owns the latch; this module only consumes it as a fact.
+  intentOn: boolean;
   // The page just asked for a disconnect: a stop request is in flight, or the
   // resolved one is younger than the page's 8 s user-stop guard.
   userStopRecent: boolean;
@@ -359,17 +390,18 @@ export function decideKeepAlive(state: KeepAlivePolicyState,
   if (facts.userStopRecent) {
     return keepAliveStop(state, KEEP_ALIVE_REASON_USER_STOP);
   }
-  // (2) No live tunnel = no business = no task — after the 0.0.20 GRACE. The
-  //     reconnect needs a moment to bring the tunnel back, and the process must
-  //     still be running when its first attempt fires; a document that went stale
-  //     two seconds ago is not yet a reason to freeze the app. Inside
-  //     KEEP_ALIVE_GRACE_MS of the tunnel's last active moment the task is KEPT
-  //     (action none) and the live view says so; the instant the reconnect has
-  //     given up, or the window closes, it goes. The user's own instruments were
-  //     answered above and are never subject to the grace.
+  // (2) No live tunnel = no business = no task — but ONLY once the user's intent
+  //     is over, or the reconnect has given up. Upstream keeps its foreground
+  //     service for as long as the ENGINE runs, and a connector that is
+  //     reconnecting (or whose document stopped being refreshed because the
+  //     machine slept / the process was reclaimed) is still the same business.
+  //     0.0.28: `intentOn` is that bound; the 0.0.20 grace remains as the
+  //     fallback for a task held with no recorded intent. The user's own
+  //     instruments were answered above and are never subject to either.
   if (!facts.vpnActive) {
-    if (!facts.reconnectGaveUp && facts.vpnInactiveSinceMs > 0 &&
-      facts.nowMs - facts.vpnInactiveSinceMs < KEEP_ALIVE_GRACE_MS) {
+    if (!facts.reconnectGaveUp && (facts.intentOn ||
+      (facts.vpnInactiveSinceMs > 0 &&
+        facts.nowMs - facts.vpnInactiveSinceMs < KEEP_ALIVE_GRACE_MS))) {
       return keepAliveNone(state, KEEP_ALIVE_REASON_GRACE);
     }
     return keepAliveStop(state, facts.reconnectGaveUp
