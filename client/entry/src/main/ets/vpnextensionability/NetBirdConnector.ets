@@ -280,6 +280,12 @@ export interface CoreIceEndpoint {
 // (a `disconnected` peer can keep both endpoints and still be unreachable).
 // `last_error` is the connector's class-only error JSON
 // (`{class,status}`, never a server message).
+// 0.0.27 (alignment guard `PartiallyConnected`): `ice_retry` is the peer's
+// guard retry档 token, appended LAST — `fast` = the exponential backoff ticker
+// is driving, `hourly` = the alignment 3-attempt budget for a peer whose relay
+// carrier is attached while ICE is down is exhausted, so the guard offers once
+// per hour (upstream `guard.go:131-138` + `guard/ice_retry_state.go`). Pure
+// observability; declared optional because an older core never sends it.
 export interface CoreIcePeerEntry {
   pub_key: string;
   state: string;
@@ -289,6 +295,7 @@ export interface CoreIcePeerEntry {
   endpoint_applied: boolean;
   reachable: boolean;
   last_error: ConnectorErrorClass | null;
+  ice_retry?: string;
 }
 
 // The shared ICE/WG mux counters (core `ice_mux` tail, appended AFTER
