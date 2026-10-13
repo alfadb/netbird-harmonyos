@@ -3,6 +3,23 @@ export function isPhysicalNetworkSwitch(previousNetId: number, currentNetId: num
   return previousNetId !== currentNetId;
 }
 
+// F4 (v0.0.27 outage REPORT.md §5): the dedupe key of a network handle's
+// capability set. Upstream dedupes the callback on the network HANDLE
+// (ConcreteNetworkAvailabilityListener.java:70-84: a same-type AP handover
+// rebinds every connection and must count as a transition); HarmonyOS exposes
+// no handle identity beyond the netId, so the capability set is the only
+// additional distinguishable fact — a capability change for the handle the
+// platform currently reports as the default one is a re-evaluation trigger even
+// when the netId did not move. Order-insensitive (the platform does not promise
+// one), and the empty set signs as '' so "no observation" can never equal a real
+// set.
+export function capabilitySignature(caps: number[]): string {
+  if (caps.length === 0) { return ''; }
+  const sorted: number[] = caps.slice();
+  sorted.sort((a: number, b: number): number => a - b);
+  return sorted.join(',');
+}
+
 export interface ProtectedConnectionGate {
   destroyRequested: boolean;
   destroyInFlight: boolean;
@@ -20,19 +37,31 @@ export function protectedConnectionRejectionReason(gate: ProtectedConnectionGate
 }
 
 export interface SocketSupplyGate extends ProtectedConnectionGate {
-  networkDirty: boolean;
+  // F1 (v0.0.27 outage REPORT.md §5 + §3 R1): the physical default network is
+  // unusable **at THIS request** — the platform currently reports no usable
+  // physical default network (`physicalDefaultNetId() === 0`). It is an
+  // INSTANTANEOUS predicate, never a remembered switch. It replaced the old
+  // `networkDirty` edge latch, which was set by a switch and cleared only by a
+  // FULLY successful host-side recovery: one failed recovery (a single EPERM on
+  // the protected-DNS resolve) then refused every management / signal / relay /
+  // DNS socket until a NEW netId edge arrived — with no new edge for 5 h 29 m on
+  // the device (REPORT.md §0.1, §2.4). Upstream has no such host-side latch at
+  // all: its host layer reports availability now and protects one fd per dial
+  // (`client/net/protectsocket_android.go:16-47`), and the core's own guard
+  // gates on the CURRENT online verdict (`peer/guard/guard.go:123`). This field
+  // is that verdict's host-side analogue; the epoch/stale-fd fail-closed check
+  // (`fulfillSocketRequest`) and `protectedConnectionRejectionReason` keep what
+  // the latch was actually there for.
+  networkUnusableNow: boolean;
   networkRecoveryReady: boolean;
-  networkRecoveryActive: boolean;
-  isDns: boolean;
   protectDeviation: boolean;
   // N2 first batch C/D columns: the formal-switch production-recovery gate.
   // `true` = a C/D plan's formal switch is reported but the core has NOT
   // released it yet (or the plan ended UNSAT): NO production socket may be
-  // handed to the core for this switch. It is checked BEFORE the networkDirty
-  // rule and is deliberately NOT covered by that rule's
-  // `isDns && networkRecoveryActive` carve-out — the pre control the gate waits
-  // for is sent by the shell's own opener, never through here, so refusing even
-  // the DNS socket cannot deadlock the release.
+  // handed to the core for this switch. It is checked BEFORE the network rule
+  // and, unlike that rule, has NO carve-out of any kind — the pre control the
+  // gate waits for is sent by the shell's own opener, never through here, so
+  // refusing even the DNS socket cannot deadlock the release.
   productionGateBlocked: boolean;
 }
 
@@ -42,9 +71,9 @@ export function socketSupplyRejectionReason(gate: SocketSupplyGate): string {
   if (gate.protectDeviation) { return 'deviation'; }
   if (gate.productionGateBlocked) { return 'production-gate'; }
   // Before the first create(), the protected startup/retry sockets must be
-  // available even if the physical network actually changed during login.
-  if (gate.networkDirty && gate.networkRecoveryReady &&
-    !(gate.isDns && gate.networkRecoveryActive)) { return 'network-dirty'; }
+  // available even if the physical network is momentarily unusable (login is
+  // allowed to fail on its own terms; the shell must not invent a gate).
+  if (gate.networkUnusableNow && gate.networkRecoveryReady) { return 'network-unusable'; }
   return '';
 }
 

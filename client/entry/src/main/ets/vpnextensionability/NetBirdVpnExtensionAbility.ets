@@ -106,7 +106,7 @@ import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
 // once by the UI-process login action (NetBirdAccountLogin → the core's
 // `account_login_*` NAPI job) and every connect is token-less.
 
-import { isPhysicalNetworkSwitch, lanRoamCheckDue,
+import { capabilitySignature, isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
   socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
 // type-only: erased at runtime (same rule as the endpoint shapes above), so
@@ -234,6 +234,14 @@ const IFACE_LOST_RETRY_WINDOW_MAX: number = 3;
 // status watcher tick (STATUS_POLL_MS cadence, no new timer): it fires on
 // the first tick at least this many ms after the LAST switch.
 const LAN_ROAM_STABLE_MS: number = 2500;
+// F2 (v0.0.27 outage REPORT.md §5): the bounded automatic retry of the physical
+// network recovery, riding the EXISTING 5 s watcher tick. One attempt at most
+// per window — the point is that a transient abort (one EPERM on the
+// protected-DNS resolve, REPORT.md §3 R2) costs a tunnel for seconds, not hours,
+// while a permanently broken path cannot turn the tick into a 5 s retry/log
+// storm (the capture already dropped 0.72 % of its lines and every dropped line
+// is lost evidence, REPORT.md §1).
+const PHYSICAL_RECOVERY_RETRY_MIN_MS: number = 15000;
 // N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
 // evidence collector. The file only carries NON-SENSITIVE window options; its
 // EXISTENCE is the arm request. No arm file ⇒ the collector stays inert.
@@ -735,6 +743,21 @@ function safeError(error: Error): string {
   return `code=${code},name=${name},message=${message}`;
 }
 
+// F4: the numeric capability set of a `NetCapabilityInfo` (`info.netCap` is the
+// platform's `NetCapabilities` document and its `networkCap` an `Array<NetCap>`,
+// a numeric enum — the same assignment `physicalDefaultNetId` already performs
+// into `DnsNetProbe.networkCap`). The pure policy module takes plain numbers so
+// it stays import-free; an absent set is the empty list, which
+// `capabilitySignature` turns into '' (= dedupe against "no observation").
+function capabilityNumbers(caps: number[] | undefined): number[] {
+  const out: number[] = [];
+  if (caps === undefined) { return out; }
+  for (let i = 0; i < caps.length; i++) {
+    out.push(caps[i]);
+  }
+  return out;
+}
+
 // The `netbird-logout` ticket body is `{"issued_at_ms":<ms>}` — the UI's
 // wall-clock stamp used only for the freshness bound (a leftover ticket must
 // never tear a LATER session down). Anything that does not parse to a
@@ -835,9 +858,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private networkEpoch: number = 1;
   private networkNetId: number = 0;
   private networkDirty: boolean = false;
+  // F4 callback semantics (REPORT.md §5): the first observation after
+  // `watchPhysicalNetwork()` subscribes is not a switch, and the capability set
+  // of the default handle is the dedupe key for a capability-change trigger.
+  // `pendingCapSignature` is what the last debounced event carried (the
+  // decision reads it); `networkCapSignature` is the last one acted on.
+  private networkFirstObservation: boolean = false;
+  private pendingCapSignature: string = '';
+  private networkCapSignature: string = '';
   private networkRecoveryActive: boolean = false;
   private networkRecoveryReady: boolean = false;
   private managementEndpoint: ManagementEndpoint | undefined = undefined;
+  // 2026-10-13 (v0.0.27 outage REPORT.md §5 F3): the management `ip:port` this
+  // process last RESOLVED and handed to the core — the start leg's `connectAddr`
+  // and, after every completed recovery, the new network's address. It exists so
+  // the network-change seam never has to be called with an EMPTY address: the
+  // core takes the address-bearing branch then, which keeps its DNS server list
+  // (and its STUN-DNS list) instead of emptying them (REPORT.md §2.5, §3 R3:
+  // `connector.rs:5959` wiped both, and the six `dns:no-physical-server` lines
+  // sit exactly in that gap). '' until the first successful resolution.
+  private managementDialAddr: string = '';
   // 2026-10-07 client-detail increment: the configured management_url string
   // (NOT published verbatim — buildUiStatusDocument publishes scheme+host+port
   // only, via managementEndpointView). Kept so the status document can name
@@ -928,6 +968,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private lastUiStatusLogSignature: string = '';
   private lastUiStatusLogAtMs: number = 0;
   private networkRecoveryPending: boolean = false;
+  // F2: the wall-clock stamp of the last AUTOMATIC recovery retry (the bounded
+  // window lives in retryPhysicalNetworkRecovery). 0 = none yet.
+  private recoveryRetryAtMs: number = 0;
   // 场景B roaming (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the
   // LAN-exclusion signature merged into the LIVE platform VpnConfig —
   // recorded at each create() submit point (initial AND recreate legs), so a
@@ -1411,6 +1454,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagMilestone('native_resource_sample', transportFields);
   }
 
+  // F4 (REPORT.md §5, upstream android-client NetworkChangeDetector.java:211-230
+  // + ConcreteNetworkAvailabilityListener.java:70-84): the observer is the
+  // extension's own — the right place, upstream registers inside the VPN service
+  // (VPNService.java:114-128), never in the UI. Three events, and the third is
+  // the important one: upstream registers a NetworkRequest callback AND
+  // `registerDefaultNetworkCallback`, the second being the authoritative "what
+  // is the default network now" signal. HarmonyOS has no default-network
+  // callback; `netCapabilitiesChange` is its closest analogue, so it is
+  // subscribed here and the DEFAULT handle is decided from the live platform
+  // (`physicalDefaultNetId()`) at decision time, not from the event's own handle.
   private watchPhysicalNetwork(): void {
     try {
       const observer: connection.NetConnection = connection.createNetConnection();
@@ -1420,22 +1473,36 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
       });
       observer.on('netLost', (net: connection.NetHandle): void => {
-        this.schedulePhysicalNetworkCheck('netLost', net.netId);
+        this.schedulePhysicalNetworkCheck('netLost', net.netId, '');
       });
       observer.on('netAvailable', (net: connection.NetHandle): void => {
-        this.schedulePhysicalNetworkCheck('netAvailable', net.netId);
+        this.schedulePhysicalNetworkCheck('netAvailable', net.netId, '');
       });
       observer.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
-        this.schedulePhysicalNetworkCheck('netCapabilitiesChange', info.netHandle.netId);
+        this.schedulePhysicalNetworkCheck('netCapabilitiesChange', info.netHandle.netId,
+          capabilitySignature(capabilityNumbers(info.netCap.networkCap)));
       });
       this.networkObserver = observer;
+      // F4: "the first observation after subscribe is not a real transition"
+      // (ConcreteNetworkAvailabilityListener.java:76-84). Armed with the
+      // subscription and consumed by the first decision; the netId seeded at
+      // onCreate covers the ordinary case, this latch additionally covers a
+      // session that began with NO network (seeded 0) whose first callback is the
+      // network appearing — upstream does not treat that as a transition either.
+      this.networkFirstObservation = true;
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_WATCH_FAIL|summary=%{public}s', safeError(error as Error));
     }
   }
 
-  private schedulePhysicalNetworkCheck(event: string, eventNetId: number): void {
+  private schedulePhysicalNetworkCheck(event: string, eventNetId: number,
+    capSignature: string = ''): void {
     const physicalNetId: number = physicalDefaultNetId();
+    // F4: the capability set of the LAST event that armed this debounce. The
+    // debounce collapses a storm into one decision, so the newest set is the one
+    // the decision must dedupe against (the signature is '' for netLost /
+    // netAvailable, which are never capability triggers).
+    this.pendingCapSignature = capSignature;
     // N2 first batch C/D columns: the switch evidence is exactly what the host
     // cannot read while the device is on cellular, so the line is appended to
     // the armed-only app-internal ring verbatim (same text as hilog).
@@ -1452,15 +1519,44 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private physicalNetworkAvailable(event: string, eventNetId: number, netId: number): void {
-    const switched: boolean = !this.destroyRequested &&
+    // F4: upstream ignores the FIRST default-handle observation after subscribe
+    // ("first observation after subscribe; not a real transition"); consumed
+    // here so a session that came up with no network does not manufacture a
+    // 0 -> 101 switch out of the network appearing.
+    const firstObservation: boolean = this.networkFirstObservation;
+    this.networkFirstObservation = false;
+    const switched: boolean = !this.destroyRequested && !firstObservation &&
       isPhysicalNetworkSwitch(this.networkNetId, netId);
+    // F4: a capability change for the handle the platform CURRENTLY reports as
+    // the default one is a re-evaluation trigger even when the netId did not
+    // move (a same-type handover that reuses the netId is exactly the case
+    // upstream's handle-dedupe catches and a netId-only dedupe cannot). Deduped
+    // on the capability set, and only for a SETTLED generation — upstream's
+    // `shouldNotify = engineRunner::isRunning`, which swallows the initial burst
+    // right after registerNetworkCallback (ConcreteNetworkAvailabilityListener
+    // .java:126-135). Difference: HarmonyOS exposes no handle id beyond the
+    // netId, so "same netId, different handle" cannot be seen at all; the
+    // capability set is the only distinguishable fact.
+    const capabilityChanged: boolean = event === 'netCapabilitiesChange' &&
+      this.pendingCapSignature.length > 0 && netId !== 0 && eventNetId === netId &&
+      this.pendingCapSignature !== this.networkCapSignature;
+    if (event === 'netCapabilitiesChange' && this.pendingCapSignature.length > 0) {
+      this.networkCapSignature = this.pendingCapSignature;
+    }
     const action: string = this.destroyRequested ? 'destroy' : switched ?
-      (netId === 0 ? 'network-lost' : 'redial') : 'unchanged';
+      (netId === 0 ? 'network-lost' : 'redial') :
+      (capabilityChanged ? 'capability' : 'unchanged');
     const eventLine: string = `VPN_NETWORK_EVENT|event=${event}|netId=${eventNetId}|` +
       `physicalDefault=${String(eventNetId === netId && netId !== 0)}|` +
       `physicalNetId=${netId}|switched=${String(switched)}|action=${action}`;
     hilog.info(DOMAIN, TAG, '%{public}s', eventLine);
     this.n2RingAppend(eventLine);
+    if (!switched && capabilityChanged && this.createSettled) {
+      // Upstream's NetworkSwitchNotifier: report the change edge to the core
+      // (`goClient.notifyNetworkChange()`); no epoch bump, no recovery, no
+      // latch — the core owns what happens next.
+      this.notifyCoreNetworkChanged();
+    }
     if (!switched) { return; }
     this.networkNetId = netId;
     this.networkDirty = true;
@@ -1489,7 +1585,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // that wait). The gate itself is armed SYNCHRONOUSLY inside n2CdOnSwitch,
     // before the identity capture and before the switch report.
     const gated: boolean = netId !== 0 && this.n2CdOnSwitch(netId);
-    connectorPhysicalNetworkChanged('');
+    this.notifyCoreNetworkChanged();
     // The pre control is owed on the NEW network, and the core's own
     // old-connection cleanup above must have happened first: a control sent
     // before it could still leave on the OLD registration. Nothing else is
@@ -1503,6 +1599,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.n2NetworkRecoveryFail(error);
       });
     }
+  }
+
+  // F3 (v0.0.27 outage REPORT.md §5): the ONE core network-change seam, called
+  // only with an address this process has actually resolved. The empty-address
+  // call used to empty the core's DNS *and* STUN-DNS lists before the shell had
+  // anything to replace them with (connector.rs:5959/5968; the six
+  // `dns:no-physical-server` lines sit 1 ms after each switch, REPORT.md §2.5).
+  // The address used here is `managementDialAddr` — the start leg's resolution
+  // or the last completed recovery's.
+  //
+  // Why not the NEW network's address: at the switch instant it does not exist
+  // yet. The new address only appears after the FIRST protected resolution of
+  // that network, which the recovery performs a few ms later
+  // (`resolveProtectedIp(this.managementEndpoint.host)`) and then installs with
+  // `connectorManagementAddressUpdate(addr)` — exactly what the device capture
+  // shows: switch at 01:14:35.808, new address used from .833 (REPORT.md §2.5).
+  // Passing the last resolved address keeps the core's address-bearing branch
+  // (which skips BOTH wipes and refreshes STUN-DNS from the still-populated
+  // `stuns()` list) and is dial-target-neutral: it is the address the core is
+  // already dialing, and the recovery corrects it within the same leg. The core
+  // change of the same commit makes the empty case harmless too, so correctness
+  // never depends on which of the two addresses is available.
+  private notifyCoreNetworkChanged(): void {
+    connectorPhysicalNetworkChanged(this.managementDialAddr);
   }
 
   // 场景B roaming fix (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): after a
@@ -1584,6 +1704,60 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagMilestone('vpn_net_recovery_failed', milestoneFields);
   }
 
+  // F2 (v0.0.27 outage REPORT.md §5): every one of the recovery chase's 13
+  // aborts used to be a SILENT `break` — the device capture contained no
+  // VPN_NETWORK_RECOVERY_FAIL, no milestone and no stage token at all, so the
+  // single EPERM on the protected-DNS resolve (01:14:35.833/.848) was
+  // indistinguishable from "nothing was ever attempted" (REPORT.md §0.3 / §3 R2).
+  // ONE reporter for all of them: a greppable HiLog WARN line plus the persisted
+  // record through the SAME diagnostics/tee path the lifecycle markers use
+  // (`diagLifecycleMarker` -> `diagEvent` -> sink -> `phoneLogAppend`), so the
+  // stage reaches netbird-vpn.log — this ROM keeps no I-level A02900 line
+  // (REPORT.md §1), which is exactly why the old refusal reason had to be
+  // DERIVED instead of read. `stage` is a fixed lowercase token from this
+  // vocabulary: no-connection | recreate-in-flight | network-lost |
+  // no-management-endpoint | physical-dns | protected-dns | wg-socket-open |
+  // wg-protect | wg-feed | management-address | dns-feed | ice-mux |
+  // signal-resolve | signal-socket-open | signal-feed | spare-socket.
+  private recoveryAbort(stage: string, netId: number, epoch: number): void {
+    const line: string = `VPN_NETWORK_RECOVERY_ABORT|stage=${stage}|netId=${String(netId)}|` +
+      `epoch=${String(epoch)}|requestId=${this.requestId}`;
+    hilog.warn(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+    this.diagLifecycleMarker('VPN_NETWORK_RECOVERY_ABORT', `stage=${stage}`);
+  }
+
+  // F2 (v0.0.27 outage REPORT.md §5): the recovery had NO owner and NO retry —
+  // its only callers were EDGES (the switch, the recreate finally, the startup
+  // settle, the N2 evidence step, its own pending re-entry), so one aborted
+  // attempt left the device with no tunnel for 5 h 29 m while the core's 88
+  // login retries were all refused (REPORT.md §0.4). This rides the EXISTING 5 s
+  // status/netcfg watcher tick (`startStatusAndNetcfgWatcher`, STATUS_POLL_MS):
+  // no second timer, no thread. Bounded: at most one automatic attempt per
+  // PHYSICAL_RECOVERY_RETRY_MIN_MS, never overlapping an in-flight one
+  // (`networkRecoveryActive`), never through a closed N2 production gate, never
+  // onto a network the platform currently reports as gone, and never before the
+  // create leg settled (`networkRecoveryReady`). Tolerant of a throttled tick:
+  // the ROM starves extension ArkTS (gaps up to 599 s, REPORT.md §6.4), so the
+  // bound is a timestamp, not a count — a late tick still gets its attempt.
+  private retryPhysicalNetworkRecovery(): void {
+    if (!this.networkDirty || this.destroyRequested || this.networkRecoveryActive ||
+      this.recreateInFlight || !this.networkRecoveryReady) {
+      return;
+    }
+    if (this.n2CdProductionBlocked() || physicalDefaultNetId() === 0) {
+      return;
+    }
+    const now: number = Date.now();
+    if (now - this.recoveryRetryAtMs < PHYSICAL_RECOVERY_RETRY_MIN_MS) {
+      return;
+    }
+    this.recoveryRetryAtMs = now;
+    this.recoverPhysicalNetwork().catch((error: Error): void => {
+      this.n2NetworkRecoveryFail(error);
+    });
+  }
+
   private async recoverPhysicalNetwork(): Promise<void> {
     if (!this.networkRecoveryReady || this.destroyRequested) { return; }
     // N2 first batch C/D columns: the formal-switch gate. Checked at the ENTRY
@@ -1606,27 +1780,45 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         const epoch: number = attemptEpoch;
         const netId: number = this.networkNetId;
         const vpn: vpnExtension.VpnConnection | undefined = this.connection;
-        if (vpn === undefined || this.recreateInFlight || netId === 0 || this.managementEndpoint === undefined) { break; }
+        if (vpn === undefined || this.recreateInFlight || netId === 0 || this.managementEndpoint === undefined) {
+          this.recoveryAbort(vpn === undefined ? 'no-connection' :
+            this.recreateInFlight ? 'recreate-in-flight' :
+              netId === 0 ? 'network-lost' : 'no-management-endpoint', netId, epoch);
+          break;
+        }
         forgetPhysicalDefaultDns();
         const dns: string[] = physicalDefaultDnsServers(netId);
-        if (dns.length === 0 || !socketSupplyDnsServers(dns).ok) { break; }
+        if (dns.length === 0 || !socketSupplyDnsServers(dns).ok) {
+          this.recoveryAbort('physical-dns', netId, epoch);
+          break;
+        }
         const managementIp: string = await resolveProtectedIp(this.managementEndpoint.host);
-        if (managementIp.length === 0) { break; }
+        if (managementIp.length === 0) {
+          this.recoveryAbort('protected-dns', netId, epoch);
+          break;
+        }
         const addr: string = `${managementIp}:${this.managementEndpoint.port}`;
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         const opened: NativeSocketOpen = JSON.parse(core.wg_fwd_open()) as NativeSocketOpen;
         if (opened.fd < 0 || opened.bind_rc !== 0) {
           if (opened.fd >= 0) { socketSupplyCloseFd(opened.fd); }
+          this.recoveryAbort('wg-socket-open', netId, epoch);
           break;
         }
         let adopted: boolean = false;
         try {
-          if (!await this.protectSocketWithBox(vpn, opened.fd, 'Wb')) { break; }
+          if (!await this.protectSocketWithBox(vpn, opened.fd, 'Wb')) {
+            this.recoveryAbort('wg-protect', netId, epoch);
+            break;
+          }
           if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
             this.connection !== vpn) { continue; }
           const fed: WgFeedResult = connectorWgSocketFeed(opened.fd);
-          if (!fed.ok || fed.device_up !== true) { break; }
+          if (!fed.ok || fed.device_up !== true) {
+            this.recoveryAbort('wg-feed', netId, epoch);
+            break;
+          }
           adopted = true;
           const oldFd: number = this.outboundSocketFd;
           this.outboundSocketFd = -1;
@@ -1637,26 +1829,43 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           if (!adopted) { socketSupplyCloseFd(opened.fd); }
         }
         const restarted: SocketFeedResult = connectorManagementAddressUpdate(addr);
-        if (!restarted.ok) { break; }
+        if (!restarted.ok) {
+          this.recoveryAbort('management-address', netId, epoch);
+          break;
+        }
+        // F3: the address that just reached the core is the one the network-change
+        // seam must carry from now on (see notifyCoreNetworkChanged).
+        this.managementDialAddr = addr;
         const updated: SocketFeedResult = socketSupplyDnsServers(dns);
-        if (!updated.ok) { break; }
+        if (!updated.ok) {
+          this.recoveryAbort('dns-feed', netId, epoch);
+          break;
+        }
         // STAGE 3: the ONE shared socket for the NEW network generation. The WG
         // outer socket was opened, protected and fed a few lines above (the
         // device re-attached to it); the mux is armed OVER that same device
         // socket here — one open+bind+protect for ICE and WG together. The core
         // replaces the mux slot and renegotiates the sessions that rode the old
         // one (its reader thread is stopped and its dup closed with it).
-        if (!await this.armIceMux()) { break; }
+        if (!await this.armIceMux()) {
+          this.recoveryAbort('ice-mux', netId, epoch);
+          break;
+        }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         if (this.signalUri.length > 0) {
           const endpoint: ManagementEndpoint = parseSignalEndpoint(this.signalUri, 443);
           const signalIp: string = await resolveProtectedIp(endpoint.host);
-          if (signalIp.length === 0 || epoch !== this.networkEpoch) { break; }
+          if (signalIp.length === 0) {
+            this.recoveryAbort('signal-resolve', netId, epoch);
+            break;
+          }
+          if (epoch !== this.networkEpoch) { continue; }
           const signalAddr: string = `${signalIp}:${endpoint.port}`;
           const sock: NativeTcpSocketOpen = mgmtSocketOpen();
           if (sock.fd < 0 || sock.bind_rc !== 0) {
             if (sock.fd >= 0) { socketSupplyCloseFd(sock.fd); }
+            this.recoveryAbort('signal-socket-open', netId, epoch);
             break;
           }
           let signalFed: boolean = false;
@@ -1667,9 +1876,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
               signalFed = connectorSignalFeed(sock.fd, signalAddr).ok;
             }
           } finally { socketSupplyCloseFd(sock.fd); }
-          if (!signalFed) { break; }
+          if (!signalFed) {
+            this.recoveryAbort('signal-feed', netId, epoch);
+            break;
+          }
         }
-        if (!await this.feedSpareProtectedSocket(vpn, epoch)) { break; }
+        if (!await this.feedSpareProtectedSocket(vpn, epoch)) {
+          this.recoveryAbort('spare-socket', netId, epoch);
+          break;
+        }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         this.networkDirty = false;
@@ -1983,6 +2198,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId);
     }
     this.managementEndpoint = mgmtEndpoint;
+    // F3: remember the address this leg dialed, so the network-change seam can
+    // always carry a real address (never ''). See the field's comment.
+    this.managementDialAddr = connectAddr;
     // 2026-10-07 client-detail increment: remember the server this start
     // dialed so the published document can name it (authority only).
     this.managementUrl = device.management_url;
@@ -4854,6 +5072,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // No new timer, no loop, no await; ARM/latch/WAITING semantics
       // untouched; C7 counting input only, never Evidence/judge.
       this.maybeCloseInterfaceStatsWindow();
+      // F2 (v0.0.27 outage REPORT.md §5): the recovery's OWN retry. Placed with
+      // the other periodic work at the TOP of the tick — before the status read
+      // and every early return below — so an unreachable connector, a terminal
+      // status or a pending recreate can never starve it. Non-overlapping and
+      // rate-bounded inside the method itself (see retryPhysicalNetworkRecovery).
+      this.retryPhysicalNetworkRecovery();
       // N2 first batch C/D columns: the ring channels first (the FETCH fallback
       // works even with no armed session — the operator fetches the ring AFTER
       // returning to Wi-Fi, when the plan may already be over — while the
@@ -5896,9 +6120,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const epoch: number = this.networkEpoch;
     try {
       const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
+      // F1 (v0.0.27 outage REPORT.md §5): the gate is INSTANTANEOUS. It asks the
+      // platform for the physical default network at THIS request instead of
+      // reading the remembered `networkDirty` switch latch — the latch stayed
+      // true for 5 h 29 m after one aborted recovery and refused every socket
+      // (REPORT.md §0.1/§2.4). `networkDirty` survives only as the recovery
+      // bookkeeping (`networkUnusableNow` is what the gate reads now).
       reason = socketSupplyRejectionReason({
-        networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
-        networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
+        networkUnusableNow: physicalDefaultNetId() === 0,
+        networkRecoveryReady: this.networkRecoveryReady,
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
@@ -5938,8 +6168,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const protectedOk: boolean = await this.protectSocketWithBox(connection, fd,
         isDns ? 'D' : request.purpose === 'relay' ? 'R' : request.purpose === 'signal' ? 'S' : 'M', request.id);
       const postReason: string = socketSupplyRejectionReason({
-        networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
-        networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
+        networkUnusableNow: physicalDefaultNetId() === 0,
+        networkRecoveryReady: this.networkRecoveryReady,
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
@@ -5961,11 +6191,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       try {
         const reply: SocketFeedResult = socketSupplyReply(request.id, result === 'protected' ? fd : -1,
           result);
-        hilog.info(DOMAIN, TAG,
+        // 2026-10-13 (v0.0.27 outage REPORT.md §5, observability prerequisite):
+        // the refusal reason token was INVISIBLE on the device — this ROM keeps
+        // no I-level A02900 line (0 of 14 domain lines are INFO, REPORT.md §1),
+        // which is why §2.4 had to DERIVE `reason=network-dirty` instead of
+        // reading it. Same line, same fields, same call site: only the level of
+        // a REFUSAL is raised, so it survives in a W-level capture. The
+        // persisted copy is untouched (branch diag/0028 already tees the
+        // outcomes into netbird-vpn.log).
+        const supplyLine: string =
           'VPN_SOCKET_SUPPLY|id=%{public}s|purpose=%{public}s|kind=%{public}s|fd=%{public}d|' +
-          'protect=%{public}s|reason=%{public}s|elapsedMs=%{public}d|accepted=%{public}s',
-          request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
-          result, reason, Date.now() - t0, String(reply.ok));
+          'protect=%{public}s|reason=%{public}s|elapsedMs=%{public}d|accepted=%{public}s';
+        if (result === 'protected') {
+          hilog.info(DOMAIN, TAG, supplyLine,
+            request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
+            result, reason, Date.now() - t0, String(reply.ok));
+        } else {
+          hilog.warn(DOMAIN, TAG, supplyLine,
+            request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
+            result, reason, Date.now() - t0, String(reply.ok));
+        }
       } finally {
         if (fd >= 0) {
           socketSupplyCloseFd(fd);
@@ -6262,8 +6507,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
           connectionUnchanged: this.connection === connection
         }).length > 0 ||
-        this.networkDirty && this.networkRecoveryReady &&
-        !this.networkRecoveryActive ||
+        // F1: the same instantaneous rule the supply gate uses — a socket is
+        // refused only while the platform reports NO usable physical default
+        // network right now, never because of a remembered switch.
+        physicalDefaultNetId() === 0 && this.networkRecoveryReady ||
         // N2 first batch C/D columns: the formal-switch gate, checked AFTER the
         // protect await and immediately BEFORE the actual core feed.
         this.n2CdProductionBlocked(epoch)) {
@@ -6753,7 +7000,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // synchronous core call, so the connection cannot have been replaced
       connectionUnchanged: true
     }).length > 0 ||
-      this.networkDirty && this.networkRecoveryReady && !this.networkRecoveryActive ||
+      // F1: instantaneous, like the supply gate above (a recovery re-arms the
+      // mux on a network the platform reports as usable RIGHT NOW).
+      physicalDefaultNetId() === 0 && this.networkRecoveryReady ||
       this.n2CdProductionBlocked(epoch)) {
       hilog.error(DOMAIN, TAG,
         'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=stale-or-gated', this.requestId);

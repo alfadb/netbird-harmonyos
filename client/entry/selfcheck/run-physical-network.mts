@@ -17,7 +17,8 @@ function check(name: string, condition: boolean): void {
 }
 try {
   const fixture = join(dir, 'NetBirdPhysicalNetworkPolicy.ts');
-  writeFileSync(fixture, readFileSync(source));
+  const policySource = readFileSync(source, 'utf8');
+  writeFileSync(fixture, policySource);
   const policy = await import(pathToFileURL(fixture).href);
   check('registration callback for startup netId is not a switch',
     !policy.isPhysicalNetworkSwitch(101, 101));
@@ -38,21 +39,49 @@ try {
     netId = next;
   }
   check('one notification per distinct physical netId transition', notifications === 3);
+  // F1 (v0.0.27 outage REPORT.md §5): the supply gate is INSTANTANEOUS. Its only
+  // network input is `networkUnusableNow` — "the platform reports no usable
+  // physical default network AT THIS REQUEST" — and the remembered switch latch
+  // (`networkDirty`) is not an input at all any more. The outage shape is the
+  // pair (usable now, recovery-ready, latch previously set): it must be SERVED.
   const gate = {
-    networkDirty: true, networkRecoveryReady: false, networkRecoveryActive: false,
-    isDns: false, destroyRequested: false, destroyInFlight: false,
+    networkUnusableNow: true, networkRecoveryReady: false,
+    destroyRequested: false, destroyInFlight: false,
     recreateInFlight: false, hasConnection: true, connectionUnchanged: true,
     protectDeviation: false, productionGateBlocked: false
   };
   check('startup physical switch permits protected management resupply',
     policy.socketSupplyRejectionReason(gate) === '');
-  check('startup physical switch permits protected DNS resupply',
-    policy.socketSupplyRejectionReason({ ...gate, isDns: true }) === '');
-  check('post-create dirty management supply is held',
-    policy.socketSupplyRejectionReason({ ...gate, networkRecoveryReady: true }) === 'network-dirty');
-  check('active recovery permits protected DNS supply',
-    policy.socketSupplyRejectionReason({ ...gate, networkRecoveryReady: true,
-      networkRecoveryActive: true, isDns: true }) === '');
+  check('startup physical switch permits protected DNS resupply (no isDns carve-out left)',
+    policy.socketSupplyRejectionReason(gate) ===
+      policy.socketSupplyRejectionReason({ ...gate, isDns: true }));
+  // The 5 h 29 m latch (REPORT.md §0.1/§2.4): the network is USABLE now, the
+  // create leg has settled, and a recovery is NOT in flight — a switch happened
+  // earlier and its recovery aborted. Pre-F1 this answered `network-dirty` for
+  // management AND dns; there is no input left that can express "a switch
+  // happened once" (the policy has no networkDirty field).
+  const outageGate = { ...gate, networkUnusableNow: false, networkRecoveryReady: true };
+  check('a usable physical network is never refused: management (the latch is gone)',
+    policy.socketSupplyRejectionReason(outageGate) === '');
+  check('a usable physical network serves the protected-DNS socket too',
+    policy.socketSupplyRejectionReason(outageGate) ===
+      policy.socketSupplyRejectionReason({ ...outageGate, isDns: true }));
+  check('the outage shape is exactly the old latch: no field can say "a switch happened"',
+    !policySource.includes('networkDirty: boolean') &&
+    !policySource.includes('isDns: boolean') &&
+    !policySource.includes('networkRecoveryActive: boolean') &&
+    policySource.indexOf('gate.networkDirty') < 0 &&
+    policySource.indexOf('gate.isDns') < 0 &&
+    policySource.indexOf('gate.networkRecoveryActive') < 0);
+  check('no usable physical network at THIS request refuses management',
+    policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true }) ===
+      'network-unusable');
+  check('no usable physical network at THIS request refuses the protected-DNS socket as well',
+    policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true }) ===
+      'network-unusable');
+  check('before the first create an unusable network does not gate (login fails on its own terms)',
+    policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true,
+      networkRecoveryReady: false }) === '');
   check('recreate rejects even before create',
     policy.socketSupplyRejectionReason({ ...gate, recreateInFlight: true }) === 'recreate');
   check('missing connection never supplies a socket',
@@ -70,11 +99,10 @@ try {
       'production-gate');
   check('a closed formal-switch gate refuses the protected-DNS supply too',
     policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
-      isDns: true, networkRecoveryReady: true, networkRecoveryActive: true }) ===
-      'production-gate');
-  check('the gate wins over the network-dirty rule (it is checked first)',
-    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
       networkRecoveryReady: true }) === 'production-gate');
+  check('the gate wins over the network rule (it is checked first)',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      networkRecoveryReady: true, networkUnusableNow: true }) === 'production-gate');
   check('the gate still loses to the lifecycle reasons (destroy/recreate/connection)',
     policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
       destroyRequested: true }) === 'destroy' &&
@@ -86,14 +114,14 @@ try {
       protectDeviation: true }) === 'deviation');
   check('an OPEN gate changes nothing (the pre-existing rules still decide)',
     policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: false,
-      networkRecoveryReady: true }) === 'network-dirty' &&
+      networkRecoveryReady: true, networkUnusableNow: true }) === 'network-unusable' &&
     policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: false,
-      networkRecoveryReady: true, networkRecoveryActive: true, isDns: true }) === '');
+      networkRecoveryReady: true, networkUnusableNow: false }) === '');
   const firstConnection = {};
   const nextConnection = {};
   const supplyFor = (current: object | undefined, selected: object,
     recreateInFlight: boolean = false, destroyRequested: boolean = false): string =>
-    policy.socketSupplyRejectionReason({ ...gate, networkDirty: false,
+    policy.socketSupplyRejectionReason({ ...gate, networkUnusableNow: false,
       hasConnection: current !== undefined, connectionUnchanged: current === selected,
       recreateInFlight, destroyRequested });
   check('first connection accepts supply', supplyFor(firstConnection, firstConnection) === '');
