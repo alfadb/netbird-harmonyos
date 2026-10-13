@@ -168,6 +168,164 @@ fn guard_backoff(initial_ms: u64, timeout_ms: u64) -> ExponentialBackoff {
     )
 }
 
+// ---------------------------------------------------------------------------
+// relay 平面 → ICE 平面的桥
+// ---------------------------------------------------------------------------
+
+/// relay 平面 → ICE 平面的**单向**桥（0.0.28 对齐：guard 的 relay 断连复位
+/// + relay 状态参与分类）。
+///
+/// 上游把这两件事都做在**同一个** per-peer `Conn` 上（`conn.go:663-667` 直接
+/// 调 `conn.guard.SetRelayedConnDisconnected()`；`conn.go:848-858` 的分类直接
+/// 读 `conn.statusRelay` / `conn.workerRelay`），本仓的 relay 平面
+/// （[`crate::connector::RelayCarrier`]，在自己的 `lifecycle` 锁下挂/卸 WG
+/// seam 的承载）与 ICE 编排（[`PeerIceOrchestrator`]，在自己的编排锁下跑泵）
+/// 是两条独立的所有权链，所以这里是一条显式的桥：
+///
+/// - **事件方向（复位）**：relay 平面在一条 per-peer 承载断开时调用
+///   [`RelayPlaneLink::relay_lane_disconnected`] 入队；ICE 泵在下一拍
+///   [`PeerIceOrchestrator::run_once`] 取走，对该 peer 调 `guard_reset`。
+///   对应上游 `conn.go:661-667`（`statusRelay` 真的从 Connected 变过去才发）
+///   → `guard.SetRelayedConnDisconnected()` → `guard.go:141-146`（重建
+///   800 ms 节拍 + `iceRetryState.reset()`）。
+/// - **状态方向（分类）**：[`RelayPlaneLink::transport_up`]（上游
+///   `relayManager.Ready()`，`worker_relay.go:104-106`）与
+///   [`RelayPlaneLink::peer_uses_relay`]（上游
+///   `IsRelayConnectionSupportedWithPeer()` = 远端声明支持 relay 且本端有
+///   relay，`worker_relay.go:96-102`）供 `guard_tick` 的分类读（上游
+///   `evalConnStatus`，`conn.go:1050-1083`）。
+///
+/// **锁序契约（硬）**：本类型只持有**纯叶锁**（`disconnects` / `remote_relay`）
+/// 和两个原子量；每个方法只取自己那一把、绝不取第二把、绝不回调任何所有者
+/// （不入编排、不碰 relay 平面、不碰 WG 设备）。因此：
+///
+/// - relay 平面**可以**在自己的 `lifecycle` 锁下入队（`lifecycle` → 本类型
+///   叶锁），ICE 编排**可以**在自己的编排锁下取件（编排锁 → 本类型叶锁）；
+/// - 反方向不存在：本类型不取 `lifecycle`、不取编排锁、不取 WG 设备锁，
+///   所以没有 `lifecycle` ↔ 编排锁 ↔ WG 设备锁 的回环。正是为了这一条，
+///   relay 平面的断连走**事件队列**而不是回调编排。
+///
+/// 事件合并语义照上游：`SetRelayedConnDisconnected` 是 capacity-1 channel 的
+/// 非阻塞 send（`guard.go:71-76`），同一 peer 的多次断连在消费前合并成一次
+/// 复位——本类型用集合去重。
+#[derive(Default)]
+pub struct RelayPlaneLink {
+    /// 待 ICE 泵消费的 per-peer relay 断连事件（去重，上游 capacity-1
+    /// channel 的合并语义）。纯叶锁。
+    disconnects: Mutex<std::collections::BTreeSet<String>>,
+    /// 远端声明支持 relay 的 peer（上游 `relaySupportedOnRemotePeer`，
+    /// `worker_relay.go:32,47-53`）：**粘性**，只由新收到的 OFFER/ANSWER 改写
+    /// （带中继地址 = true，不带 = false），绝不因承载断开而清除。纯叶锁。
+    remote_relay: Mutex<std::collections::BTreeSet<String>>,
+    /// 本端是否还有 relay 可用（上游 `RelayIsSupportedLocally()` =
+    /// `relayManager.HasRelayAddress()`：还有配置好的 relay 地址集合，
+    /// `worker_relay.go:100-102`）。**与 [`Self::transport_up`] 不同**：它说
+    /// 的是「有 relay 服务可用」，不是「此刻连着」——relay 临时掉线时仍为真，
+    /// 只有 relay 被停止/撤销（客户端进入终态 `Dead`）才为假。它参与
+    /// [`Self::peer_uses_relay`] 的合成，正是上游
+    /// `IsRelayConnectionSupportedWithPeer()` = 远端声明 ∧ 本端可用。
+    relay_available: AtomicBool,
+    /// 共享 relay 传输是否连通（上游 `relayManager.Ready()`，
+    /// `worker_relay.go:104-106`）：本端 relay 客户端的会话状态。
+    transport_up: AtomicBool,
+}
+
+impl RelayPlaneLink {
+    /// 一枚未接线的桥（生产在 connector 组装时共享；测试用它独立驱动两端）。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// 一条 per-peer relay 承载断开（上游 `conn.go:663-667` 的
+    /// `SetRelayedConnDisconnected` 调用条件：**曾经**连上才发；relay 平面只
+    /// 在真的卸下一条已挂承载时调用本方法，故该条件由调用方保证）。
+    pub fn relay_lane_disconnected(&self, key: &str) {
+        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+        pending.insert(key.to_string());
+    }
+
+    /// [`RelayPlaneLink::relay_lane_disconnected`] 的批量形态（relay 客户端
+    /// 重连/换端把**所有**承载一起卸掉：上游每个 per-peer conn 各自断连，
+    /// 加上 sr-watcher 的重连广播）。
+    pub fn relay_lanes_disconnected(&self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+        for key in keys {
+            pending.insert(key.clone());
+        }
+    }
+
+    /// ICE 泵取件：一次取走本拍之前到达的全部断连事件（清空）。上游的
+    /// select 臂一次消费一个信号，但复位之间没有可见差别，同一拍合并消费
+    /// 等价。
+    pub fn take_relay_disconnects(&self) -> Vec<String> {
+        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+        core::mem::take(&mut *pending).into_iter().collect()
+    }
+
+    /// 发布共享 relay 传输状态（relay 平面的 relay 客户端泵每拍调用）。
+    pub fn set_transport_up(&self, up: bool) {
+        self.transport_up.store(up, Ordering::Release);
+    }
+
+    /// 共享 relay 传输是否连通（上游 `IsTransportConnected()`）。
+    pub fn transport_up(&self) -> bool {
+        self.transport_up.load(Ordering::Acquire)
+    }
+
+    /// 记录/清除某 peer 的「**远端**声明支持 relay」
+    /// （上游 `WorkerRelay.OnNewOffer` 的 `relaySupportedOnRemotePeer.Store`，
+    /// `worker_relay.go:47-53`）。粘性，见字段文档；本端是否可用由
+    /// [`RelayPlaneLink::set_relay_available`] 单独发布，两者在
+    /// [`RelayPlaneLink::peer_uses_relay`] 里合成（上游把本端因子**实时**
+    /// 与进 `IsRelayConnectionSupportedWithPeer()`，所以 relay 被撤销后不必
+    /// 等下一个 OFFER 就会翻成 false）。
+    pub fn set_remote_relay_support(&self, key: &str, supported: bool) {
+        let mut peers = self.remote_relay.lock().unwrap_or_else(|p| p.into_inner());
+        if supported {
+            peers.insert(key.to_string());
+        } else {
+            peers.remove(key);
+        }
+    }
+
+    /// 远端是否声明支持 relay（未与「本端可用」合成的原始事实）。
+    pub fn remote_supports_relay(&self, key: &str) -> bool {
+        self.remote_relay.lock().unwrap_or_else(|p| p.into_inner()).contains(key)
+    }
+
+    /// 发布「本端还有 relay 可用」（上游 `HasRelayAddress()`）：armed 且未被
+    /// 停止/撤销。relay 平面在 arm 时置真、在客户端进入终态 `Dead`
+    /// （`relay_drop` 的停止、teardown）时置假；临时掉线不动它。
+    pub fn set_relay_available(&self, available: bool) {
+        self.relay_available.store(available, Ordering::Release);
+    }
+
+    /// 本端是否还有 relay 可用（上游 `RelayIsSupportedLocally()`）。
+    pub fn relay_available(&self) -> bool {
+        self.relay_available.load(Ordering::Acquire)
+    }
+
+    /// 本 peer 是否「用 relay」（上游 `IsRelayConnectionSupportedWithPeer()` =
+    /// 远端声明 ∧ 本端可用，`worker_relay.go:96-102`）。
+    pub fn peer_uses_relay(&self, key: &str) -> bool {
+        self.relay_available() && self.remote_supports_relay(key)
+    }
+
+    /// 与网络图对账：离开 map 的 peer 的粘性状态与未消费事件一并清掉（上游
+    /// 的 per-conn 状态随 `Conn` 一起销毁）。
+    pub fn retain_peers(&self, keys: &[String]) {
+        {
+            let mut peers = self.remote_relay.lock().unwrap_or_else(|p| p.into_inner());
+            peers.retain(|k| keys.contains(k));
+        }
+        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+        pending.retain(|k| keys.contains(k));
+    }
+}
+
 /// 一个接口 round 的收集线程的栈大小：round 的调用链很浅（`getifaddrs` /
 /// `poll` / 格式化一行日志），但一个 23 peer × 2 接口的现场会有 ~46 个短命
 /// 线程同时在跑，默认 2 MiB 栈纯属浪费（虚拟地址不紧张，但没必要）。
@@ -1237,6 +1395,10 @@ pub struct PeerIceOrchestrator {
     /// [`IceOrchestratorSummary::pump_passes_per_10s`] 的来源；0 = 尚无完整
     /// 窗口）。
     pump_passes_per_10s: u64,
+    /// relay 平面 → 本编排的桥（[`RelayPlaneLink`]；`None` = 未接线：无 relay
+    /// 的路径与既有测试里，分类退回「承载挂没挂」的既有语义，且没有复位事件
+    /// 来源）。connector 在构造后立即接线（[`Self::set_relay_plane`]）。
+    relay_plane: Option<Arc<RelayPlaneLink>>,
 }
 
 impl PeerIceOrchestrator {
@@ -1265,7 +1427,15 @@ impl PeerIceOrchestrator {
             pump_passes_window: 0,
             last_pump_stats_ms: 0,
             pump_passes_per_10s: 0,
+            relay_plane: None,
         }
+    }
+
+    /// 接上 relay 平面的事件/状态桥（connector 在构造后立即调用；host 测试与
+    /// 无 relay 的路径不调用——`None` 时分类退回既有语义）。锁序见
+    /// [`RelayPlaneLink`]：本编排在自己的编排锁下取件，relay 平面只入队。
+    pub fn set_relay_plane(&mut self, link: Arc<RelayPlaneLink>) {
+        self.relay_plane = Some(link);
     }
 
     /// 换 guard 的熵源（注入缝）。生产从不调用（默认 [`OsRandom`]）；注入
@@ -1852,6 +2022,10 @@ impl PeerIceOrchestrator {
                 self.guard_reset(idx, now_ms);
             }
         }
+        // relay 平面的断连事件（上游 select 的 `relayedConnDisconnected` 臂，
+        // `guard.go:141-146`）：relay 平面只入队、不回调本编排（锁序见
+        // [`RelayPlaneLink`]），本拍取件并对该 peer 复位节拍 + 清零预算。
+        self.drain_relay_disconnects(now_ms);
         let mut first_err: Option<ManagementError> = None;
         // STAGE 2/3（官方对齐审计 §2.7）：共享 mux 的**读循环**。上游把
         // `ReadFromConn` 跑在独立 goroutine 里（`universal.go:80-108`；设备路径
@@ -1983,16 +2157,14 @@ impl PeerIceOrchestrator {
     ///   （`run_once` 的 `signal_reconnected`，`:155-160` 的 relay 侧重连通知
     ///   在本核心由 relay 客户端自持（`connector::physical_network_changed`
     ///   里 `client.network_changed()`），没有单独的回调面；
-    /// - 物理网络变化：`NetworkWatcher.Changed()` → `guard.go:162-177`。
-    ///
-    /// 第 4 个上游复位事件——**relay 断连**（`conn.go:663-667` →
-    /// `guard.go:141-146`）——在本核心仍无对应调用点：ICE 平面只**读** WG seam
-    /// 的「本 peer 承载是否已挂」做分类（见 [`guard_tick`]），承载的挂/卸由
-    /// connector 的 [`RelayCarrier`](crate::connector::RelayCarrier) 在它自己的
-    /// 生命周期锁下完成，没有任何事件交到本编排。因此「承载卸掉 + 该 peer 已
-    /// 在每小时档」的恢复只能等下一个每小时跳（或上面两个复位事件之一），
-    /// 这一点与上游的差别是已知且刻意的（不引入跨模块回调＝不引入
-    /// 编排锁与承载生命周期锁的倒序风险）。
+    /// - 物理网络变化：`NetworkWatcher.Changed()` → `guard.go:162-177`；
+    /// - **relay 断连**：per-peer 的 relay conn 结束 → `conn.onRelayDisconnected`
+    ///   → 只有「`statusRelay` 真的从 Connected 变过去」才
+    ///   `conn.guard.SetRelayedConnDisconnected()`（`conn.go:661-667`）→
+    ///   `guard.go:141-146`。本核心的对应物是 relay 平面通过
+    ///   [`RelayPlaneLink`] 入队的 per-peer 断连事件（relay 平面只对**真的
+    ///   卸下一条已挂承载**入队，等价于 `changed` 判据），由 `run_once` 每拍
+    ///   取件 → [`PeerIceOrchestrator::drain_relay_disconnects`]。
     ///
     /// 复位同时清零上游 `iceRetryState`（`guard.go:146`/`:153`/`:160`/`:177` 的
     /// `iceState.reset()`）：`retries = 0` + `hourly.Stop()`
@@ -2013,35 +2185,73 @@ impl PeerIceOrchestrator {
         peer.guard_hourly = false;
     }
 
+    /// 消费 relay 平面入队的断连事件（上游 `Guard.reconnectLoopWithRetry` 的
+    /// `case <-g.relayedConnDisconnected:` 臂，`guard.go:141-146`）：每个事件
+    /// 重建该 peer 的 800 ms 节拍并清零预算（[`Self::guard_reset`]）。事件
+    /// 由 relay 平面在自己的锁下入队，本方法在自己的编排锁下取件——两边只
+    /// 共享 [`RelayPlaneLink`] 的纯叶锁，没有回环（见该类型的锁序契约）。
+    ///
+    /// 编排里没有该 peer（已离开 map / 还未加入）→ 事件丢弃：上游的 per-conn
+    /// guard 根本不存在，`SetRelayedConnDisconnected` 也无处可发。
+    fn drain_relay_disconnects(&mut self, now_ms: u64) {
+        let Some(link) = self.relay_plane.clone() else {
+            return;
+        };
+        for key in link.take_relay_disconnects() {
+            let Some(idx) = self.peers.iter().position(|p| p.key == key) else {
+                continue;
+            };
+            self.guard_reset(idx, now_ms);
+            crate::hilog::emit(&format!(
+                "N5c_ICE|guard|relay-disconnected|peer={}|next_ms={}",
+                peer_short(&key),
+                self.peers[idx].guard_next_at_ms
+            ));
+        }
+    }
+
     /// 一拍的重连节拍（上游 `Guard.reconnectLoopWithRetry` 的 tick 分支，
     /// `guard.go:118-139`）：到点即**先推进**下一跳（ticker 每跳都前进，与
     /// 回调是否真的发起无关），再按连接状态决定要不要发起。
     ///
-    /// 状态判定是上游 `isConnectedOnAllWay`（`conn.go:834-848` → `evalConnStatus`）
-    /// 在本架构的对应物：
+    /// 状态判定是上游 `isConnectedOnAllWay`（`conn.go:834-858` → `evalConnStatus`，
+    /// `conn.go:1050-1083`）在本架构的对应物。上游的输入与本仓的事实一一对应：
     ///
-    /// - **Connected**（`guard.go:127-128`）：ICE 已选中 pair → 什么都不做；
-    /// - **进行中**：上游 `iceInProgress = workerICE.InProgress()`
-    ///   （`conn.go:840-845`）= `agentConnecting`（`worker_ice.go:194-199`），
-    ///   即「agent 已建、尚未连上」→ 也不发起。本架构的 agent 在**拿到远端
-    ///   凭证**时才等价诞生（上游 `OnNewOffer` → `reCreateAgent` → `Dial`/`Accept`），
-    ///   所以「有会话但还没有远端凭证」正是上游的「没有 agent」→ 继续发起；
-    ///   （上游 `evalConnStatus:1066,1072-1073` 把 `iceInProgress` 与
-    ///   `iceStatusConnected` 一视同仁为「ICE 在跑」→ 整体算 Connected。）
-    /// - **PartiallyConnected**（`guard.go:131-138`）：一路传输可用、另一路不
-    ///   可用。上游的判据是 `relayUsedAndUp = peerUsesRelay && relayConnected`
-    ///   且 ICE 未在跑（`conn.go:1052,1066,1074-1076`）；本架构的对应事实是
-    ///   **本 peer 的 relay 承载已挂在 WG seam 上**（
-    ///   [`WgPeerApplier::carrier_attached`]，即
-    ///   `wg_peers[].carrier_attached`，`connector_status()` 的
-    ///   `N13_WG|carrier-attach` 事件源）。此时按
+    /// | 上游（`connStatusInputs`） | 本仓 |
+    /// |---|---|
+    /// | `peerUsesRelay` = `IsRelayConnectionSupportedWithPeer()`（远端声明支持 relay 且本端有 relay，`worker_relay.go:96-102`） | 本 peer 的承载已挂 **或** [`RelayPlaneLink::peer_uses_relay`]（粘性，由收到的 OFFER/ANSWER 改写） |
+    /// | `relayConnected` = `statusRelay == Connected`（`conn.go:851`） | [`WgPeerApplier::carrier_attached`]（承载真的挂在 WG seam 上） |
+    /// | `relayTransportConnected` = `IsTransportConnected()` = `relayManager.Ready()`（`worker_relay.go:104-106`） | [`RelayPlaneLink::transport_up`] |
+    /// | `iceStatusConnected` | `state == Connected` |
+    /// | `iceInProgress` = `workerICE.InProgress()`（`worker_ice.go:194-199`，`agentConnecting`） | 有会话且已拿到远端凭证（本仓 agent 在拿到远端凭证时等价诞生，见下） |
+    /// | `remoteSupportsICE` / `iceWorkerCreated` | 本仓不单独分类：没有会话/没有远端凭证就是「ICE 还没在跑」，直接落入 Disconnected 的发起语义（与既有实现一致） |
+    /// | `forceRelay` | 本仓无此模式 |
+    ///
+    /// 于是分类逐字照搬 `evalConnStatus`（`conn.go:1050-1083`）：
+    /// `relayOK = !peerUsesRelay || relayConnected`，`iceRunning = Connected ||
+    /// InProgress`；
+    ///
+    /// - `iceRunning && relayOK` → **Connected**（`guard.go:127-128`）：什么都不做。
+    ///   注意 `relayOK` 这一道闸：ICE 已连但**这个 peer 的** relay 承载不在，
+    ///   就不算 Connected（上游同一条 `case`）；
+    /// - `relayUsedAndUp = peerUsesRelay && relayConnected` → **PartiallyConnected**
+    ///   （`conn.go:1074-1076`）：relay 能用、ICE 没在跑。按
     ///   `iceRetryState.shouldRetry`（`ice_retry_state.go:35-48`）走 3 次预算
     ///   （[`ICE_RETRY_MAX`]），耗尽即 `enterHourlyMode`：**不再发起**，下一跳
     ///   换成 [`ICE_RETRY_HOURLY_MS`]，此后每小时一次；
-    /// - **Disconnected**（`guard.go:129-130`）→ 回调 `conn.onGuardEvent`
-    ///   （`conn.go:688-692`）→ `handshaker.SendOffer()`：重新广播本 peer 的
-    ///   OFFER（凭证 per-peer 稳定，`handshaker.go:232-237`）。没有承载的 peer
-    ///   保持原样：**指数退避、永不放弃**。
+    /// - `iceStatusConnected && !relayTransportConnected` →
+    ///   **PartiallyConnected**（`conn.go:1077-1079`）：ICE 在扛流量、而共享
+    ///   relay 传输断了。这一路同样走 3 次预算 → 每小时：上游的注释说得很
+    ///   清楚——「ICE carries the traffic and the relay transport is restored
+    ///   by the relay client's own guard, not by offers, so this must not
+    ///   trigger the aggressive retry」；
+    /// - 其余 → **Disconnected**（`guard.go:129-130`）→ 回调
+    ///   `conn.onGuardEvent`（`conn.go:688-692`）→ `handshaker.SendOffer()`：
+    ///   重新广播本 peer 的 OFFER（凭证 per-peer 稳定，`handshaker.go:232-237`）。
+    ///   指数退避、永不放弃。**ICE 已连、这个 peer 的 relay 承载已卸、而共享
+    ///   传输还活着**正是这一支（上游 `conn_status_eval_test.go:189-199`）：
+    ///   共享传输没坏，说明这个 peer 自己不可达（可能换了 relay 服务器），
+    ///   而只有 OFFER 能带来它的新中继地址。
     ///
     /// 两个分类细节与上游逐字一致：
     /// - 分类在**每跳**做（每小时档下就是每小时做一次）；`shouldRetry` 的预算
@@ -2083,17 +2293,40 @@ impl PeerIceOrchestrator {
         // 上游 `InProgress()`：agent 存在且尚未连上。
         let in_progress = self.peers[idx].session.is_some()
             && self.peers[idx].remote_creds.is_some();
-        if connected || in_progress {
+        // 上游 `relayConnected`（`conn.go:851`）。承载的挂/卸是 WG seam 的事实，
+        // 无论有没有接上 relay 平面都要读。
+        let carrier_attached = self.wg.carrier_attached(&self.peers[idx].key);
+        // 上游 `peerUsesRelay` / `relayTransportConnected`（`conn.go:849,852`）。
+        // `peerUsesRelay` 的第一项是「本 peer 的承载真的挂上了」（挂上就必然
+        // 用 relay），第二项是 [`RelayPlaneLink::peer_uses_relay`]——上游
+        // `IsRelayConnectionSupportedWithPeer()`（远端声明 ∧ 本端还有 relay
+        // 服务）。未接线（无 relay 的路径、既有测试）：`peerUsesRelay` 退回
+        // 「承载挂没挂」——与接线前逐字一致，分类不变；`transport_up` 取 false
+        // 也不会命中 `conn.go:1077-1079`（那一条还要求 `peerUsesRelay`）。
+        let (peer_uses_relay, relay_transport_up) = match self.relay_plane.as_ref() {
+            Some(link) => (
+                carrier_attached || link.peer_uses_relay(&self.peers[idx].key),
+                link.transport_up(),
+            ),
+            None => (carrier_attached, false),
+        };
+        // `case iceRunning && relayOK` → Connected（`conn.go:1069-1072`）。
+        let relay_ok = !peer_uses_relay || carrier_attached;
+        if (connected || in_progress) && relay_ok {
             return Ok(());
         }
         // 本架构的纯应答方（`initiator=false`，仅测试用来钉住确定性角色划分）
         // 不主动发起——上游没有这个开关，两侧都会在未连上时发 OFFER。
+        // （上游的分类在回调之前，纯应答方同样只影响「发不发」。）
         if !self.peers[idx].initiator {
             return Ok(());
         }
-        // `PartiallyConnected`：本 peer 的 relay 承载已挂（`conn.go:1052`
-        // 的 `relayConnected`），ICE 未连接也没在进行中（已在上面的早退里）。
-        if self.wg.carrier_attached(&self.peers[idx].key) {
+        // `relayUsedAndUp`（`conn.go:1074-1076`）与
+        // `iceStatusConnected && !relayTransportConnected`（`conn.go:1077-1079`）
+        // 两支同属 PartiallyConnected：预算 —— 发起，耗尽即每小时。
+        let partially = carrier_attached
+            || (connected && peer_uses_relay && !relay_transport_up);
+        if partially {
             if !self.peers[idx].guard_hourly {
                 self.peers[idx].guard_ice_retries += 1;
                 if self.peers[idx].guard_ice_retries > ICE_RETRY_MAX {
@@ -4480,8 +4713,22 @@ mod tests {
     /// 37.5 s 封顶，见 [`seed_guard`]）+ 记录 signal 的 OFFER 数 + 可注入的
     /// relay 承载表。
     fn carrier_orch(signal: Arc<FrameLog>, carriers: Arc<CarrierWg>) -> PeerIceOrchestrator {
+        carrier_orch_with_socks(signal, carriers, 64)
+    }
+
+    /// [`carrier_orch`] with an explicit protected-socket supply size. The
+    /// whole ICE plane only ever takes ONE of them (the shared mux is cached,
+    /// [`PeerIceOrchestrator::arm_mux`]), so a test that does not need a large
+    /// margin keeps the process-wide `socket()`/dup churn — and with it the fd
+    /// NUMBER recycling that other tests' fd assertions are sensitive to —
+    /// minimal.
+    fn carrier_orch_with_socks(
+        signal: Arc<FrameLog>,
+        carriers: Arc<CarrierWg>,
+        socks_n: usize,
+    ) -> PeerIceOrchestrator {
         let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
-        for _ in 0..64 {
+        for _ in 0..socks_n {
             let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
             assert!(fd >= 0, "socket() failed");
             socks.feed(fd).expect("feed");
@@ -4596,11 +4843,192 @@ mod tests {
         );
 
         // 承载一卸：该 peer 立刻回到 `Disconnected` 语义（不再走每小时分支，
-        // 由下一个到点跳发起）——但档位与下一跳不由本分支改写（relay 断连
-        // 在上游是复位事件、本核心无调用点，见 `guard_reset` 文档）。
+        // 由下一个到点跳发起）——但档位与下一跳不由本分支改写。**这条路径
+        // 刻意不带 relay 平面的断连事件**：它钉的是「分类只读 WG seam 的
+        // 承载事实」这一半；真实的 relay 平面卸承载一定会同时入队事件
+        // （`crate::connector::RelayCarrier` 的每个 detach 点都调
+        // `RelayPlaneLink::relay_lane_disconnected`），那一路由
+        // `relay_lane_disconnect_resets_an_hourly_partial_peer…` 钉住。
         carriers.detach("P");
         orch.run_once(22_000 + 2 * ICE_RETRY_HOURLY_MS).expect("post-detach beat");
         assert_eq!(offer_frames(&signal), 5, "a peer with no carrier keeps offering");
+    }
+
+    /// relay 平面真的卸下一条承载 = `wg.detach_carrier` **+** 桥上的断连事件
+    /// （生产路径见 `crate::connector::RelayCarrier` 的每个 detach 点）。
+    fn detach_lane(carriers: &CarrierWg, link: &RelayPlaneLink, key: &str) {
+        carriers.detach(key);
+        link.relay_lane_disconnected(key);
+    }
+
+    /// **上游的 relay 断连复位**（`conn.go:661-667` → `guard.go:141-146`）：
+    /// relay 平面卸下一条已挂承载 → 事件入队 → ICE 泵下一拍取件 → 该 peer 的
+    /// 节拍重建在 800 ms、`iceRetryState.reset()`（`ice_retry_state.go:24-30`）。
+    /// 对已经在每小时档的 `PartiallyConnected` peer 来说，这就是「不必再等
+    /// 下一个每小时跳」：预算重新是满的 3 次。
+    #[test]
+    fn relay_lane_disconnect_resets_an_hourly_partial_peer_to_a_fresh_fast_budget() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        let link = RelayPlaneLink::new();
+        carriers.attach("P");
+        link.set_remote_relay_support("P", true);
+        link.set_relay_available(true);
+        link.set_transport_up(true);
+        // Only the shared mux consumes a socket; a 2-socket supply is plenty
+        // and keeps this test's fd churn negligible for the parallel suite.
+        let mut orch = carrier_orch_with_socks(signal.clone(), carriers.clone(), 2);
+        orch.set_relay_plane(link.clone());
+
+        drive_to_hourly(&mut orch);
+        let offers_after_budget = offer_frames(&signal);
+        assert_eq!(offers_after_budget, 3, "the 3-attempt budget sent 3 offers");
+        let hourly_hop = orch.peers[0].guard_next_at_ms;
+        assert_eq!(hourly_hop, 21_000 + ICE_RETRY_HOURLY_MS);
+
+        // relay 平面卸下这条承载（真实 detach 点：relay 掉线 / 客户端换端 /
+        // 对端 offline / 远端中继变化）。
+        detach_lane(&carriers, &link, "P");
+        // 下一拍取件：新节拍 800 ms（上游 `newReconnectTicker` 消费立即首跳）
+        // + 预算归零 + 退出每小时档。
+        orch.run_once(100_000).expect("the drain beat");
+        assert!(!orch.peers[0].guard_hourly, "the disconnect resets the hourly mode");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "a fresh budget");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 100_800, "a fresh 800 ms ticker");
+        assert_eq!(
+            offer_frames(&signal),
+            offers_after_budget,
+            "the drain beat itself sends NOTHING (upstream consumes the ticker's immediate hop)"
+        );
+        assert!(100_800 < hourly_hop, "the reset preempts the next hourly hop");
+
+        // 到点即发起（承载已卸 → 上游 Disconnected：指数退避、永不放弃、
+        // 不消耗预算）。
+        orch.run_once(100_799).expect("pre-hop beat");
+        assert_eq!(offer_frames(&signal), offers_after_budget, "nothing before the 800 ms hop");
+        orch.run_once(100_800).expect("the 800 ms hop");
+        assert_eq!(offer_frames(&signal), offers_after_budget + 1, "fast retry is back");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "Disconnected consumes no budget");
+        assert_eq!(
+            orch.peer_ice_detail("P").expect("peer").ice_retry,
+            IceRetryMode::Fast,
+            "the guard reads fast again"
+        );
+
+        // 上游的合并语义（`SetRelayedConnDisconnected` 是 capacity-1 channel 的
+        // 非阻塞 send，`guard.go:71-76`）：同一 peer 在取件前多次断连只算一次。
+        link.relay_lane_disconnected("P");
+        link.relay_lane_disconnected("P");
+        assert_eq!(link.take_relay_disconnects(), vec!["P".to_string()]);
+    }
+
+    /// **上游 `evalConnStatus` 的 relay 侧闸门**（`conn.go:1050-1083`，测试
+    /// `conn_status_eval_test.go:189-211`）：ICE 已连、而**这个 peer 的** relay
+    /// 承载已卸时，整体不再算 Connected——
+    ///
+    /// - 共享 relay 传输还活着 → 上游判 **Disconnected**（这个 peer 自己不可达，
+    ///   可能换了中继服务器，「只有 OFFER 能带来它的新中继地址」）→ 照常发起；
+    /// - 共享 relay 传输也断了 → 上游判 **PartiallyConnected**（`conn.go:1077-1079`）
+    ///   → 走 3 次预算、之后每小时（relay 传输由 relay 客户端自己的 guard 恢复，
+    ///   offer 恢复不了它，所以不能走激进重试）。
+    ///
+    /// 承载还挂着时同一状态仍是 Connected：什么都不发（`guard.go:127-128`）。
+    #[test]
+    fn ice_connected_peer_with_its_relay_lane_down_reoffers_like_upstream() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        let link = RelayPlaneLink::new();
+        carriers.attach("P");
+        link.set_remote_relay_support("P", true);
+        link.set_relay_available(true);
+        link.set_transport_up(true);
+        // Only the shared mux consumes a socket; a 2-socket supply is plenty
+        // and keeps this test's fd churn negligible for the parallel suite.
+        let mut orch = carrier_orch_with_socks(signal.clone(), carriers.clone(), 2);
+        orch.set_relay_plane(link.clone());
+
+        // 首跳：承载已挂、ICE 未连 → PartiallyConnected（预算 1/3）。
+        orch.run_once(1_000).expect("first hop");
+        assert_eq!(offer_frames(&signal), 1);
+        assert_eq!(orch.peers[0].guard_ice_retries, 1);
+        assert!(orch.peers[0].session.is_some(), "precondition: a session exists");
+
+        // ICE 连上（white-box：选中 pair 的完整链路由既有 loopback 用例覆盖），
+        // 承载仍挂着 → `iceRunning && relayOK` → Connected，什么都不发。
+        orch.peers[0].state = PeerIceState::Connected;
+        orch.run_once(4_000).expect("connected beat");
+        assert_eq!(
+            offer_frames(&signal),
+            1,
+            "ICE up + this peer's relay up = Connected (conn.go:1069-1072)"
+        );
+
+        // relay 平面卸下承载并通知 ICE 平面（真实 detach 路径）。
+        detach_lane(&carriers, &link, "P");
+        orch.run_once(10_000).expect("the drain beat");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 10_800, "the relay disconnect re-arms");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "the relay disconnect clears the budget");
+
+        // 共享传输还活着：上游判 Disconnected → 到点照常发起，预算不动、
+        // 不进每小时档。
+        orch.run_once(10_800).expect("the re-offer hop");
+        assert_eq!(
+            offer_frames(&signal),
+            2,
+            "an ICE-connected peer whose relay lane is down re-offers (only an OFFER carries its new relay address)"
+        );
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "Disconnected consumes no budget");
+        assert!(!orch.peers[0].guard_hourly);
+
+        // 共享 relay 传输也断了 → 上游判 PartiallyConnected（`conn.go:1077-1079`）
+        // → 预算重新开始走，并在耗尽后转每小时。
+        link.set_transport_up(false);
+        let mut at = orch.peers[0].guard_next_at_ms;
+        for expected in 1..=ICE_RETRY_MAX {
+            orch.run_once(at).expect("budget beat");
+            assert_eq!(orch.peers[0].guard_ice_retries, expected);
+            assert!(!orch.peers[0].guard_hourly);
+            at = orch.peers[0].guard_next_at_ms;
+        }
+        let offers_before_exhaust = offer_frames(&signal);
+        orch.run_once(at).expect("the exhaust beat");
+        assert!(orch.peers[0].guard_hourly, "the shared-transport-down arm parks on hourly");
+        assert_eq!(
+            offer_frames(&signal),
+            offers_before_exhaust,
+            "the exhaust beat itself sends no offer"
+        );
+        assert_eq!(orch.peers[0].guard_next_at_ms, at + ICE_RETRY_HOURLY_MS);
+
+        // 传输一回来（承载也重新挂上）→ 分类又回到 Connected：每小时那一跳
+        // 照常到点、但什么都不发（`guard.go:127-128`）。
+        carriers.attach("P");
+        link.set_transport_up(true);
+        let hourly_beat = at + ICE_RETRY_HOURLY_MS;
+        orch.run_once(hourly_beat).expect("the recovered hourly beat");
+        assert_eq!(
+            offer_frames(&signal),
+            offers_before_exhaust,
+            "Connected sends nothing even on a due hourly beat"
+        );
+        assert_eq!(orch.peers[0].guard_next_at_ms, hourly_beat + ICE_RETRY_HOURLY_MS);
+
+        // management 把 relay 撤掉（上游 `HasRelayAddress()` → false，
+        // `worker_relay.go:100-102`；本端 relay 服务不复存在）→
+        // `IsRelayConnectionSupportedWithPeer()` 立刻为假，**不必等新的
+        // OFFER**：ICE 已连的 peer 又回到 Connected，什么都不发。
+        carriers.detach("P");
+        link.set_transport_up(false);
+        link.set_relay_available(false);
+        assert!(!link.peer_uses_relay("P"), "the local relay service is gone");
+        assert!(link.remote_supports_relay("P"), "the remote still advertised it (sticky)");
+        let next_beat = orch.peers[0].guard_next_at_ms;
+        orch.run_once(next_beat).expect("the revoked-relay beat");
+        assert_eq!(
+            offer_frames(&signal),
+            offers_before_exhaust,
+            "with no local relay the peer no longer counts as relay-using: ICE up = Connected"
+        );
     }
 
     /// 没有承载的 peer（上游 `Disconnected`）**永不**进每小时档：退避照旧

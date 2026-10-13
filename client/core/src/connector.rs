@@ -149,7 +149,7 @@ use crate::network_map::NetworkMap;
 use crate::peer_conn::{
     ice_ready_for_default_route, spawn_signal_link_shared, IceCandidateEndpoint,
     IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps, PeerIceDetail, PeerIceOrchestrator,
-    PeerSignalKind, RealSignalExchange, SignalLinkConfig, SignalLinkEvent,
+    PeerSignalKind, RealSignalExchange, RelayPlaneLink, SignalLinkConfig, SignalLinkEvent,
 };
 use crate::route_selector::RouteSelector;
 use crate::signal::{SignalMessage, SignalOutgoing};
@@ -549,11 +549,17 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     }
     /// ALIGN guard `PartiallyConnected` (upstream
     /// `client/internal/peer/guard/guard.go:131-138`; classification
-    /// `conn.go:1052,1066,1074-1076`): is the peer's NON-UDP egress carrier
+    /// `conn.go:1050-1083`): is the peer's NON-UDP egress carrier
     /// (relay lane) attached to this seam RIGHT NOW? That is the guard's
-    /// `relayUsedAndUp` input — "relay is usable for this peer" — read by the
-    /// ICE orchestrator on the guard's own due ticks only
-    /// (`crate::peer_conn::PeerIceOrchestrator::guard_tick`).
+    /// `relayConnected` input (`conn.go:851`) — one half of "relay is usable
+    /// for this peer" — read by the ICE orchestrator on the guard's own due
+    /// ticks only (`crate::peer_conn::PeerIceOrchestrator::guard_tick`).
+    ///
+    /// The OTHER half — "the peer uses relay at all", which still matters
+    /// AFTER the lane is gone — is the sticky remote advertisement
+    /// ([`RelayCarrier::note_remote_relay_support`] →
+    /// [`crate::peer_conn::RelayPlaneLink::peer_uses_relay`]); the shared relay
+    /// transport state is [`crate::peer_conn::RelayPlaneLink::transport_up`].
     ///
     /// Deliberately the ATTACH fact (`carrier_attached`), not `on_carrier`
     /// (the last egress happened to leave over the carrier): upstream
@@ -1529,6 +1535,16 @@ struct ConnectorShared {
     /// N13-D2: the WG seam the carrier lanes attach to (set at spawn, with
     /// the relay opt-in only).
     relay_wg: std::sync::OnceLock<std::sync::Arc<dyn WgPeerApplier>>,
+    /// ALIGN guard（0.0.28）: the relay plane → ICE plane bridge, shared by
+    /// the carrier (producer: per-peer lane-disconnect events, the shared
+    /// relay transport state, the remote's relay support) and the ICE
+    /// orchestrator (consumer: `guard_reset` per event, classification
+    /// inputs). Created with the CONNECTOR — the orchestrator is built before
+    /// the first relay sync that arms the carrier, and both must see the SAME
+    /// bridge. Lock order: see [`RelayPlaneLink`] — the bridge holds pure leaf
+    /// locks only, so it is taken LAST on either side and never leads back
+    /// into the orchestrator, the carrier lifecycle or the WG device.
+    relay_plane: Arc<RelayPlaneLink>,
     /// N13-D2: the runtime the carrier pump task spawns on (set at spawn,
     /// with the relay opt-in only).
     relay_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
@@ -1721,6 +1737,7 @@ impl ConnectorShared {
             relay: Mutex::new(RelaySlot::default()),
             relay_carrier: Arc::new(std::sync::OnceLock::new()),
             relay_wg: std::sync::OnceLock::new(),
+            relay_plane: RelayPlaneLink::new(),
             relay_runtime: std::sync::OnceLock::new(),
             relay_ads: Arc::new(Mutex::new(HashMap::new())),
             route_apply: Mutex::new(()),
@@ -2370,9 +2387,13 @@ impl ConnectorShared {
         if self.relay_carrier.get().is_none() {
             // N13-D3: the carrier reads the SAME advertisement map the signal
             // receive path writes — created here, shared with the connector.
-            let _ = self
-                .relay_carrier
-                .set(RelayCarrier::new_with_ads(wg.clone(), self.relay_ads.clone()));
+            // ALIGN guard (0.0.28): the carrier and the ICE orchestrator also
+            // share the connector's relay plane → ICE plane bridge.
+            let _ = self.relay_carrier.set(RelayCarrier::new_shared(
+                wg.clone(),
+                self.relay_ads.clone(),
+                self.relay_plane.clone(),
+            ));
         }
         let carrier = self.relay_carrier.get().expect("carrier slot just set");
         if !carrier.has_client(&client) {
@@ -3014,7 +3035,10 @@ pub struct RelayCarrier {
     /// LOCK ORDER: `lifecycle` first, then one leaf lock at a time
     /// (client/peers/attached/pending_opens/lane_requests/ads/
     /// foreign_ctx/foreign); never held across an await; no leaf holder
-    /// ever acquires `lifecycle` (no ABBA).
+    /// ever acquires `lifecycle` (no ABBA). The relay→ICE bridge
+    /// ([`RelayPlaneLink`]) is one more PURE LEAF in that list: taken last,
+    /// acquires nothing, and never leads into the orchestrator or the WG
+    /// device — which is why the detach path may enqueue under this guard.
     lifecycle: Mutex<bool>,
     /// Per-peer in-flight lane-open task — at most ONE per peer (0018 fix:
     /// opens run as managed tasks so a peer that never comes online parks
@@ -3052,6 +3076,22 @@ pub struct RelayCarrier {
     foreign_timing: Mutex<(Duration, Duration)>,
     /// Monotonic anchor of the last foreign sweep (pump tick gate).
     last_foreign_sweep: Mutex<Option<std::time::Instant>>,
+    /// ALIGN guard（0.0.28）: the relay plane → ICE plane bridge this carrier
+    /// PRODUCES into — per-peer lane-disconnect events, the shared relay
+    /// transport state ([`RelayPlaneLink::set_transport_up`], upstream
+    /// `relayManager.Ready()`), the local relay service availability
+    /// ([`RelayPlaneLink::set_relay_available`], upstream `HasRelayAddress()`)
+    /// and the remote's relay support
+    /// ([`RelayPlaneLink::set_remote_relay_support`], upstream
+    /// `WorkerRelay.OnNewOffer`). The connector shares ONE bridge between the
+    /// carrier and the ICE orchestrator.
+    ///
+    /// LOCK ORDER: the bridge holds pure leaf locks only, so a producer call
+    /// is always the LAST acquisition on this side (`lifecycle` → bridge leaf,
+    /// or one carrier leaf → bridge leaf) and never leads back into the
+    /// carrier, the orchestrator or the WG device. Nothing here ever calls
+    /// INTO the orchestrator: that is the whole point of the event queue.
+    relay_plane: Arc<RelayPlaneLink>,
 }
 
 /// One foreign relay client + its inbound pump (official manager.go
@@ -3110,6 +3150,19 @@ impl RelayCarrier {
         wg: std::sync::Arc<dyn WgPeerApplier>,
         ads: Arc<Mutex<HashMap<String, String>>>,
     ) -> std::sync::Arc<Self> {
+        Self::new_shared(wg, ads, RelayPlaneLink::new())
+    }
+
+    /// [`RelayCarrier::new_with_ads`] over an EXPLICIT relay plane → ICE plane
+    /// bridge (the connector's production construction: the SAME
+    /// [`RelayPlaneLink`] the ICE orchestrator reads). Host/test drivers that
+    /// want to observe the producer side build their own bridge and pass it
+    /// here; the two-argument constructors mint a private one instead.
+    pub fn new_shared(
+        wg: std::sync::Arc<dyn WgPeerApplier>,
+        ads: Arc<Mutex<HashMap<String, String>>>,
+        relay_plane: Arc<RelayPlaneLink>,
+    ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(RelayCarrier {
             client: Mutex::new(None),
             wg,
@@ -3126,6 +3179,7 @@ impl RelayCarrier {
             foreign: Mutex::new(HashMap::new()),
             foreign_timing: Mutex::new((FOREIGN_RELAY_GRACE, FOREIGN_RELAY_SWEEP)),
             last_foreign_sweep: Mutex::new(None),
+            relay_plane,
         })
     }
 
@@ -3230,6 +3284,11 @@ impl RelayCarrier {
     /// this (and is detached right here) or sees the swapped client in its
     /// commit check and drops.
     pub fn attach_client(&self, client: crate::relay_client::RelayClient) {
+        // Published from the NEW client's own state: a fresh client is usually
+        // still dialing, and the classification must not read the previous
+        // client's liveness. Upstream `relayManager.Ready()` follows the
+        // manager's current client the same way.
+        let transport_up = client.state() == crate::relay_client::RelayState::Ready;
         let mut lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
         *lifecycle = true;
         self.detach_all_locked(&lifecycle);
@@ -3240,7 +3299,51 @@ impl RelayCarrier {
         self.lane_requests.lock().unwrap_or_else(PoisonError::into_inner).clear();
         *self.client.lock().unwrap_or_else(PoisonError::into_inner) = Some(client);
         drop(lifecycle);
+        self.relay_plane.set_transport_up(transport_up);
+        // The local relay service exists again (`HasRelayAddress()`,
+        // worker_relay.go:100-102) — independent of whether this client has
+        // reached Ready yet.
+        self.relay_plane.set_relay_available(true);
         hilog::emit("connector: relay carrier armed with the relay client");
+    }
+
+    /// Record the REMOTE's relay support for `key` — the bookkeeping half of
+    /// the upstream `WorkerRelay.OnNewOffer` entry point (`worker_relay.go:
+    /// 47-53`): `relaySupportedOnRemotePeer.Store(isRelaySupported(answer))`,
+    /// whose REMOTE factor is the answer's non-empty `RelaySrvAddress`. Called
+    /// for EVERY received OFFER/ANSWER, so a frame without a relay address
+    /// CLEARS it — sticky across a lane disconnect, never across a new
+    /// advertisement.
+    ///
+    /// This feeds the ICE guard's `peerUsesRelay` input (`conn.go:849`,
+    /// `evalConnStatus:1052`) as the remote half of upstream's
+    /// `IsRelayConnectionSupportedWithPeer()`; the local half
+    /// (`RelayIsSupportedLocally()` = `HasRelayAddress()`) is published
+    /// separately and re-evaluated live
+    /// ([`RelayPlaneLink::set_relay_available`]) — upstream composes the two
+    /// the same way, so a relay revoked by management flips the fact without
+    /// waiting for the next OFFER.
+    ///
+    /// It matters exactly when the lane is GONE: with a lane attached the WG
+    /// seam's `carrier_attached` already says "relay is usable for this peer",
+    /// and only this sticky fact still tells a peer that uses relay apart from
+    /// one that does not — which is what separates upstream's
+    /// `PartiallyConnected` (shared transport down / budget) from the
+    /// aggressive `Disconnected` re-offer.
+    ///
+    /// A key outside the lane universe is DROPPED: upstream's `WorkerRelay`
+    /// belongs to the peer's `Conn`, which exists only for a map peer.
+    pub fn note_remote_relay_support(&self, key: &str, advertised: bool) {
+        let known = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(k, _)| k == key);
+        if !known {
+            return;
+        }
+        self.relay_plane.set_remote_relay_support(key, advertised);
     }
 
     /// A fresh OFFER/ANSWER for `key` was received on the signal link — the
@@ -3318,6 +3421,11 @@ impl RelayCarrier {
             hilog::emit("connector: relay carrier lane detached (peer left the map)");
         }
         drop(attached);
+        // A peer that left the map takes its per-peer relay state with it
+        // (upstream: the state lives on the `Conn`, destroyed with the peer).
+        // Deliberately NOT a guard-reset event: there is no per-peer guard left
+        // to reset, and a stale event would reset a re-added peer's ticker.
+        self.relay_plane.retain_peers(keys);
         // Advertisements of departed peers go with them (bounded memory; a
         // returning peer re-advertises on its next OFFER/ANSWER).
         self.ads
@@ -3407,6 +3515,11 @@ impl RelayCarrier {
         {
             self.wg.detach_carrier(key);
             self.bump(|s| s.detach_ok += 1);
+            // The old conn really ended (upstream `onRelayDisconnected`,
+            // `conn.go:661-667`) — the guard's reset, even though a fresh open
+            // follows right below: upstream opens the new conn only after the
+            // old one's teardown reached the guard.
+            self.relay_plane.relay_lane_disconnected(key);
             hilog::emit(&format!(
                 "connector: relay carrier lane detached (offline or relay changed)|peer={}|relay={}",
                 pid, via
@@ -3672,6 +3785,10 @@ impl RelayCarrier {
             self.attached.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
             self.wg.detach_carrier(&key);
             self.bump(|s| s.detach_ok += 1);
+            // Closing a foreign client ends every conn riding it (upstream
+            // `onServerDisconnected` → `evictForeignRelay` + each per-peer
+            // conn's `onRelayDisconnected`, `conn.go:661-667`).
+            self.relay_plane.relay_lane_disconnected(&key);
         }
         drop(lifecycle);
         self.retire_foreign(url, entry, why);
@@ -3866,6 +3983,10 @@ impl RelayCarrier {
             if let Some(via) = via {
                 self.wg.detach_carrier(&key);
                 self.bump(|s| s.detach_ok += 1);
+                // Upstream frees the per-peer relay conn on the offline edge
+                // itself (client.go:787-807) → `onRelayDisconnected` →
+                // `guard.SetRelayedConnDisconnected` (`conn.go:661-667`).
+                self.relay_plane.relay_lane_disconnected(&key);
                 hilog::emit(&format!(
                     "connector: relay carrier lane detached (offline or relay changed)|peer={}|relay={}",
                     pid, via
@@ -4037,15 +4158,32 @@ impl RelayCarrier {
     /// lock (attach_client / shutdown): the `_lifecycle` guard documents and
     /// enforces that the section is mutually exclusive with the lane-open
     /// commit.
+    ///
+    /// THE all-lanes detach choke point — relay down (the pump's fail-closed
+    /// arm), relay-URL swap / client re-arm ([`RelayCarrier::attach_client`]),
+    /// management revoking the relay and teardown all pass through here. Every
+    /// lane really removed is reported to the ICE plane as a per-peer relay
+    /// disconnect (upstream: each peer's relay conn ends → `onRelayDisconnected`
+    /// → `guard.SetRelayedConnDisconnected()`, `conn.go:661-667`): a lane that
+    /// vanishes without the guard's reset would leave a peer parked on the
+    /// hourly budget (or, if ICE is up, keep offering on the timeout backoff)
+    /// while the relay side already changed. The producer call is made AFTER
+    /// the `attached` leaf is released and before the lifecycle guard is
+    /// dropped — `lifecycle` → bridge leaf, the documented order.
     fn detach_all_locked(&self, _lifecycle: &MutexGuard<'_, bool>) {
-        let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
-        if attached.is_empty() {
-            return;
-        }
-        for (key, _) in attached.drain() {
-            self.wg.detach_carrier(&key);
+        let keys: Vec<String> = {
+            let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+            if attached.is_empty() {
+                return;
+            }
+            attached.drain().map(|(key, _)| key).collect()
+        };
+        for key in &keys {
+            self.wg.detach_carrier(key);
             self.bump(|s| s.detach_ok += 1);
         }
+        // 上游 `conn.go:663-667`（每个 per-peer conn 的 relay 断连）。
+        self.relay_plane.relay_lanes_disconnected(&keys);
         hilog::emit("connector: relay carrier lanes detached");
     }
 
@@ -4144,6 +4282,11 @@ impl RelayCarrier {
         let foreign: Vec<(String, ForeignRelayEntry)> =
             self.foreign.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
         drop(lifecycle);
+        // Disarmed: the shared relay transport is down for the ICE plane and
+        // the local relay service is gone (nothing can open a lane past this
+        // point either).
+        self.relay_plane.set_transport_up(false);
+        self.relay_plane.set_relay_available(false);
         for (url, entry) in foreign {
             self.retire_foreign(&url, entry, "teardown");
         }
@@ -4165,15 +4308,26 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
         else {
+            carrier.relay_plane.set_transport_up(false);
+            carrier.relay_plane.set_relay_available(false);
             carrier.abort_pending_lanes();
             return;
         };
         match client.state() {
             crate::relay_client::RelayState::Dead => {
+                // Permanently stopped (management revoked the relay / teardown):
+                // the local relay service is gone — unlike a transient outage,
+                // which leaves `relay_available` true.
+                carrier.relay_plane.set_transport_up(false);
+                carrier.relay_plane.set_relay_available(false);
                 carrier.abort_pending_lanes();
                 return;
             }
             crate::relay_client::RelayState::Ready => {
+                // The shared relay transport is up (upstream `relayManager.
+                // Ready()`, worker_relay.go:104-106) — the guard's
+                // `relayTransportConnected` input (conn.go:852).
+                carrier.relay_plane.set_transport_up(true);
                 // upstream client.go:787-807: the peer the server declared
                 // offline loses its relay conn NOW (the presence callback),
                 // not at the next offer.
@@ -4185,6 +4339,7 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
             // offer can open one (upstream worker_relay.go:53-57 logs and
             // returns) — outstanding requests die with the outage.
             _ => {
+                carrier.relay_plane.set_transport_up(false);
                 carrier.detach_all();
                 carrier.drop_lane_requests();
             }
@@ -5631,6 +5786,12 @@ fn route_signal_message(
             }
         }
         if let Some(carrier) = carrier {
+            // Upstream `WorkerRelay.OnNewOffer` (worker_relay.go:47-53) records
+            // the remote's relay support on EVERY received OFFER/ANSWER —
+            // true with a relay address, false without — and the ICE guard
+            // classifies on that fact (`conn.go:849`). Recorded BEFORE the
+            // lane request, in the same upstream entry point.
+            carrier.note_remote_relay_support(&m.from_key, advertised.is_some());
             carrier.request_lane(&m.from_key);
         }
     }
@@ -6028,6 +6189,10 @@ impl ConnectorHandle {
                     std::sync::Arc::new(std::sync::Mutex::new(None));
                 orch.lock_poison().set_ice_mux(mux_slot.clone());
                 ice_mux = Some(mux_slot);
+                // ALIGN guard (0.0.28): the ICE plane's relay input — the SAME
+                // bridge the relay carrier produces into (per-peer disconnect
+                // events, shared transport state, the remote's relay support).
+                orch.lock_poison().set_relay_plane(shared.relay_plane.clone());
                 orch
             }
         };
@@ -13766,6 +13931,457 @@ mod tests {
         assert_eq!(carrier.lane_count(), 1);
         assert_eq!(carrier.stats().attach_ok, 1);
 
+        carrier.shutdown();
+    }
+
+    // -------------------------------------------------------------------
+    // ALIGN guard (0.0.28) — relay 平面 → ICE 平面
+    // -------------------------------------------------------------------
+    //
+    // 上游把 relay 断连复位与 relay 状态分类都做在 per-peer `Conn` 上
+    // （`conn.go:661-667` / `:848-858`）；本仓两条所有权链之间走
+    // [`RelayPlaneLink`]（事件队列 + 两个状态输入）。下面这些用例驱动的是
+    // **真实**的 carrier / pump / relay client（同一个 fake relay server），
+    // 不是重写的桩。
+
+    /// 模拟 WG 设备的承载表：attach / detach / 读都在**同一把锁**下——正是
+    /// ICE 平面在持自己的编排锁时经 `carrier_attached` 取的那把「WG 设备锁」。
+    #[derive(Default)]
+    struct GuardSeamWg {
+        carriers: Mutex<Vec<String>>,
+    }
+
+    impl WgPeerApplier for GuardSeamWg {
+        fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear(&self) {}
+        fn carrier_capable(&self) -> bool {
+            true
+        }
+        fn attach_carrier(
+            &self,
+            pub_key_b64: &str,
+            _carrier: std::sync::Arc<dyn crate::wg_device::WgEgressCarrier>,
+        ) -> Result<(), String> {
+            let mut carriers = self.carriers.lock().unwrap_or_else(PoisonError::into_inner);
+            if !carriers.iter().any(|k| k == pub_key_b64) {
+                carriers.push(pub_key_b64.to_string());
+            }
+            Ok(())
+        }
+        fn detach_carrier(&self, pub_key_b64: &str) {
+            self.carriers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|k| k != pub_key_b64);
+        }
+        fn carrier_attached(&self, pub_key_b64: &str) -> bool {
+            self.carriers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|k| k == pub_key_b64)
+        }
+    }
+
+    /// ALIGN guard 现场：真实生产 relay 路径（fake relay server + 真 relay
+    /// client + 真 carrier pump）跑在一条**显式**的 relay 平面 → ICE 平面桥上，
+    /// WG seam 真的持有挂上的承载。
+    async fn relay_guard_fixture() -> (
+        RelayTestServer,
+        std::sync::Arc<GuardSeamWg>,
+        std::sync::Arc<RelayCarrier>,
+        std::sync::Arc<RelayPlaneLink>,
+        crate::relay_client::RelayClient,
+    ) {
+        let server = RelayTestServer::start(TestServerConfig::default())
+            .await
+            .expect("fake relay server");
+        let unix_base: u64 = 1_800_000_000;
+        let token = relay_fabricated_token(unix_base + 86_400);
+        let clock = std::sync::Arc::new(crate::relay_client::VirtualClock::new(unix_base));
+        let pub_self = relay_lane_key(0xC3);
+        let client = crate::relay_client::RelayClient::start(
+            crate::relay_client::RelayClientConfig::new(
+                &[format!("rel://127.0.0.1:{}", server.addr().port())],
+                &pub_self,
+                token,
+            )
+            .expect("relay config")
+            .with_clock(clock.clone())
+            .with_dialer(std::sync::Arc::new(crate::relay_client::TcpDialer)),
+        )
+        .expect("relay client starts");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || client.state() == RelayState::Ready)
+                .await,
+            "relay client must become Ready against the fake server"
+        );
+        let wg = std::sync::Arc::new(GuardSeamWg::default());
+        let link = RelayPlaneLink::new();
+        let carrier = RelayCarrier::new_shared(
+            wg.clone() as std::sync::Arc<dyn WgPeerApplier>,
+            std::sync::Arc::new(Mutex::new(HashMap::new())),
+            link.clone(),
+        );
+        // Production arming order (relay_carrier_client_started).
+        carrier.attach_client(client.clone());
+        (server, wg, carrier, link, client)
+    }
+
+    /// relay 平面的**每一个**生产 detach 点都向 ICE 平面报一条 per-peer 断连
+    /// （上游：每个 per-peer conn 结束 → `guard.SetRelayedConnDisconnected()`，
+    /// `conn.go:661-667`），并把共享传输状态（`relayManager.Ready()`）与远端的
+    /// relay 支持（`WorkerRelay.OnNewOffer`，worker_relay.go:47-53）发布出去——
+    /// 后两者正是 `evalConnStatus`（`conn.go:849-852`）的分类输入。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_plane_notifies_the_ice_plane_on_every_lane_detach() {
+        let (server, wg, carrier, link, client) = relay_guard_fixture().await;
+        let pub_online = relay_lane_key(0xA1);
+        let pid_online = PeerId::from_wg_pubkey_string(&pub_online);
+        let _online =
+            relay_remote(&server, &pid_online, &relay_fabricated_token(1_800_003_600)).await;
+
+        assert!(
+            link.transport_up(),
+            "the armed Ready client publishes the shared transport state"
+        );
+        assert!(
+            link.relay_available(),
+            "an armed carrier publishes the local relay service (upstream HasRelayAddress)"
+        );
+        assert!(!link.peer_uses_relay(&pub_online), "no OFFER/ANSWER seen yet");
+
+        carrier.set_peers(&[pub_online.clone()]);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+        // The upstream `OnNewOffer` bookkeeping: an OFFER/ANSWER carrying a
+        // relay address marks the peer as relay-using (sticky).
+        carrier.note_remote_relay_support(&pub_online, true);
+        assert!(link.peer_uses_relay(&pub_online));
+        carrier.request_lane(&pub_online);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.lane_count() == 1).await,
+            "the requested lane attaches (stats={:?})",
+            carrier.stats()
+        );
+        assert!(wg.carrier_attached(&pub_online), "the WG seam really holds the lane");
+
+        // (1) relay down / management revoked: `detach_all` (the pump's
+        //     fail-closed arm and the sync path's revoke arm) reports the peer.
+        carrier.detach_all();
+        assert_eq!(link.take_relay_disconnects(), vec![pub_online.clone()]);
+        assert!(!wg.carrier_attached(&pub_online), "the seam lost the lane");
+
+        // (2) the relay CLIENT is swapped / re-armed (upstream relay
+        //     reconnect): every lane closes and every peer is reported.
+        carrier.request_lane(&pub_online);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.lane_count() == 1).await,
+            "the lane re-opens (stats={:?})",
+            carrier.stats()
+        );
+        carrier.attach_client(client.clone());
+        assert_eq!(
+            link.take_relay_disconnects(),
+            vec![pub_online.clone()],
+            "re-arming the relay client closes the lane and reports it"
+        );
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+
+        // (3) the peer leaves the map: the lane is detached, but no per-peer
+        //     guard is left to reset (upstream destroys the whole `Conn`) — no
+        //     event, and the sticky relay support goes with the peer.
+        carrier.request_lane(&pub_online);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.lane_count() == 1).await,
+            "the lane re-opens again (stats={:?})",
+            carrier.stats()
+        );
+        carrier.set_peers(&[]);
+        assert!(
+            link.take_relay_disconnects().is_empty(),
+            "a departed peer leaves no guard reset behind"
+        );
+        assert!(!wg.carrier_attached(&pub_online));
+        assert!(
+            !link.peer_uses_relay(&pub_online),
+            "the departed peer's sticky relay support goes with it"
+        );
+
+        // (4) every OFFER/ANSWER re-evaluates the remote's support (a frame
+        //     without a relay address clears it), and a key outside the lane
+        //     universe is refused (upstream: no `Conn`, no `WorkerRelay`).
+        carrier.set_peers(&[pub_online.clone()]);
+        carrier.note_remote_relay_support(&pub_online, true);
+        assert!(link.peer_uses_relay(&pub_online));
+        carrier.note_remote_relay_support(&pub_online, false);
+        assert!(
+            !link.peer_uses_relay(&pub_online),
+            "an OFFER without a relay address clears the support"
+        );
+        let unknown = relay_lane_key(0x5A);
+        carrier.note_remote_relay_support(&unknown, true);
+        assert!(!link.peer_uses_relay(&unknown));
+
+        carrier.shutdown();
+        assert!(!link.transport_up(), "teardown disarms the shared transport");
+        assert!(
+            !link.relay_available(),
+            "teardown leaves no local relay service behind"
+        );
+    }
+
+    /// ALIGN guard（0.0.28）锁序压力：relay 平面的生命周期转换（客户端换端
+    /// 关掉所有承载、`detach_all`、网络图替换、lane 请求）与**真实 ICE pump**
+    /// （分类在自己的编排锁下读 `carrier_attached`）及状态读者并发跑。
+    ///
+    /// relay→ICE 的输入只走 [`RelayPlaneLink`] 的纯叶锁——生产者**绝不**回调
+    /// 编排，所以 carrier 的 `lifecycle`/`attached`/WG 设备锁与编排锁之间不
+    /// 存在回环。若将来有人把 detach 路径改成「持 WG 设备锁时进编排锁」，
+    /// 这些 join 会挂住，下面的保险丝会让用例失败而不是静默通过。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_plane_churn_and_the_ice_pump_share_no_lock_cycle() {
+        let (server, wg, carrier, link, client) = relay_guard_fixture().await;
+        let rt = tokio::runtime::Handle::current();
+        let pub_a = relay_lane_key(0xA1);
+        let pub_b = relay_lane_key(0xB2);
+        let _remote_a = relay_remote(
+            &server,
+            &PeerId::from_wg_pubkey_string(&pub_a),
+            &relay_fabricated_token(1_800_003_600),
+        )
+        .await;
+        let _remote_b = relay_remote(
+            &server,
+            &PeerId::from_wg_pubkey_string(&pub_b),
+            &relay_fabricated_token(1_800_003_600),
+        )
+        .await;
+        carrier.set_peers(&[pub_a.clone(), pub_b.clone()]);
+        carrier.ensure_pump(&rt);
+
+        // The ICE plane over the SAME bridge and the SAME WG seam.
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: std::sync::Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: std::sync::Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: std::sync::Arc::new(LoggingSignalExchange::default()),
+            wg: wg.clone() as std::sync::Arc<dyn WgPeerApplier>,
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        // Deterministic gather: the stress targets the LOCK interactions, not
+        // socket supply — no extra gather thread per due beat.
+        orch.set_gather_exec(std::sync::Arc::new(crate::peer_conn::InlineGatherExec));
+        orch.set_relay_plane(link.clone());
+        orch.set_peers(&[pub_a.clone(), pub_b.clone()]);
+        orch.set_signal_ready(true);
+        let orch = std::sync::Arc::new(Mutex::new(orch));
+
+        // Enough rounds for the four threads to overlap on every forbidden
+        // lock pair, while keeping this test's real-IO / log footprint tiny
+        // (the whole suite shares ONE test binary).
+        const ROUNDS: usize = 12;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut threads = Vec::new();
+
+        // (1) the real ICE pump.
+        {
+            let (orch, stop, done) = (orch.clone(), stop.clone(), finished.clone());
+            threads.push(std::thread::spawn(move || {
+                let mut now = 0u64;
+                for _ in 0..ROUNDS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    now += 10;
+                    let _ = orch.lock().unwrap_or_else(PoisonError::into_inner).run_once(now);
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        // (2) the relay plane's own churn (detach / map replacement / requests)
+        //     + the bridge's producer side.
+        {
+            let (carrier, link, stop, done) =
+                (carrier.clone(), link.clone(), stop.clone(), finished.clone());
+            let (a, b) = (pub_a.clone(), pub_b.clone());
+            threads.push(std::thread::spawn(move || {
+                for round in 0..ROUNDS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    carrier.detach_all();
+                    carrier.set_peers(&[a.clone(), b.clone()]);
+                    link.set_remote_relay_support(&a, true);
+                    link.set_relay_available(true);
+                    link.set_transport_up(round % 2 == 0);
+                    carrier.request_lane(&a);
+                    carrier.request_lane(&b);
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        // (3) relay client re-arm (relay reconnect closing all lanes).
+        {
+            let (carrier, client, rt, stop, done) =
+                (carrier.clone(), client.clone(), rt.clone(), stop.clone(), finished.clone());
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    carrier.attach_client(client.clone());
+                    carrier.ensure_pump(&rt);
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        // (4) status readers (the non-blocking carrier probes + the bridge).
+        {
+            let (carrier, link, orch, stop, done) =
+                (carrier.clone(), link.clone(), orch.clone(), stop.clone(), finished.clone());
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let _ = carrier.lane_count_try();
+                    let _ = carrier.peer_relays();
+                    let _ = carrier.stats();
+                    let _ = link.transport_up();
+                    let _ = link.take_relay_disconnects();
+                    let _ = orch.lock().unwrap_or_else(PoisonError::into_inner).summary();
+                    std::thread::yield_now();
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        // Bounded completion: a lock cycle fails on the fuse (and the stop flag
+        // releases any survivor instead of hanging the harness forever).
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while finished.load(Ordering::SeqCst) < 4 {
+            if Instant::now() >= deadline {
+                stop.store(true, Ordering::Relaxed);
+                panic!(
+                    "lock cycle suspected: relay-plane churn + ICE pump did not finish \
+                     within the fuse (stats={:?})",
+                    carrier.stats()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for t in threads {
+            let _ = t.join();
+        }
+        carrier.shutdown();
+    }
+
+    /// 定序熵源（与 peer_conn 的 guard 用例同法）：钉住每 peer 的 timeout 与
+    /// 每跳的 ±10% 抖动，才能逐值断言 800 ms。
+    struct FixedGuardRng(f64);
+    impl crate::backoff::Rng for FixedGuardRng {
+        fn next_uniform(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    /// **端到端**（真 carrier + 真 carrier pump + 真编排）：relay 平面卸下一条
+    /// 承载 → 事件经**同一枚** [`RelayPlaneLink`]（生产构造里
+    /// `ConnectorShared::relay_plane` 同时交给 carrier 与编排）到达 ICE 泵 →
+    /// 该 peer 的 guard 复位到 800 ms 且预算归零——上游
+    /// `conn.go:661-667` → `guard.go:141-146`。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_lane_detach_resets_the_orchestrator_guard_through_the_shared_bridge() {
+        let (server, wg, carrier, link, _client) = relay_guard_fixture().await;
+        let pub_online = relay_lane_key(0xA1);
+        let pid_online = PeerId::from_wg_pubkey_string(&pub_online);
+        let _online =
+            relay_remote(&server, &pid_online, &relay_fabricated_token(1_800_003_600)).await;
+
+        let mut deps_orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: std::sync::Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: std::sync::Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: std::sync::Arc::new(LoggingSignalExchange::default()),
+            wg: wg.clone() as std::sync::Arc<dyn WgPeerApplier>,
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        deps_orch.set_gather_exec(std::sync::Arc::new(crate::peer_conn::InlineGatherExec));
+        deps_orch.set_guard_rng(Box::new(FixedGuardRng(0.5)));
+        deps_orch.set_relay_plane(link.clone());
+        deps_orch.set_peers(&[pub_online.clone()]);
+        deps_orch.set_signal_ready(true);
+        let orch = std::sync::Arc::new(Mutex::new(deps_orch));
+
+        // The production relay path brings the lane up for the SAME peer.
+        carrier.set_peers(&[pub_online.clone()]);
+        carrier.note_remote_relay_support(&pub_online, true);
+        carrier.request_lane(&pub_online);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.lane_count() == 1).await,
+            "the lane attaches (stats={:?})",
+            carrier.stats()
+        );
+        assert!(wg.carrier_attached(&pub_online));
+
+        // Park the peer on the hourly budget: relay up + ICE down = partial.
+        // The classification/budget/schedule arithmetic is pinned in
+        // `crate::peer_conn`'s own guard tests (full field access); here the
+        // point is that the REAL relay plane's detach reaches that guard
+        // through the SHARED bridge — observed on the public retry token.
+        let mut at = 0u64;
+        for _ in 0..120 {
+            at += 1_000;
+            let _ = orch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .run_once(at);
+            let mode = orch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .peer_ice_detail(&pub_online)
+                .expect("peer")
+                .ice_retry;
+            if mode == crate::peer_conn::IceRetryMode::Hourly {
+                break;
+            }
+        }
+        assert_eq!(
+            orch.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .peer_ice_detail(&pub_online)
+                .expect("peer")
+                .ice_retry,
+            crate::peer_conn::IceRetryMode::Hourly,
+            "the partial budget parks the peer on the hourly ticker"
+        );
+
+        // The RELAY plane really detaches the lane (relay down / revoked).
+        carrier.detach_all();
+        assert!(!wg.carrier_attached(&pub_online));
+        let _ = orch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .run_once(at + 10);
+        assert_eq!(
+            orch.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .peer_ice_detail(&pub_online)
+                .expect("peer")
+                .ice_retry,
+            crate::peer_conn::IceRetryMode::Fast,
+            "the real lane detach resets the hourly mode through the shared bridge"
+        );
         carrier.shutdown();
     }
 
