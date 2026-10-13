@@ -1799,6 +1799,16 @@ mod tests {
              ms=9 purpose=dns reason=none result=protected",
             "ts=2026-10-13T06:51:47.727Z pid=41859 role=vpn event=vpn_tunnel_mtu \
              mtu=1280 source=default stage=create",
+            // Cross-branch (fix/outage x the evidence lane): the physical-recovery
+            // abort is a SHELL lifecycle marker like any other — it rides
+            // diagLifecycleMarker's `detail=VPN_…` shape, so it is admitted by
+            // the `VPN_` substring above and needs no PRIORITY_MARKERS entry of
+            // its own. Neither branch could pin this alone (the marker only
+            // exists in fix/outage, the lane only in this branch); if
+            // diagLifecycleMarker ever stops emitting `detail=VPN_…`, the
+            // recovery's only evidence of an abort silently loses priority.
+            "ts=2026-10-13T06:51:47.651Z pid=41859 role=vpn \
+             event=vpn_network_recovery_abort detail=VPN_NETWORK_RECOVERY_ABORT:stage=protected-dns",
             "N6_WG_DEVICE|session-established|peer=t7tldQA3",
             "N6_WG_DEVICE|session-expired|peer=t7tldQA3",
             "N13_WG|carrier-attach|kind=relay|replaced=false|peer=t7tldQA3",
