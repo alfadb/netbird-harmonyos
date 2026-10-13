@@ -61,13 +61,17 @@ const UTIL = 'data:text/javascript,' + encodeURIComponent(
 
 // 0.0.21: the real adapter registers its three long-task callbacks here; the test
 // emits through the SAME callbacks the app would get from the platform.
+// 0.0.29: startBackgroundRunning also RECORDS the requested background modes, so
+// the device-dependent type choice (taskKeeping on 2in1, dataTransfer elsewhere)
+// is asserted against the shipped request path instead of a source grep.
 const BTM = 'data:text/javascript,' + encodeURIComponent(
   'const s = () => globalThis.__NB_KA;\n' +
   'const api = {\n' +
   ' on(type, cb) { s().btm[type] = cb; },\n' +
   ' off(type, cb) { if (s().btm[type] === cb) { delete s().btm[type]; } },\n' +
   ' async getAllContinuousTasks() { return s().btmTasks; },\n' +
-  ' async startBackgroundRunning() { return s().btmStartResult; },\n' +
+  ' async startBackgroundRunning(context, modes) { s().btmRequestedModes = modes;\n' +
+  '  return s().btmStartResult; },\n' +
   ' async stopBackgroundRunning() { s().btmStopped = s().btmStopped + 1; },\n' +
   ' ContinuousTaskSuspendReason: { SYSTEM_SUSPEND_SYSTEM_LOAD_WARNING: 12 }\n' +
   '};\nexport default api;');
@@ -89,6 +93,14 @@ const WANT_AGENT = 'data:text/javascript,' + encodeURIComponent(
   ' async getWantAgent() { return {}; }\n' +
   '};\nexport default api;');
 
+// 0.0.29: the device type decides which borrowed background mode is requested, so
+// the test drives it instead of hard-coding one. Read on EVERY access: the test
+// switches the device between two calls.
+const DEVICE_INFO = 'data:text/javascript,' + encodeURIComponent(
+  'const api = {\n' +
+  ' get deviceType() { return globalThis.__NB_KA.deviceType; }\n' +
+  '};\nexport default api;');
+
 // Type-only import targets (node keeps the statement, so they must resolve) and
 // the logging seam: every line is kept for the test to inspect, nothing is printed.
 const EMPTY = 'data:text/javascript,export default {};';
@@ -105,6 +117,7 @@ const STUBS = new Map([
   ['@ohos.resourceschedule.backgroundTaskManager', BTM],
   ['@ohos.notificationManager', NOTIFICATION],
   ['@ohos.app.ability.wantAgent', WANT_AGENT],
+  ['@ohos.deviceInfo', DEVICE_INFO],
   ['@ohos.app.ability.Want', EMPTY],
   ['@ohos.app.ability.common', EMPTY],
   ['@ohos.hilog', HILOG]

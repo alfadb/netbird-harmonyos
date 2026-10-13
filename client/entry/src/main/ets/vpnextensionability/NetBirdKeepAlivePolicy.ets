@@ -176,6 +176,30 @@ export const KEEP_ALIVE_NOTIFICATION_TITLE: string = 'NetBird VPN 已连接';
 // invite SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE).
 export const KEEP_ALIVE_NOTIFICATION_RECONNECTING: string = '正在重新连接…';
 
+// 2026-10-13（0.0.29）PC 长时任务类型: the borrowed continuous-task type is
+// DEVICE-DEPENDENT. On PC/2in1 the right type is taskKeeping（计算任务；官方文档原文
+// 「对 PC/2in1 设备，应用不需要申请 ACL 权限」）——它没有 DATA_TRANSFER 的「超过 10
+// 分钟不更新进度即取消」和「低速取消」两条义务，语义也更贴合常驻的 VPN 客户端。其他设备
+// 上 taskKeeping 需要 ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM（无 ACL 拿不到），
+// 所以手机继续按原样借用 dataTransfer。两个字面量都必须在 module.json5 的
+// backgroundModes 里声明，本函数只负责选。
+export const KEEP_ALIVE_MODE_TASK_KEEPING: string = 'taskKeeping';
+export const KEEP_ALIVE_MODE_DATA_TRANSFER: string = 'dataTransfer';
+
+// 未知/空 deviceType 不算 2in1：回退到本应用一直在用、清单里也一直声明的那一种。
+export function keepAliveModeFor(deviceType: string): string {
+  return deviceType === '2in1' ? KEEP_ALIVE_MODE_TASK_KEEPING : KEEP_ALIVE_MODE_DATA_TRANSFER;
+}
+
+// 本应用可能申请的全部类型。「认领已存在的任务」这条路径必须认识每一种，否则类型/设备
+// 变化前建立的任务会被再申请一次（平台把重复申请当滥用）。
+export function isKeepAliveMode(mode: string): boolean {
+  const normalised: string = mode.toLowerCase();
+  return normalised === KEEP_ALIVE_MODE_TASK_KEEPING.toLowerCase() ||
+    normalised === KEEP_ALIVE_MODE_DATA_TRANSFER.toLowerCase();
+}
+
+
 // 0.0.21（挂起长窗口后的恢复复查）：两拍之间隔了这么久，只可能意味着这个进程有一段
 // 时间根本没在跑——平台可以挂起整个 UI 进程，0.0.20 的真机数据里这一次是 7362 s（期间
 // 2 s 轮询与 30 s 实况窗刷新整段停摆，VPN 在 17:08 被相机清理后 1 h16 m 无人重连，长时

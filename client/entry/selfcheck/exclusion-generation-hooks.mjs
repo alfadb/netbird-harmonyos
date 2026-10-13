@@ -1064,7 +1064,14 @@ const SHIMS = {
   // pure module byte-identically is what keeps THIS hook a resolver, never a
   // re-implementation, of the route rules.
   '../routes/NetBirdRouteStore': 'NetBirdRouteStore.ts',
-  './NetBirdRoutePreferences': 'NetBirdRoutePreferences.ts'
+  './NetBirdRoutePreferences': 'NetBirdRoutePreferences.ts',
+  // 2026-10-13 (0.0.29): the REAL EntryAbility now starts the PC status-bar tray
+  // (2in1 only) and reads the shared explicit-quit flag. Neither takes any part in
+  // route-exclusion generation, and the tray's platform module needs the PC-only
+  // status-bar kit this host fixture cannot load, so both ability-side specifiers
+  // are bridged by no-op shims carrying the same named exports.
+  '../tray/NetBirdTrayService': 'tray-NetBirdTrayService.shim.ts',
+  '../tray/NetBirdQuitFlow': 'tray-NetBirdQuitFlow.shim.ts'
 };
 
 export function resolve(specifier, context, next) {

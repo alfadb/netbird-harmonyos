@@ -13,6 +13,13 @@ import { appendSystemEvent, event as diagnosticsEvent, start as startDiagnostics
 import type { DiagFields } from '../vpnextensionability/NetBirdDiagnostics';
 import { start as startSystemEvents,
   stop as stopSystemEvents } from '../vpnextensionability/NetBirdSystemEvents';
+// 2026-10-13 PC 托盘（0.0.29）: the UI-process status-bar icon (2in1 only) and the
+// shared explicit-quit flag. Both modules are fail-soft by construction — on a
+// phone, on a ROM without the PC status-bar capability, or on a device where the
+// kit's runtime module does not exist, startTray() answers false after one
+// diagnostic line and nothing else in this ability changes.
+import { startTray } from '../tray/NetBirdTrayService';
+import { explicitQuitInProgress } from '../tray/NetBirdQuitFlow';
 // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：借用 DATA_TRANSFER 长时任务让整个应用
 // 的进程不被挂起。长时任务只能由 UIAbility 申请，所以注册与注销都落在本 ability 的生命
 // 周期上；平台调用全部在 NetBirdKeepAliveService 里，本文件只做接线。
@@ -167,6 +174,14 @@ export default class EntryAbility extends UIAbility {
     // 打开，取消/挂起/激活事件（以及注册失败）都有落点。注册本身不改任何状态：要不要
     // 持有任务由纯策略按页面每 2 s 上报的事实决定，本调用只建立事件通道。
     registerKeepAlive(this.context);
+    // 2026-10-13 PC 托盘（0.0.29）:接入状态栏图标（仅 2in1）。本调用只做设备/系统能力
+    // 自检并把图标挂上去；连接状态由页面在它已有的 2 s 轮询里推进来，托盘本身不读任何
+    // 状态文档、不新增定时器。手机/平板/旧 ROM 上它会自己关掉并只留一条诊断。
+    startTray(this.context).catch((error: Error): void => {
+      // startTray 自身已经把每一种失败都记成一条 ui_tray；这里只是不让它的 Promise 逃逸。
+      hilog.warn(DOMAIN, TAG, 'ENTRY_TRAY_START_FAILED|code=%{public}s',
+        String((error as BusinessFailure).code ?? 'none'));
+    });
     hilog.info(DOMAIN, TAG, 'ENTRY_ONCREATE|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
     this.recordLifecycle('onCreate');
     // LaunchParam, SDK fields by their exact names: `lastExitReason` is the
@@ -329,6 +344,9 @@ export default class EntryAbility extends UIAbility {
     // Theme (2026-10-09): remembered for onConfigurationUpdate, which is handed
     // no stage. Nothing else about this callback changes.
     this.mainWindowStage = windowStage;
+    // 2026-10-13 关闭到后台（0.0.29）—— registered BEFORE loadContent so the X
+    // button is covered from the first frame on.
+    this.registerCloseToBackground(windowStage);
     windowStage.loadContent('pages/Index', (error) => {
       if (error.code) {
         hilog.error(DOMAIN, TAG, 'ENTRY_LOAD_REJECTED|code=%{public}d', error.code);
@@ -339,6 +357,126 @@ export default class EntryAbility extends UIAbility {
       // base/dark color resources the just-loaded page uses.
       this.applySystemBarTheme(windowStage);
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-13 关闭到后台（0.0.29）—— "X hides the app, it does not quit it".
+  //
+  // THE UPSTREAM CONTRACT (client/ui/main.go:293-299, :382-388): the desktop
+  // client sets DisableQuitOnLastWindowClosed (macOS:
+  // ApplicationShouldTerminateAfterLastWindowClosed=false) and a WindowClosing
+  // hook that simply forgets the main window — the app keeps running, the tunnel
+  // is a separate daemon and is untouched. HarmonyOS has no "hide" for a main
+  // window (no Window.hide()), so the equivalent is: REFUSE the close and
+  // MINIMISE the window ourselves. The ability, the UI process, the page, its
+  // 2 s tick, the continuous task, the notification and the :vpn extension all
+  // stay exactly as they were; the app stays in the Dock and comes back when it
+  // is clicked (onForeground / onPageShow).
+  //
+  // THE API: windowStage.on('windowStageClose', cb) — @ohos.window.d.ts:9610
+  // (off :9630), API 14, SystemCapability.Window.SessionManager, no permission.
+  // The callback's boolean return value is the contract: true = DO NOT close the
+  // main window, false = close. The d.ts declares Callback<void> because the type
+  // system has no room for the return value (documented in the SDK docs);
+  // windowWillClose (same WindowStage, :6154) is the async form of the same
+  // interception and is deliberately NOT registered — when both are registered
+  // only windowWillClose is answered.
+  //
+  // REGISTRATION MAY FAIL: before HarmonyOS 6.1 the call answers error 801 on a
+  // device that is not in free-window mode (and on a ROM without the syscap at
+  // all), so it is try/caught and the failure is ONE diagnostic line. The
+  // fallback is onPrepareToTerminate() below (needs
+  // ohos.permission.PREPARE_APP_TERMINATE, normal/system_grant, declared in
+  // module.json5) — note the platform's own rule that once windowStageClose IS
+  // registered, onPrepareToTerminate is no longer called for the X button.
+  // ---------------------------------------------------------------------------
+  private registerCloseToBackground(windowStage: window.WindowStage): void {
+    try {
+      windowStage.on('windowStageClose', (): boolean => {
+        // One line per path, in the existing diagnostic shape: `stage` is the
+        // callback's own name.
+        this.recordLifecycle('windowStageClose');
+        this.minimizeOnClose(windowStage);
+        // true = do not close the main window.
+        return true;
+      });
+      hilog.info(DOMAIN, TAG, 'UI_CLOSE_GUARD|mode=windowStageClose|result=registered');
+    } catch (error) {
+      // 801 on a non-free-window device, or the API missing on an old ROM: the
+      // page keeps its pre-0.0.29 behaviour for the X button, and
+      // onPrepareToTerminate() is the fallback.
+      const code: number | undefined = (error as BusinessFailure).code;
+      hilog.warn(DOMAIN, TAG, 'UI_CLOSE_GUARD|mode=windowStageClose|result=error|code=%{public}s',
+        String(code ?? 'none'));
+      this.recordCloseGuard('windowStageClose-unavailable',
+        code === undefined ? 'none' : String(code));
+    }
+  }
+
+  // The X really is a "hide to background": minimise the main window. Failure is
+  // contained (the window simply stays open, which is the pre-0.0.29 behaviour)
+  // and reported with the platform's own code.
+  private minimizeOnClose(windowStage: window.WindowStage): void {
+    try {
+      windowStage.getMainWindowSync().minimize().then((): void => {
+        hilog.info(DOMAIN, TAG, 'UI_CLOSE_MINIMIZE|result=ok|note=background-kept');
+        this.recordCloseGuard('minimize', 'ok');
+      }).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'UI_CLOSE_MINIMIZE|result=error|code=%{public}s',
+          String((error as BusinessFailure).code ?? 'none'));
+        this.recordCloseGuard('minimize', String((error as BusinessFailure).code ?? 'none'));
+      });
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'UI_CLOSE_MINIMIZE|result=error|code=%{public}s|note=window-stays-open',
+        String((error as BusinessFailure).code ?? 'none'));
+      this.recordCloseGuard('minimize', String((error as BusinessFailure).code ?? 'none'));
+    }
+  }
+
+  // `ui_close_guard`: which close path ran and what it answered. Both fields are
+  // bounded tokens (a callback name, `ok` or the platform's numeric code) — never
+  // platform text.
+  private recordCloseGuard(path: string, result: string): void {
+    const fields: DiagFields = {};
+    fields['stage'] = path;
+    fields['result'] = result;
+    diagnosticsEvent('ui_close_guard', fields);
+  }
+
+  // 2026-10-13 关闭到后台（0.0.29）—— the FALLBACK guard, and the only place that
+  // knows whether a termination is OUR OWN.
+  //
+  // onPrepareToTerminate(): @ohos.app.ability.UIAbility.d.ts:681, API 10,
+  // @permission ohos.permission.PREPARE_APP_TERMINATE (normal / system_grant —
+  // granted at install, no ACL), executed on 2in1 only. The SDK documents it as
+  // "the user clicks the close button or exits from the dock / system tray", and
+  // returning true CANCELS the termination.
+  //
+  // WHAT IT ANSWERS HERE:
+  //   * false (allow the termination) while THIS process is running the explicit
+  //     quit flow (tray 退出并断开 / 设置 → 退出应用) — the app asked to leave, so
+  //     the guard must not fight it. By that point the flow has already
+  //     disconnected the VPN, released the continuous task and removed the tray
+  //     icon (tray/NetBirdQuitFlow.ets).
+  //   * true (cancel) otherwise. With the X intercepted above this normally never
+  //     runs; it is here for the device where windowStageClose could not be
+  //     registered (801) — and it means the system's auto-generated tray 退出 row
+  //     and a Dock close no longer end the app, which is the price of "close =
+  //     background" and is documented rather than hidden. The exit the user is
+  //     meant to use is the explicit one (tray 退出并断开 / 设置 → 退出应用).
+  //     NOTE the deliberate asymmetry with PLAIN SYSTEM EXIT (force-stop, OOM,
+  //     device shutdown): those paths do not consult this callback at all, and
+  //     their semantics stay pre-0.0.29 — onDestroy's existing cleanup runs and
+  //     the VPN extension process (with a live tunnel) may survive the UI process.
+  onPrepareToTerminate(): boolean {
+    if (explicitQuitInProgress()) {
+      hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=allow|reason=explicit-quit');
+      this.recordCloseGuard('onPrepareToTerminate', 'allow-explicit-quit');
+      return false;
+    }
+    hilog.info(DOMAIN, TAG, 'UI_TERMINATE_GUARD|result=veto|note=close-is-background');
+    this.recordCloseGuard('onPrepareToTerminate', 'veto');
+    return true;
   }
 
   onForeground(): void {

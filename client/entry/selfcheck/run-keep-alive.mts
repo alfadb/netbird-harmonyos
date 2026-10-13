@@ -638,7 +638,8 @@ check('the adapter is the ONLY module importing notificationManager',
 check('the adapter is the ONLY module importing wantAgent',
   JSON.stringify(importersOf('@ohos.app.ability.wantAgent')) === JSON.stringify([SERVICE]));
 check('the adapter starts the task with the array overload that returns the notificationId',
-  SERVICE_TEXT.indexOf('startBackgroundRunning(context, [KEEP_ALIVE_BG_MODE], agent)') >= 0 &&
+  SERVICE_TEXT.indexOf('startBackgroundRunning(context, [mode], agent)') >= 0 &&
+  SERVICE_TEXT.indexOf('const mode: string = requestedBackgroundMode();') >= 0 &&
   SERVICE_TEXT.indexOf('task.notificationId') >= 0 &&
   SERVICE_TEXT.indexOf('task.continuousTaskId') >= 0);
 check('the adapter never tries to update a DATA_TRANSFER task',
@@ -912,16 +913,17 @@ check('onDestroy unregisters and stops the borrowed task before the writer close
   destroyBody.indexOf('unregisterKeepAlive();') < destroyBody.indexOf('stopKeepAlive(') &&
   destroyBody.indexOf('stopKeepAlive(') < destroyBody.indexOf('stopDiagnostics();'));
 
-check('module.json5 declares the borrowed background mode on the UIAbility',
-  /name: 'EntryAbility'[\s\S]*?backgroundModes: \[\s*'dataTransfer'\s*\]/.test(MODULE_JSON5));
+check('module.json5 declares the borrowed background modes on the UIAbility',
+  /name: 'EntryAbility'[\s\S]*?backgroundModes: \[[\s\S]*?'dataTransfer'[\s\S]*?'taskKeeping'[\s\S]*?\]/
+    .test(MODULE_JSON5));
 check('module.json5 asks for the continuous-task permission, inside requestPermissions',
   MODULE_JSON5.indexOf("name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'") >= 0 &&
   MODULE_JSON5.indexOf('requestPermissions') <
-    MODULE_JSON5.indexOf('KEEP_BACKGROUND_RUNNING'));
-check('the version is 28 / 0.0.28 in both profiles',
-  /versionCode: 28/.test(BUILD_PROFILE) && /versionName: '0\.0\.28'/.test(BUILD_PROFILE) &&
-  /versionCode: 28/.test(APP_JSON5) && /versionName: '0\.0\.28'/.test(APP_JSON5) &&
-  BUILD_PROFILE.indexOf("'0.0.27'") < 0 && APP_JSON5.indexOf("'0.0.27'") < 0);
+    MODULE_JSON5.indexOf("name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'"));
+check('the version is 29 / 0.0.29 in both profiles',
+  /versionCode: 29/.test(BUILD_PROFILE) && /versionName: '0\.0\.29'/.test(BUILD_PROFILE) &&
+  /versionCode: 29/.test(APP_JSON5) && /versionName: '0\.0\.29'/.test(APP_JSON5) &&
+  BUILD_PROFILE.indexOf("'0.0.28'") < 0 && APP_JSON5.indexOf("'0.0.28'") < 0);
 
 // ---- D. the platform callbacks and the resume signal (0.0.21) --------------
 //
@@ -946,7 +948,9 @@ try {
   globals['__NB_KA'] = {
     nodeFs: nodeFs, paths: [], shortWrite: false, writeError: null,
     records: [], hilog: [], btm: {}, btmTasks: [], btmStopped: 0,
-    btmStartResult: { notificationId: 5, continuousTaskId: 3 }, published: []
+    btmStartResult: { notificationId: 5, continuousTaskId: 3 }, published: [],
+    // 0.0.29: the borrowed type follows the device, so the test drives it.
+    deviceType: '2in1', btmRequestedModes: []
   };
   const svc = await import(
     pathToFileURL(join(SERVICE_FIXTURES, 'NetBirdKeepAliveService.ts')).href) as
@@ -955,6 +959,9 @@ try {
     records: { name: string; fields: Record<string, unknown> }[];
     hilog: { level: string; tag: string; format: string; args: unknown[] }[];
     btm: Record<string, (info: Record<string, unknown>) => void>;
+    btmTasks: Record<string, unknown>[];
+    btmRequestedModes: unknown[];
+    deviceType: string | undefined;
   };
   const emit = (type: string, info: Record<string, unknown>): void => {
     const callback = ka.btm[type];
@@ -1064,6 +1071,79 @@ try {
       return started === true && ka.records.length === before;
     })(),
     'the claim path or the foreign-task filter did not behave');
+
+  // ---- 0.0.29: the borrowed type follows the DEVICE -------------------------
+  //
+  // Driven through the SHIPPED request path: a FRESH instance of the same staged
+  // adapter (a distinct module URL, so nothing is inherited from the singleton
+  // above) plus the deviceInfo stub, whose deviceType the test switches. What is
+  // asserted is what the adapter asked the platform for — not a source grep.
+  const freshService = async (tag: string): Promise<Record<string, unknown>> =>
+    await import(pathToFileURL(join(SERVICE_FIXTURES, 'NetBirdKeepAliveService.ts')).href +
+      `?${tag}`) as Record<string, unknown>;
+  const startIn = async (mod: Record<string, unknown>): Promise<boolean> => {
+    const start = mod['startKeepAlive'] as (context: object, revision: number,
+      reason: string, status: object) => Promise<boolean>;
+    return await start({ filesDir: SERVICE_FIXTURES }, 0, 'vpn-active',
+      { onlinePeers: 0, peerCount: 0, txBytes: -1, rxBytes: -1 });
+  };
+  check('on 2in1 the adapter requests taskKeeping (the PC-only, ACL-free type)',
+    await (async (): Promise<boolean> => {
+      ka.btmTasks = [];
+      ka.btmRequestedModes = [];
+      ka.deviceType = '2in1';
+      const started: boolean = await startIn(await freshService('pc'));
+      return started === true &&
+        JSON.stringify(ka.btmRequestedModes) === JSON.stringify(['taskKeeping']) &&
+        ka.hilog.some((line): boolean => line.format.indexOf('UI_BG_TASK_STARTED') >= 0 &&
+          line.args.indexOf('taskKeeping') >= 0);
+    })(),
+    JSON.stringify([ka.btmRequestedModes, ka.hilog.slice(-1)]));
+  check('on a phone the adapter keeps borrowing dataTransfer',
+    await (async (): Promise<boolean> => {
+      ka.btmTasks = [];
+      ka.btmRequestedModes = [];
+      ka.deviceType = 'phone';
+      const started: boolean = await startIn(await freshService('phone'));
+      return started === true &&
+        JSON.stringify(ka.btmRequestedModes) === JSON.stringify(['dataTransfer']);
+    })(),
+    JSON.stringify(ka.btmRequestedModes));
+  check('a device that cannot report its type falls back to dataTransfer',
+    await (async (): Promise<boolean> => {
+      ka.btmTasks = [];
+      ka.btmRequestedModes = [];
+      ka.deviceType = undefined;
+      const started: boolean = await startIn(await freshService('unknown'));
+      return started === true &&
+        JSON.stringify(ka.btmRequestedModes) === JSON.stringify(['dataTransfer']);
+    })(),
+    JSON.stringify(ka.btmRequestedModes));
+  check('a task of the OTHER known type is still ADOPTED, never requested twice',
+    await (async (): Promise<boolean> => {
+      // 2in1 device, but the app already holds a dataTransfer task (created
+      // before the type changed): the claim path must recognise it.
+      ka.deviceType = '2in1';
+      ka.btmRequestedModes = [];
+      ka.btmTasks = [{ bundleName: 'cn.alfadb.netbird', backgroundModes: ['dataTransfer'],
+        notificationId: 9, continuousTaskId: 11 }];
+      const started: boolean = await startIn(await freshService('adopt'));
+      return started === true && ka.btmRequestedModes.length === 0 &&
+        ka.records.some((record): boolean => record.name === 'ui_bg_task' &&
+          record.fields['stage'] === 'claim' && record.fields['result'] === 'ok');
+    })(),
+    JSON.stringify([ka.btmRequestedModes, ka.btmTasks]));
+  check('a task of an UNRELATED background mode is still foreign and not adopted',
+    await (async (): Promise<boolean> => {
+      ka.deviceType = '2in1';
+      ka.btmRequestedModes = [];
+      ka.btmTasks = [{ bundleName: 'cn.alfadb.netbird', backgroundModes: ['audioPlayback'],
+        notificationId: 1, continuousTaskId: 2 }];
+      const started: boolean = await startIn(await freshService('foreign'));
+      return started === true &&
+        JSON.stringify(ka.btmRequestedModes) === JSON.stringify(['taskKeeping']);
+    })(),
+    JSON.stringify(ka.btmRequestedModes));
 } catch (error) {
   check(`harness (service) — ${(error as Error).message}`, false);
 }

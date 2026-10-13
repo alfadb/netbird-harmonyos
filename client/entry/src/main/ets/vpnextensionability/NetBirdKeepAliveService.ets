@@ -60,10 +60,12 @@ import notificationManager from '@ohos.notificationManager';
 import wantAgent from '@ohos.app.ability.wantAgent';
 import Want from '@ohos.app.ability.Want';
 import common from '@ohos.app.ability.common';
+import deviceInfo from '@ohos.deviceInfo';
 import hilog from '@ohos.hilog';
 import { event } from './NetBirdDiagnostics';
 import type { DiagFields } from './NetBirdDiagnostics';
-import { KEEP_ALIVE_NOTIFICATION_TITLE, KEEP_ALIVE_RESUME_ACTIVE,
+import { KEEP_ALIVE_MODE_DATA_TRANSFER, KEEP_ALIVE_NOTIFICATION_TITLE,
+  KEEP_ALIVE_RESUME_ACTIVE, isKeepAliveMode, keepAliveModeFor,
   keepAliveNotificationText, sanitizeSuspendMessage } from './NetBirdKeepAlivePolicy';
 import type { KeepAliveCancelEvent, KeepAliveStatus } from './NetBirdKeepAlivePolicy';
 
@@ -71,9 +73,13 @@ const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 const ENTRY_ABILITY_NAME: string = 'EntryAbility';
-// The borrowed continuous-task type (module.json5 backgroundModes must declare
-// the same literal).
-const KEEP_ALIVE_BG_MODE: string = 'dataTransfer';
+// 2026-10-13（0.0.29）: the borrowed continuous-task type is chosen at REQUEST time
+// by the pure policy (keepAliveModeFor) from the device type — taskKeeping on
+// PC/2in1, dataTransfer everywhere else; both literals are declared in
+// module.json5's backgroundModes. KEEP_ALIVE_MODE_FALLBACK is the type this app
+// has always shipped, and it is also what a device that cannot report its type
+// gets.
+const KEEP_ALIVE_MODE_FALLBACK: string = KEEP_ALIVE_MODE_DATA_TRANSFER;
 const KEEP_ALIVE_WANT_REQUEST_CODE: number = 1001;
 // The live-view template the system documents for a progress-carrying
 // notification. `progressValue` stays 0: a tunnel has no completion percentage
@@ -398,21 +404,22 @@ export function takeKeepAliveCancels(): KeepAliveCancelEvent[] {
   return buffered;
 }
 
-// Adopt a DATA_TRANSFER task this app already holds, if there is one.
+// Adopt a continuous task this app already holds, if there is one.
 async function claimExistingTask(context: common.UIAbilityContext): Promise<boolean> {
   try {
     const tasks: backgroundTaskManager.ContinuousTaskInfo[] =
       await backgroundTaskManager.getAllContinuousTasks(context, true);
     for (let i = 0; i < tasks.length; i++) {
       const task: backgroundTaskManager.ContinuousTaskInfo = tasks[i];
-      if (!isDataTransferTask(task)) {
+      if (!isKeepAliveTask(task)) {
         continue;
       }
       service.hasTask = true;
       service.notificationId = task.notificationId;
       service.continuousTaskId = task.continuousTaskId;
-      hilog.info(DOMAIN, TAG, 'UI_BG_TASK_CLAIMED|id=%{public}d|notification=%{public}d',
-        task.continuousTaskId, task.notificationId);
+      hilog.info(DOMAIN, TAG,
+        'UI_BG_TASK_CLAIMED|id=%{public}d|notification=%{public}d|mode=%{public}s',
+        task.continuousTaskId, task.notificationId, taskMode(task));
       return true;
     }
     return false;
@@ -422,11 +429,37 @@ async function claimExistingTask(context: common.UIAbilityContext): Promise<bool
   }
 }
 
-// A task belongs to this module when it is a DATA_TRANSFER task of THIS bundle.
-// The background-mode literal is compared case-insensitively (it is the same
-// string the request used) and the bundle name is only honoured when the
-// platform delivered one.
-function isDataTransferTask(task: backgroundTaskManager.ContinuousTaskInfo): boolean {
+// 2026-10-13（0.0.29）: the type this process would request right now.
+function requestedBackgroundMode(): string {
+  try {
+    return keepAliveModeFor(deviceInfo.deviceType);
+  } catch (error) {
+    return KEEP_ALIVE_MODE_FALLBACK;
+  }
+}
+
+// The mode a task the platform handed us actually carries (first known one), for
+// the log line only.
+function taskMode(task: backgroundTaskManager.ContinuousTaskInfo): string {
+  const modes: string[] | undefined = task.backgroundModes;
+  if (modes === undefined || modes === null) {
+    return 'unknown';
+  }
+  for (let i = 0; i < modes.length; i++) {
+    if (isKeepAliveMode(modes[i])) {
+      return modes[i];
+    }
+  }
+  return 'unknown';
+}
+
+// A task belongs to this module when it is one of THIS app's borrowed keep-alive
+// types of THIS bundle. Since 0.0.29 that is a SET (taskKeeping on 2in1,
+// dataTransfer elsewhere) rather than one literal: a task created before the type
+// changed must still be adopted, never requested a second time. The literals are
+// compared case-insensitively (they are the same strings the requests used) and
+// the bundle name is only honoured when the platform delivered one.
+function isKeepAliveTask(task: backgroundTaskManager.ContinuousTaskInfo): boolean {
   const bundleName: string | undefined = task.bundleName;
   if (bundleName !== undefined && bundleName !== null && bundleName.length > 0 &&
     bundleName !== BUNDLE_NAME) {
@@ -437,7 +470,7 @@ function isDataTransferTask(task: backgroundTaskManager.ContinuousTaskInfo): boo
     return false;
   }
   for (let i = 0; i < modes.length; i++) {
-    if (modes[i].toLowerCase() === KEEP_ALIVE_BG_MODE.toLowerCase()) {
+    if (isKeepAliveMode(modes[i])) {
       return true;
     }
   }
@@ -525,10 +558,14 @@ export async function startKeepAlive(context: common.UIAbilityContext, revision:
       actionFlags: flags
     };
     const agent: object = await wantAgent.getWantAgent(info);
+    // 2026-10-13（0.0.29）: WHICH type is requested is decided here, once, from the
+    // device type — taskKeeping on PC/2in1, dataTransfer elsewhere (both declared
+    // in module.json5). The notification content is unchanged either way.
+    const mode: string = requestedBackgroundMode();
     // The array overload is the ONLY one that returns the system-owned
     // notification id the live-view updates need.
     const task: backgroundTaskManager.ContinuousTaskNotification =
-      await backgroundTaskManager.startBackgroundRunning(context, [KEEP_ALIVE_BG_MODE], agent);
+      await backgroundTaskManager.startBackgroundRunning(context, [mode], agent);
     service.hasTask = true;
     service.notificationId = task.notificationId;
     service.continuousTaskId = task.continuousTaskId === undefined ? -1 : task.continuousTaskId;
@@ -541,8 +578,8 @@ export async function startKeepAlive(context: common.UIAbilityContext, revision:
       return false;
     }
     recordTask(KEEP_ALIVE_STAGE_START, KEEP_ALIVE_RESULT_OK, reason, service.cancelCount);
-    hilog.info(DOMAIN, TAG, 'UI_BG_TASK_STARTED|id=%{public}d|notification=%{public}d',
-      service.continuousTaskId, service.notificationId);
+    hilog.info(DOMAIN, TAG, 'UI_BG_TASK_STARTED|id=%{public}d|notification=%{public}d|mode=%{public}s',
+      service.continuousTaskId, service.notificationId, mode);
     // The task exists from here on: a failed live-view update is its own record
     // and never turns this start into a failure.
     await publishLiveView(context, keepAliveNotificationText(status), reason);

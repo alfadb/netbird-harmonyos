@@ -26,8 +26,18 @@
         // 上唯一可用的保活手段；另一款鸿蒙 VPN 客户端也是这么借的）。业务类型与用途不
         // 完全对应，系统可能在判定违规后取消任务，所以这个功能默认由设置页的开关控制，
         // 系统给出的取消/非法判定一律照做（见 NetBirdKeepAlivePolicy）。
+        //
+        // 2026-10-13（0.0.29）PC 长时任务类型: PC/2in1 上改用 taskKeeping（计算任务，
+        // 官方文档原文「对 PC/2in1 设备，应用不需要申请 ACL 权限」）。它没有
+        // DATA_TRANSFER 的「超过 10 分钟不更新进度即取消」与「低速取消」两条义务，语义
+        // 也更贴近常驻的 VPN 客户端。手机仍用 dataTransfer（taskKeeping 在非 PC 设备上
+        // 需要 ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM，本应用没有 ACL）。两种
+        // 类型都必须在这里声明；具体申请哪一种由 NetBirdKeepAliveService 按
+        // deviceInfo.deviceType 在申请时决定（纯函数 keepAliveModeFor 在
+        // NetBirdKeepAlivePolicy，宿主自检逐字节验证）。
         backgroundModes: [
-          'dataTransfer'
+          'dataTransfer',
+          'taskKeeping'
         ],
         skills: [
           {
@@ -77,6 +87,17 @@
       // 侧载调试签名即可生效。
       {
         name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'
+      },
+      // 2026-10-13 关闭到后台（0.0.29）: EntryAbility.onPrepareToTerminate() is the
+      // FALLBACK close guard for a device where windowStage.on('windowStageClose')
+      // could not be registered (801 on a non-free-window device). The callback
+      // vetoes a termination unless this process is running its own explicit quit
+      // flow (tray 退出并断开 / 设置 → 退出应用).
+      // Level/mode: availableLevel normal, grantMode system_grant, since API 10
+      // (@ohos.app.ability.UIAbility.d.ts:672) — granted at install, no ACL entry,
+      // and the callback itself executes on 2in1 only.
+      {
+        name: 'ohos.permission.PREPARE_APP_TERMINATE'
       }
       // MANAGE_VPN is not declared. On the tested device, per-fd
       // VpnConnection.protect(fd) resolves despite MANAGE_VPN check-failure
