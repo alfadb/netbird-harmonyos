@@ -149,7 +149,7 @@ use crate::network_map::NetworkMap;
 use crate::peer_conn::{
     ice_ready_for_default_route, spawn_signal_link_shared, IceCandidateEndpoint,
     IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps, PeerIceDetail, PeerIceOrchestrator,
-    PeerSignalKind, RealSignalExchange, RelayPlaneLink, SignalLinkConfig, SignalLinkEvent,
+    PeerSignalKind, PumpWaker, RealSignalExchange, RelayPlaneLink, SignalLinkConfig, SignalLinkEvent,
 };
 use crate::route_selector::RouteSelector;
 use crate::signal::{SignalMessage, SignalOutgoing};
@@ -6620,38 +6620,151 @@ impl ConnectorHandle {
 // worker tasks
 // ---------------------------------------------------------------------------
 
-/// N5c ICE pump tick (production cadence; the orchestrator itself is fully
-/// clock-injected and never sleeps — this loop only FEEDS it). 100 ms → 10 ms
-/// (100 Hz): one session's per-run receive budget is spent once per run, so
-/// its receive rate is budget × (1 / tick). This loop's idle cost is one
-/// wakeup per tick, each running the injected-clock pump.
+/// N5c ICE pump **short tick** (production; the orchestrator itself is fully
+/// clock-injected and never sleeps — the loop only FEEDS it).
+///
+/// 0.0.28 (event-driven): the pump no longer wakes on a fixed tick. It blocks
+/// until the earliest pending deadline (`PeerIceOrchestrator::next_deadline_ms`)
+/// or a wake event (signal frame, gather completion, mux delivery, relay event,
+/// config change, stop — `PumpWaker`). This constant survives for the two
+/// places where a SHORT cadence is still the honest semantics, and nowhere else:
+///
+/// 1. **A mux with no reader thread** (`IceMux::reader_running() == false`): the
+///    host CLI / injected-clock harness shape, where the pump's own
+///    `run_once` drain IS the receive path (`MUX_READER_POLL_MS`'s sibling).
+///    The production device always has the mux's reader thread
+///    (`connector_ice_mux_arm` starts it in the same step), so its receive is
+///    event-driven and this branch never binds there.
+/// 2. **A frame stuck in the outbox while the signal is ready**: the existing
+///    retry cadence (the pre-0.0.28 tick retried it once per tick).
+///
+/// The 100 ms → 10 ms raise of 0.0.5/`docs/direct-throughput-fix.md` was for a
+/// per-tick receive BUDGET, not for a receive path: with a reader thread the
+/// budget is consumed per readable pass of that thread, and with no reader the
+/// value below is exactly that old cadence.
 pub const ICE_PUMP_TICK_MS: u64 = 10;
 
-/// The ICE pump thread: feeds the orchestrator with monotonic ms every
-/// [`ICE_PUMP_TICK_MS`], until the connector stop flag fires. A detached
-/// std::thread (not a tokio task) so a blocking candidate gather (real STUN
-/// timeouts) can never stall a runtime worker; errors are logged by class
-/// and never kill the pump.
-fn spawn_ice_pump(ice: Arc<Mutex<PeerIceOrchestrator>>, stop_flag: Arc<AtomicBool>) {
-    let _ = std::thread::Builder::new().name("ice-pump".into()).spawn(move || {
-        while !stop_flag.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(ICE_PUMP_TICK_MS));
-            if stop_flag.load(Ordering::Acquire) {
-                return;
-            }
-            let now = crate::sys::mono_ms();
-            let mut orch = ice.lock_poison();
-            if let Err(e) = orch.run_once(now) {
-                // Device diagnostics: the class alone ("network") cannot tell a
-                // missing protected socket from a gather/parse failure — print
-                // the message too (device run 3 was blind without it).
-                hilog::emit(&format!(
-                    "peer-conn: pump error ({}): {}",
-                    ErrorClass::from_management(&e).as_str(),
-                    e
-                ));
-            }
+/// Why one production ICE pump iteration stopped waiting (observability + the
+/// production-loop tests' evidence). Pure data: no addresses, no fds, no keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcePumpStep {
+    /// The injected-clock instant this pass ran on (`run_once`'s `now_ms`).
+    pub round_ms: u64,
+    /// The earliest pending deadline computed AFTER this pass (`next_deadline_ms`
+    /// on the post-pass state; `None` = no timer at all).
+    pub deadline_ms: Option<u64>,
+    /// The wait bound actually handed to the waker (ms) — the deadline (with
+    /// the anti-spin floor for an already-due one), clamped by the pump's
+    /// safety cap (`PUMP_IDLE_CAP_MS`, or `ICE_PUMP_TICK_MS` for a mux with no
+    /// reader thread).
+    pub wait_ms: u64,
+    /// True when a wake event (not the timeout) ended the wait.
+    pub woke_by_event: bool,
+    /// Wall-clock milliseconds the wait really blocked (real time, for tests
+    /// and for reasoning about the idle duty cycle).
+    pub slept_ms: u64,
+}
+
+/// One iteration of the production ICE pump — run a pass, compute the next
+/// deadline, block on the waker until a wake event or that deadline. Factored
+/// out of the thread so the production loop itself is testable (the tests call
+/// THIS function, not a re-implementation).
+///
+/// `budget` = the maximum number of iterations (`usize::MAX` in production; a
+/// small number in tests, together with a `stop` predicate). `on_step` receives
+/// one [`IcePumpStep`] per iteration.
+///
+/// `waker` is handed in (NOT read from the orchestrator here): taking the
+/// orchestrator lock as this thread's first action would put a lock take inside
+/// the spawn call's shadow, where `connector_resource_status()`'s non-blocking
+/// ICE probe can observe it as a busy leaf. [`spawn_ice_pump`] takes it on the
+/// spawning thread instead.
+///
+/// No lost wakeups: the waker generation is read BEFORE the pass, so any
+/// `notify` that lands during (or before) the pass makes the following wait
+/// return immediately and the next pass run.
+pub fn ice_pump_run(
+    ice: &Arc<Mutex<PeerIceOrchestrator>>,
+    waker: &Arc<PumpWaker>,
+    stop: &dyn Fn() -> bool,
+    budget: usize,
+    mut on_step: impl FnMut(IcePumpStep),
+) {
+    let mut observed = waker.generation();
+    // Before the FIRST pass the loop must wait one short tick: there is no
+    // computed deadline yet (no pass has run), and the pre-0.0.28 loop also
+    // reached its first pass one tick after the spawn (`sleep(TICK)`). Any wake
+    // event that lands in that window ends the wait at once, so this costs
+    // nothing but the startup window — and it keeps the very first pass (which
+    // holds the orchestrator lock, the leaf `connector_resource_status()` reads
+    // with a non-blocking probe) from landing inside the spawn call's shadow.
+    observed = waker.wait_for(observed, ICE_PUMP_TICK_MS);
+    // A device-visible pump error is logged once per occurrence, never silently
+    // swallowed (the class alone cannot tell a missing protected socket from a
+    // gather/parse failure — device run 3 was blind without the message).
+    let log_err = |e: &ManagementError| {
+        hilog::emit(&format!(
+            "peer-conn: pump error ({}): {}",
+            ErrorClass::from_management(e).as_str(),
+            e
+        ));
+    };
+    for _ in 0..budget {
+        if stop() {
+            return;
         }
+        let round_ms = crate::sys::mono_ms();
+        let (deadline, cap) = {
+            let mut orch = ice.lock_poison();
+            if let Err(e) = orch.run_once(round_ms) {
+                log_err(&e);
+            }
+            (orch.next_deadline_ms(round_ms), orch.pump_wait_cap_ms())
+        };
+        // Wait bound: the earliest deadline (an already-due one cannot be waited
+        // on forever — a retry that cannot make progress, e.g. a keepalive
+        // `sendto` failing on a dead socket, would otherwise spin at 100 % CPU;
+        // the old fixed tick bounded that at ICE_PUMP_TICK_MS, so keep that
+        // floor), clamped by the cap.
+        let wait_ms = match deadline {
+            Some(d) => {
+                let remaining = d.saturating_sub(crate::sys::mono_ms());
+                if remaining == 0 { ICE_PUMP_TICK_MS } else { remaining.min(cap) }
+            }
+            None => cap,
+        };
+        let before = observed;
+        let t0 = crate::sys::mono_ms();
+        observed = waker.wait_for(observed, wait_ms);
+        let slept_ms = crate::sys::mono_ms().saturating_sub(t0);
+        on_step(IcePumpStep {
+            round_ms,
+            deadline_ms: deadline,
+            wait_ms,
+            woke_by_event: observed != before,
+            slept_ms,
+        });
+    }
+}
+
+/// The ICE pump thread (detached; never a tokio task, so a blocking candidate
+/// gather with real STUN timeouts can never stall a runtime worker). Exits on
+/// the connector stop flag; `stop_all()` notifies it so a 1 h guard deadline
+/// does not have to be waited out.
+fn spawn_ice_pump(ice: Arc<Mutex<PeerIceOrchestrator>>, stop_flag: Arc<AtomicBool>) {
+    // The waker is taken HERE, on the spawning thread (one lock, inside the
+    // start call): the pump thread's first action must not be an orchestrator
+    // lock take, or `connector_resource_status()`'s non-blocking ICE probe
+    // would observe a busy leaf in the start call's shadow.
+    let waker = ice.lock_poison().waker();
+    let _ = std::thread::Builder::new().name("ice-pump".into()).spawn(move || {
+        ice_pump_run(
+            &ice,
+            &waker,
+            &|| stop_flag.load(Ordering::Acquire),
+            usize::MAX,
+            |_| {},
+        );
     });
 }
 
@@ -15856,5 +15969,244 @@ mod tests {
         let RelayWiringFixture { home, foreign, .. } = fx;
         home.shutdown().await;
         foreign.shutdown().await;
+    }
+
+    // -------------------------------------------------------------------
+    // 0.0.28 事件驱动 ICE 泵：生产循环（`ice_pump_run`）本身的行为
+    // -------------------------------------------------------------------
+
+    /// 生产泵的 host 构造：空受保护 socket 供给（不起真 IO）、无 mux 槽、
+    /// 记录型 signal seam。零 peer 时 `next_deadline_ms` 只剩周期行。
+    fn pump_test_orch() -> Arc<Mutex<PeerIceOrchestrator>> {
+        struct PlainWg;
+        impl WgPeerApplier for PlainWg {
+            fn apply_peers(&self, _peers: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+        }
+        Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
+            wg: Arc::new(PlainWg),
+            tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        })))
+    }
+
+    fn pump_passes(ice: &Arc<Mutex<PeerIceOrchestrator>>) -> u64 {
+        ice.lock_poison().summary().pump_passes_total
+    }
+
+    /// (a) 空闲不再 100 Hz：真循环跑 300 ms，拍数必须停在 1（旧 10 ms 拍会是
+    /// ~30），且算出来的下一截止期在 1 s 之外——空闲睡的是秒级，不是 10 ms。
+    #[test]
+    fn idle_pump_sleeps_for_seconds_instead_of_the_old_ten_ms_tick() {
+        let ice = pump_test_orch();
+        {
+            let mut o = ice.lock_poison();
+            // 窗口未开 → 第一拍；开窗后只剩 10 s 的周期行。（用真实单调时钟，
+            // 后面生产循环喂的就是它。）
+            let now = crate::sys::mono_ms();
+            assert_eq!(o.next_deadline_ms(now), Some(now));
+            o.run_once(now).expect("first pass");
+            let d = o.next_deadline_ms(now).expect("periodic deadline");
+            assert!(d - now >= 1_000, "idle wait must be seconds, got {} ms", d - now);
+            assert_eq!(o.pump_wait_cap_ms(), crate::peer_conn::PUMP_IDLE_CAP_MS);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let waker = ice.lock_poison().waker();
+        let before = pump_passes(&ice);
+        let steps: Arc<Mutex<Vec<IcePumpStep>>> = Arc::new(Mutex::new(Vec::new()));
+        let handle = {
+            let (ice, stop, steps, waker) =
+                (ice.clone(), stop.clone(), steps.clone(), waker.clone());
+            std::thread::spawn(move || {
+                ice_pump_run(&ice, &waker, &|| stop.load(Ordering::Acquire), usize::MAX, |s| {
+                    steps.lock_poison().push(s);
+                })
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let pumped = pump_passes(&ice) - before;
+        stop.store(true, Ordering::Release);
+        waker.notify(crate::peer_conn::PumpWake::Stop);
+        handle.join().expect("pump thread");
+        assert_eq!(pumped, 1, "an idle pump must not tick ({pumped} passes in 300 ms)");
+        let steps = steps.lock_poison().clone();
+        assert!(
+            steps[0].wait_ms >= 1_000,
+            "the loop's own wait bound in the idle state: {} ms",
+            steps[0].wait_ms
+        );
+    }
+
+    /// (b) 事件延迟：往编排投一帧 signal（`handle_signal` → `notify(Signal)`），
+    /// 泵必须在**几毫秒**内跑掉下一拍——旧实现最坏 10 ms，但绝不该等到下一个
+    /// 粗截止期。
+    #[test]
+    fn a_signal_frame_wakes_the_pump_within_a_few_milliseconds() {
+        let ice = pump_test_orch();
+        ice.lock_poison().set_peers(&["QUJD".to_string()]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let waker = ice.lock_poison().waker();
+        let steps: Arc<Mutex<Vec<IcePumpStep>>> = Arc::new(Mutex::new(Vec::new()));
+        let handle = {
+            let (ice, stop, steps, waker) =
+                (ice.clone(), stop.clone(), steps.clone(), waker.clone());
+            std::thread::spawn(move || {
+                ice_pump_run(&ice, &waker, &|| stop.load(Ordering::Acquire), usize::MAX, |s| {
+                    steps.lock_poison().push(s);
+                })
+            })
+        };
+        // 等泵真的进入等待（第一拍跑完）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while pump_passes(&ice) < 1 {
+            assert!(std::time::Instant::now() < deadline, "the pump must run its first pass");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let before = pump_passes(&ice);
+        let cand = crate::ice::Candidate::host_candidate([127, 0, 0, 1], 51_999);
+        let t0 = std::time::Instant::now();
+        ice.lock_poison()
+            .handle_signal("QUJD", crate::peer_conn::PeerSignalKind::Candidate, &cand.marshal(), crate::sys::mono_ms())
+            .expect("trickle candidate");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while pump_passes(&ice) <= before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a signal frame must wake the pump, not wait for the next deadline"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let dt = t0.elapsed();
+        stop.store(true, Ordering::Release);
+        waker.notify(crate::peer_conn::PumpWake::Stop);
+        handle.join().expect("pump thread");
+        assert!(
+            dt < Duration::from_millis(50),
+            "the frame-to-pass latency must be milliseconds, measured {dt:?}"
+        );
+        let steps = steps.lock_poison().clone();
+        assert!(
+            steps.iter().any(|s| s.woke_by_event),
+            "the wait that ended here must be attributed to the event, not to its bound: {steps:?}"
+        );
+        assert!(
+            steps.iter().any(|s| s.wait_ms >= 1_000),
+            "before the event the pump was waiting on a seconds-long bound: {steps:?}"
+        );
+    }
+
+    /// (c) 到期定时器**按时**触发（±容差）且不空转：把每个 peer 的 guard 复位
+    /// 到 800 ms（`restart_for_network_change` 的既有语义），真循环必须在
+    /// 400 ms 时还停在 1 拍、在 ~800 ms 时跑掉第 2 拍，并且等待时长落在
+    /// 抖动区间内。
+    #[test]
+    fn a_due_guard_hop_fires_on_time_and_the_pump_does_not_spin() {
+        let ice = pump_test_orch();
+        {
+            let mut o = ice.lock_poison();
+            o.set_peers(&["QUJD".to_string()]);
+            o.restart_for_network_change(crate::sys::mono_ms());
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let waker = ice.lock_poison().waker();
+        let steps: Arc<Mutex<Vec<(u64, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let handle = {
+            let (ice, stop, steps, waker) =
+                (ice.clone(), stop.clone(), steps.clone(), waker.clone());
+            std::thread::spawn(move || {
+                ice_pump_run(&ice, &waker, &|| stop.load(Ordering::Acquire), usize::MAX, |s| {
+                    steps.lock_poison().push((s.round_ms, s.slept_ms, s.wait_ms));
+                })
+            })
+        };
+        std::thread::sleep(Duration::from_millis(400));
+        let early = pump_passes(&ice);
+        std::thread::sleep(Duration::from_millis(900));
+        let late = pump_passes(&ice);
+        stop.store(true, Ordering::Release);
+        waker.notify(crate::peer_conn::PumpWake::Stop);
+        handle.join().expect("pump thread");
+        assert_eq!(early, 1, "the 800 ms hop must not fire early ({early} passes at 400 ms)");
+        assert!(
+            late >= 2,
+            "the due guard hop must fire on time ({late} passes after 1.3 s)"
+        );
+        let steps = steps.lock_poison().clone();
+        let (_, slept, wait) = steps[0];
+        assert!(
+            (550..=1_300).contains(&slept),
+            "the wait must land on the due hop (±the 10 % jitter), slept {slept} ms (bound {wait} ms)"
+        );
+        assert!(!steps[0].0.eq(&0), "the step carries the injected-clock round");
+    }
+
+    /// (d) 并发事件不丢唤醒、也不卡住：8 个线程同时投事件，泵必须继续跑拍；
+    /// 风暴停下之后又回到秒级等待（不是被事件改成了忙循环）。
+    #[test]
+    fn concurrent_wakes_keep_the_pump_moving_and_it_settles_back_to_idle() {
+        let ice = pump_test_orch();
+        ice.lock_poison().set_peers(&["QUJD".to_string()]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let waker = ice.lock_poison().waker();
+        let handle = {
+            let (ice, stop, waker) = (ice.clone(), stop.clone(), waker.clone());
+            std::thread::spawn(move || {
+                ice_pump_run(&ice, &waker, &|| stop.load(Ordering::Acquire), usize::MAX, |_| {})
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while pump_passes(&ice) < 1 {
+            assert!(std::time::Instant::now() < deadline, "first pass");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        const THREADS: usize = 8;
+        const EACH: usize = 200;
+        let mut storms = Vec::new();
+        for _ in 0..THREADS {
+            let (w, ice) = (waker.clone(), ice.clone());
+            storms.push(std::thread::spawn(move || {
+                for _ in 0..EACH {
+                    w.notify(crate::peer_conn::PumpWake::Relay);
+                    ice.lock_poison().set_initiator("QUJD", true); // a real Peers event too
+                }
+            }));
+        }
+        for t in storms {
+            t.join().expect("storm thread");
+        }
+        // 风暴结束后 300 ms 内泵必须仍然活着并且已经回到「不空转」：
+        // 事件全部被计数（无丢失），拍数远小于事件数（每次等待都被唤醒，
+        // 但一拍处理一批，不是一条事件一拍）。
+        std::thread::sleep(Duration::from_millis(300));
+        let after_storm = pump_passes(&ice);
+        let counts = waker.counts();
+        let relay = counts[crate::peer_conn::PumpWake::Relay.index()];
+        let peers = counts[crate::peer_conn::PumpWake::Peers.index()];
+        std::thread::sleep(Duration::from_millis(300));
+        let settled = pump_passes(&ice);
+        stop.store(true, Ordering::Release);
+        waker.notify(crate::peer_conn::PumpWake::Stop);
+        handle.join().expect("pump thread");
+        assert_eq!(relay, (THREADS * EACH) as u64, "every concurrent notify is counted");
+        assert!(peers >= (THREADS * EACH) as u64, "the config events are counted too");
+        assert!(after_storm >= 1, "the pump ran during the storm");
+        assert!(
+            settled >= after_storm,
+            "the pump is still alive after the storm ({settled} >= {after_storm})"
+        );
+        assert!(
+            settled - after_storm <= 2,
+            "after the storm the pump must settle back to the long wait, not spin: \
+             {} passes in 300 ms",
+            settled - after_storm
+        );
     }
 }

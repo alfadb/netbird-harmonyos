@@ -82,6 +82,7 @@ use std::time::Duration;
 use crate::ice::{seam_to_management, set_nonblock};
 use crate::ice_session::demux_routes_to_wg;
 use crate::management::ManagementError;
+use crate::peer_conn::{PumpWake, PumpWaker};
 use crate::stun::{self, TransactionId, BINDING_REQUEST};
 use crate::sys;
 
@@ -100,11 +101,13 @@ pub const XOR_MAPPED_CACHE_TTL_MS: u64 = 25_000;
 /// through here.
 pub const MUX_RECV_BUF: usize = 2048;
 
-/// Datagrams one [`IceMux::drain`] call may read. The pump runs every
-/// `ICE_PUMP_TICK_MS` (10 ms) and the reader thread polls every
-/// [`MUX_READER_POLL_MS`], so this is a per-pass bound, not a throughput cap:
-/// what is left stays in the kernel socket buffer for the next pass (that is
-/// the back-pressure described in the module docs).
+/// Datagrams one [`IceMux::drain`] call may read. The **reader thread** calls
+/// it once per readable pass ([`MUX_READER_POLL_MS`]) and the ICE pump calls it
+/// only when no reader runs (the host/harness shape, where its short
+/// `ICE_PUMP_TICK_MS` cadence still applies), so this is a per-pass bound, not
+/// a throughput cap: what is left stays in the kernel socket buffer and the
+/// level-triggered `poll` reports the fd readable again for the next pass (that
+/// is the back-pressure described in the module docs).
 const MUX_DRAIN_BUDGET: usize = 256;
 
 /// The reader thread's idle `poll` timeout: how long it may sit in `poll`
@@ -199,6 +202,13 @@ struct Shared {
     /// there is NO per-session fallback queue any more (official-alignment
     /// stage 4), so such a datagram is dropped and counted in `data_unknown`.
     sink: Mutex<Option<Arc<dyn MuxUdpSink>>>,
+    /// 0.0.28 event-driven ICE pump: the orchestrator's waker, installed by
+    /// [`IceMux::set_waker`]. A drain pass that queued at least one STUN
+    /// datagram for a session wakes the pump ONCE (not per datagram) — before
+    /// this, the 10 ms pump tick was what made a session read its queue, so a
+    /// delivery without a wake would wait for the next coarse deadline.
+    /// Pure leaf lock: taken alone, never held while taking `st`.
+    waker: Mutex<Option<Arc<PumpWaker>>>,
 }
 
 /// What [`Inner::dispatch`] decided about one datagram, so that the sink call
@@ -206,9 +216,11 @@ struct Shared {
 /// may take the two in the opposite order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchOut {
-    /// Fully handled (queued to a session's STUN queue, cached, or dropped +
-    /// counted).
+    /// Fully handled (cached, or dropped + counted).
     Handled,
+    /// Queued to a session's inbound STUN queue (the session half owns it): the
+    /// caller wakes the ICE pump once per drain pass.
+    HandledStun,
     /// Non-STUN with a sink armed: the caller delivers the SAME buffer through
     /// [`MuxUdpSink::handle_udp`] after dropping the state lock.
     ToSink,
@@ -350,6 +362,7 @@ impl IceMux {
                 }),
                 reader_stop: AtomicBool::new(false),
                 sink: Mutex::new(None),
+                waker: Mutex::new(None),
             }),
             reader: Mutex::new(None),
         }))
@@ -449,6 +462,19 @@ impl IceMux {
     /// the reader thread ([`IceMux::start_reader`]) or the ICE pump.
     pub fn drain(&self) -> usize {
         drain_shared(&self.shared, self.fd)
+    }
+
+    /// Install the ICE orchestrator's event-driven waker (0.0.28). Idempotent:
+    /// re-installing the SAME `Arc` is a no-op (the orchestrator calls it once
+    /// per pass so a mux that appears later gets wired too). A drain pass that
+    /// queued STUN for a session then calls [`PumpWaker::notify`] once — the
+    /// session's queue is consumed by the ICE pump, never by this thread.
+    pub fn set_waker(&self, waker: Arc<PumpWaker>) {
+        let mut slot = self.shared.waker.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &waker)) {
+            return;
+        }
+        *slot = Some(waker);
     }
 
     /// Attach the WG data-plane consumer of non-STUN datagrams (upstream: the
@@ -697,6 +723,7 @@ fn drain_shared(shared: &Shared, fd: sys::c_int) -> usize {
     let sink_armed = shared.sink.lock().unwrap_or_else(|p| p.into_inner()).is_some();
     let mut buf = [0u8; MUX_RECV_BUF];
     let mut read = 0usize;
+    let mut stun_queued = false;
     while read < MUX_DRAIN_BUDGET {
         let mut src = sys::sockaddr_in::new([0, 0, 0, 0], 0);
         let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
@@ -729,9 +756,20 @@ fn drain_shared(shared: &Shared, fd: sys::c_int) -> usize {
             if let Some(sink) = sink {
                 sink.handle_udp(&buf[..n as usize], from);
             }
+        } else if out == DispatchOut::HandledStun {
+            stun_queued = true;
         }
     }
     shared.st.lock().unwrap_or_else(|p| p.into_inner()).stats.reads += read as u64;
+    // Event-driven ICE pump (0.0.28): the sessions consume their STUN queues in
+    // `IceSession::pump_recv`, driven by the pump — so a pass that queued
+    // anything must wake it. One wake per drain pass, not per datagram.
+    if stun_queued {
+        let waker = shared.waker.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(w) = waker {
+            w.notify(PumpWake::Mux);
+        }
+    }
     read
 }
 
@@ -813,7 +851,13 @@ impl Inner {
                     .map(|s| s.peer_label.clone())
                     .unwrap_or_else(|| "unknown".into());
                 self.note_receipt(from, datagram, &label);
-                self.push_stun(id, from, datagram);
+                return if self.push_stun(id, from, datagram) {
+                    DispatchOut::HandledStun
+                } else {
+                    // Queue full (a stalled consumer): dropped + counted, and
+                    // there is nothing new for the pump to come and take.
+                    DispatchOut::Handled
+                };
             }
             None => {
                 self.note_receipt(from, datagram, "unknown");
@@ -823,13 +867,17 @@ impl Inner {
         DispatchOut::Handled
     }
 
-    fn push_stun(&mut self, id: u64, src: MappedAddr, datagram: &[u8]) {
-        let Some(s) = self.sessions.get_mut(&id) else { return };
+    /// Queue one inbound STUN datagram for its session. Returns `false` when the
+    /// per-session queue is at [`MUX_STUN_QCAP`] (dropped + counted) — the
+    /// caller then must not claim a delivery to wake the pump for.
+    fn push_stun(&mut self, id: u64, src: MappedAddr, datagram: &[u8]) -> bool {
+        let Some(s) = self.sessions.get_mut(&id) else { return false };
         if s.stun.len() >= MUX_STUN_QCAP {
             self.stats.queue_dropped += 1;
-            return;
+            return false;
         }
         s.stun.push_back(MuxStun { src, bytes: datagram.to_vec() });
+        true
     }
 
     /// N2 v4.1 P7: one outer-source receipt per datagram read on the shared
@@ -1036,6 +1084,42 @@ mod tests {
         assert_eq!(got[0].src.1, peer_addr.port());
     }
 
+    /// 0.0.28 event-driven ICE pump: a drain pass that queued STUN for a session
+    /// wakes the pump EXACTLY once per pass, and packets with no session
+    /// consumer (dropped/cached/routed to WG) never wake it. Without this the
+    /// session's queue would only be read at the next coarse deadline.
+    #[test]
+    fn queued_stun_wakes_the_ice_pump_once_per_drain_pass() {
+        let mux = mux();
+        let waker = crate::peer_conn::PumpWaker::new();
+        mux.set_waker(waker.clone());
+        mux.register_session(1, "AAAA", "peer-a");
+        let port = mux.local_port();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let wakes = || waker.counts()[crate::peer_conn::PumpWake::Mux.index()];
+
+        // Non-STUN (no sink armed → dropped + counted) and an unknown ufrag:
+        // nothing for the ICE pump to come and take.
+        loopback_sender(&sender, port, b"not-a-stun-datagram-at-all");
+        loopback_sender(&sender, port, &binding_request_with_username("NOPE:ZZZZ"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while mux.stats().stun_unknown + mux.stats().data_unknown < 2
+            && std::time::Instant::now() < deadline
+        {
+            mux.drain();
+        }
+        assert_eq!(wakes(), 0, "a datagram no session can take must not wake the pump");
+
+        // A real Binding Request for the session: one wake on the pass that
+        // queued it (and only that pass — an empty pass does not notify).
+        let gen_before = waker.generation();
+        loopback_sender(&sender, port, &binding_request_with_username("AAAA:ZZZZ"));
+        let got = recv_until(&mux, 1, 1);
+        assert_eq!(got.len(), 1);
+        assert_eq!(wakes(), 1, "exactly one wake for the pass that queued the frame");
+        assert!(waker.generation() > gen_before, "the queued frame moved the generation");
+    }
+
     #[test]
     fn unknown_packets_are_dropped_and_counted() {
         let mux = mux();
@@ -1071,9 +1155,10 @@ mod tests {
         assert_eq!(recv_until(&mux, 2, 1).len(), 1, "the mux survived the session drop");
     }
 
-    /// A stand-in for the production reader: the ICE pump calls
-    /// [`IceMux::drain`] every tick (`crate::connector::ICE_PUMP_TICK_MS`), so a
-    /// unit test that expects a srflx response to be handled must read too.
+    /// A stand-in for the production reader (or the host-path ICE pump, which
+    /// drains every `crate::connector::ICE_PUMP_TICK_MS` while no reader
+    /// thread runs), so a unit test that expects a srflx response to be
+    /// handled must read too.
     struct Reader {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,

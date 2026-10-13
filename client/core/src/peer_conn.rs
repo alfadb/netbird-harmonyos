@@ -87,7 +87,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::backoff::{ExponentialBackoff, MonotonicClock, OsRandom, Rng};
 use crate::connector::{ErrorClass, WgPeerApplier};
@@ -228,6 +228,13 @@ pub struct RelayPlaneLink {
     /// 共享 relay 传输是否连通（上游 `relayManager.Ready()`，
     /// `worker_relay.go:104-106`）：本端 relay 客户端的会话状态。
     transport_up: AtomicBool,
+    /// 事件驱动 ICE 泵的唤醒器（可选接线；[`PeerIceOrchestrator::set_relay_plane`]
+    /// 在接线的同一步装定）。入队断连事件后 `notify` 一次——上游的
+    /// `case <-g.relayedConnDisconnected:` 是 select 的事件臂，不是节拍。
+    /// **锁序**：本字段与 `disconnects` / `remote_relay` 一样只作纯叶锁使用，
+    /// 且 `notify` 只在**已经释放** `disconnects` 之后调用（唤醒器自己的
+    /// `gen` 锁是另一把叶锁，取它时不持有本类型的任何锁）。
+    waker: Mutex<Option<Arc<PumpWaker>>>,
 }
 
 impl RelayPlaneLink {
@@ -236,12 +243,33 @@ impl RelayPlaneLink {
         Arc::new(Self::default())
     }
 
+    /// 装定事件驱动 ICE 泵的唤醒器（[`PeerIceOrchestrator::set_relay_plane`]
+    /// 调用；未接线时入队只是入队，没有等待方需要叫醒）。
+    pub fn set_waker(&self, waker: Arc<PumpWaker>) {
+        let mut slot = self.waker.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &waker)) {
+            return;
+        }
+        *slot = Some(waker);
+    }
+
+    /// 唤醒 ICE 泵（`disconnects` 锁必须已经释放）。
+    fn wake(&self) {
+        let waker = self.waker.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(w) = waker {
+            w.notify(PumpWake::Relay);
+        }
+    }
+
     /// 一条 per-peer relay 承载断开（上游 `conn.go:663-667` 的
     /// `SetRelayedConnDisconnected` 调用条件：**曾经**连上才发；relay 平面只
     /// 在真的卸下一条已挂承载时调用本方法，故该条件由调用方保证）。
     pub fn relay_lane_disconnected(&self, key: &str) {
-        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
-        pending.insert(key.to_string());
+        {
+            let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+            pending.insert(key.to_string());
+        }
+        self.wake();
     }
 
     /// [`RelayPlaneLink::relay_lane_disconnected`] 的批量形态（relay 客户端
@@ -251,10 +279,13 @@ impl RelayPlaneLink {
         if keys.is_empty() {
             return;
         }
-        let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
-        for key in keys {
-            pending.insert(key.clone());
+        {
+            let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
+            for key in keys {
+                pending.insert(key.clone());
+            }
         }
+        self.wake();
     }
 
     /// ICE 泵取件：一次取走本拍之前到达的全部断连事件（清空）。上游的
@@ -399,13 +430,159 @@ impl GatherExec for InlineGatherExec {
 /// STAGE 0（官方对齐审计 §2.7）：整拍墙钟超过这么长才记一行
 /// `N5c_ICE|tick|…|pass_ms=…|slow=true`（见 [`PeerIceOrchestrator::run_once`]）。
 ///
-/// 生产 tick = `ICE_PUMP_TICK_MS`（10 ms），逐拍打印是刷屏；健康的一拍只做
-/// 注入时钟驱动的状态机推进（0~1 ms），因此 200 ms 是「这一拍真的被什么
-/// 挡住了」的下限——正是真机报告要求可验证的那个量。
+/// 事件驱动后（0.0.28）健康的拍仍然是 0~1 ms 的状态机推进，逐拍打印依旧
+/// 是刷屏；200 ms 仍是「这一拍真的被什么挡住了」的下限。
 pub const TICK_SLOW_LOG_MS: u64 = 200;
 
 /// 周期性健康摘要的间隔（每个有会话的 peer 一行，§5 item 5）。
 pub const HEALTH_SUMMARY_MS: u64 = 10_000;
+
+// ---------------------------------------------------------------------------
+// 事件驱动的 ICE 泵：唤醒器 + 唤醒原因计数
+// ---------------------------------------------------------------------------
+
+/// 唤醒原因的种类数（[`PUMP_WAKE_NAMES`] 的长度；周期行的 `wake_*` 字段
+/// 与 [`PumpWaker`] 的计数槽一一对应）。
+pub const PUMP_WAKE_KINDS: usize = 6;
+
+/// 唤醒原因的稳定名字，顺序 = [`PumpWake::index`]。周期行
+/// [`pump_stats_line`] 逐字用它拼 `wake_<name>=<累计次数>`。
+pub const PUMP_WAKE_NAMES: [&str; PUMP_WAKE_KINDS] =
+    ["signal", "gather", "mux", "relay", "peers", "stop"];
+
+/// 一次唤醒的原因（纯观测 + 计数；唤醒本身与原因无关）。
+///
+/// 真机 0.0.27 CPU 报告 §2.1 说泵的拍成本大而拍率不可测；事件驱动后拍率本身
+/// 就是「有事件/有到期」的函数，所以还要能分辨**是什么**把泵叫醒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpWake {
+    /// 一帧解密后的 signal 消息（OFFER/ANSWER/CANDIDATE）交给编排，或 signal
+    /// 流的就绪/重连边沿（`set_signal_ready`）。
+    Signal,
+    /// 本地候选收集的 worker 交回一轮结果（`ThreadGatherExec` 的线程）。
+    Gather,
+    /// 共享 mux 的读线程把 STUN 帧排进某个会话的队列（`IceMux` 的
+    /// 读线程就是生产路径的收包方），或 mux 槽被换/被 arm。
+    Mux,
+    /// relay 平面的 per-peer 断连事件入队（[`RelayPlaneLink`]）。
+    Relay,
+    /// 配置面变化：peer 集合 / STUN 列表 / 本端公钥 / 发起策略 / 网络换代 /
+    /// 定向断链。
+    Peers,
+    /// 连接器停止（`stop_all`）：泵在下一次循环判断里退出。
+    Stop,
+}
+
+impl PumpWake {
+    /// 计数槽下标（与 [`PUMP_WAKE_NAMES`] 同序）。
+    pub const fn index(self) -> usize {
+        match self {
+            PumpWake::Signal => 0,
+            PumpWake::Gather => 1,
+            PumpWake::Mux => 2,
+            PumpWake::Relay => 3,
+            PumpWake::Peers => 4,
+            PumpWake::Stop => 5,
+        }
+    }
+}
+
+/// 事件驱动 ICE 泵的**保底唤醒上界**（毫秒）。
+///
+/// 泵不再有固定节拍：它等到「最早到期定时器」。本常量是**防御性保险丝**，
+/// 只在没有任何更早的截止期时生效（典型是全 peer 都在 guard 每小时档：
+/// 下一跳在 1 h 后，泵因此每分钟醒一次而不是每 10 ms 一次）。正常路径上
+/// 更早的截止期总是存在：周期 `N5e_ICE|pump|…` 行与 mux 计数行 10 s、每 peer
+/// 健康摘要 10 s、guard 跳 0.8~45 s（每小时档 1 h）、会话 RTO 200 ms /
+/// keepalive 4 s / disconnected 6 s / checking 12 s。
+pub const PUMP_IDLE_CAP_MS: u64 = 60_000;
+
+/// 事件驱动 ICE 泵的唤醒器：一个**代际计数器 + Condvar**，任何事件源
+/// （signal 收帧、gather 完成、mux 排入 STUN、relay 断连、配置变化、停止）
+/// 只做一件事——把代际 +1 并唤醒等待方。
+///
+/// 无丢唤醒的判据（`generation`）：生产循环在**跑一拍之前**读一次代际，
+/// 再带着这个读数进入 [`PumpWaker::wait_for`]；只要期间发生过任何 `notify`，
+/// 代际就不相等、等待立即返回，于是那些事件落在的**下一拍**一定会跑。
+/// 事件在拍内到达也一样：它把代际推过读数，本拍的等待立即返回。
+///
+/// 锁序：本结构只有自己的叶锁（`gen`），**绝不**在持有它时去取编排锁；反向
+/// （编排锁 → 唤醒器）由 [`PeerIceOrchestrator`] 的事件入口使用，是唯一的
+/// 嵌套方向。等待时 `Condvar` 释放 `gen` 锁，所以生产循环**不持有编排锁**。
+pub struct PumpWaker {
+    /// 唤醒代际：每次 `notify` +1（单调，wrapping）。
+    gen: Mutex<u64>,
+    /// 等待/唤醒。与 `gen` 同一个锁。
+    cv: Condvar,
+    /// 每种唤醒原因的累计次数（纯观测；原子量，读它不取 `gen` 锁）。
+    counts: [AtomicU64; PUMP_WAKE_KINDS],
+}
+
+impl Default for PumpWaker {
+    fn default() -> Self {
+        PumpWaker {
+            gen: Mutex::new(0),
+            cv: Condvar::new(),
+            counts: Default::default(),
+        }
+    }
+}
+
+impl PumpWaker {
+    pub fn new() -> Arc<Self> {
+        Arc::new(PumpWaker::default())
+    }
+
+    /// 当前唤醒代际（生产循环在一拍之前读它）。
+    pub fn generation(&self) -> u64 {
+        *self.gen.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 记一次唤醒：原因计数 +1，代际 +1，唤醒所有等待方。**绝不阻塞**在
+    /// 任何其它锁上。
+    pub fn notify(&self, reason: PumpWake) {
+        self.counts[reason.index()].fetch_add(1, Ordering::Relaxed);
+        let mut g = self.gen.lock().unwrap_or_else(|p| p.into_inner());
+        *g = g.wrapping_add(1);
+        drop(g);
+        self.cv.notify_all();
+    }
+
+    /// 各原因的累计唤醒次数（顺序 = [`PUMP_WAKE_NAMES`]）。
+    pub fn counts(&self) -> [u64; PUMP_WAKE_KINDS] {
+        let mut out = [0u64; PUMP_WAKE_KINDS];
+        for (i, c) in self.counts.iter().enumerate() {
+            out[i] = c.load(Ordering::Relaxed);
+        }
+        out
+    }
+
+    /// 阻塞直到（a）代际不再等于 `observed`（期间发生过任意 `notify`），或
+    /// （b）`timeout_ms` 到点。返回**当前**代际（调用方把它当下一次读数）。
+    ///
+    /// 返回时**不持有**任何锁。`timeout_ms == 0` 是一次纯试探（非阻塞）。
+    pub fn wait_for(&self, observed: u64, timeout_ms: u64) -> u64 {
+        let mut g = self.gen.lock().unwrap_or_else(|p| p.into_inner());
+        if *g != observed {
+            return *g;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            if *g != observed {
+                return *g;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return *g;
+            }
+            let (guard, _timeout) = self
+                .cv
+                .wait_timeout(g, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|p| p.into_inner());
+            g = guard;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 状态模型
@@ -1022,18 +1199,32 @@ pub(crate) fn mux_stats_line(
 ///   （尾数截断，不是瞬时值）；
 /// - `window_ms`：折算用的真实窗口毫秒（周期行只在
 ///   `now − last >= HEALTH_SUMMARY_MS` 时打，所以窗口 ≥ 10 s；给出真实值
-///   才不会把「约 10 s」当成精确分母）。
+///   才不会把「约 10 s」当成精确分母）；
+/// - `wake_<原因>=<累计次数>`（TAIL 追加，0.0.28 事件驱动）：每种唤醒原因的
+///   **累计**次数，顺序见 [`PUMP_WAKE_NAMES`]。事件驱动后拍率是「有事件/有
+///   到期」的函数，光有拍率说不清「是什么把泵叫醒」；空闲时 `passes_per_10s`
+///   应当掉到个位数，而 `wake_*` 的**增量**则给出真正的事件速率（信号帧、
+///   gather 完成、mux 排包、relay 断连），二者合起来才是可判读的观测面。
 ///
-/// 三个量都是纯计数，无地址、无 fd、无密钥。
-pub(crate) fn pump_stats_line(passes_total: u64, passes_window: u64, window_ms: u64) -> String {
+/// 所有量都是纯计数，无地址、无 fd、无密钥。
+pub(crate) fn pump_stats_line(
+    passes_total: u64,
+    passes_window: u64,
+    window_ms: u64,
+    wakes: &[u64; PUMP_WAKE_KINDS],
+) -> String {
     let per_10s = if window_ms == 0 {
         0
     } else {
         passes_window.saturating_mul(10_000) / window_ms
     };
-    format!(
+    let mut line = format!(
         "N5e_ICE|pump|passes_total={passes_total}|passes_per_10s={per_10s}|window_ms={window_ms}|periodic=1"
-    )
+    );
+    for (i, name) in PUMP_WAKE_NAMES.iter().enumerate() {
+        line.push_str(&format!("|wake_{name}={}", wakes[i]));
+    }
+    line
 }
 
 /// ICE controlling 角色的确定性决胜（官方语义，`client/internal/peer/conn.go`：
@@ -1399,6 +1590,11 @@ pub struct PeerIceOrchestrator {
     /// 的路径与既有测试里，分类退回「承载挂没挂」的既有语义，且没有复位事件
     /// 来源）。connector 在构造后立即接线（[`Self::set_relay_plane`]）。
     relay_plane: Option<Arc<RelayPlaneLink>>,
+    /// 事件驱动泵的唤醒器（0.0.28）：所有外部事件入口（signal 收帧、mux
+    /// arm/换槽、配置面变化、网络换代、停止）在自己**已持编排锁**的路径里
+    /// `notify`，gather worker / mux 读线程 / relay 平面在自己的线程里
+    /// `notify`。生产泵线程经 [`Self::waker`] 取同一个 `Arc`。
+    waker: Arc<PumpWaker>,
 }
 
 impl PeerIceOrchestrator {
@@ -1428,14 +1624,99 @@ impl PeerIceOrchestrator {
             last_pump_stats_ms: 0,
             pump_passes_per_10s: 0,
             relay_plane: None,
+            waker: PumpWaker::new(),
         }
+    }
+
+    /// 本编排的唤醒器（生产泵线程拿它等待；同一个 `Arc`，事件入口与各
+    /// worker 线程都往它上面 `notify`）。
+    pub fn waker(&self) -> Arc<PumpWaker> {
+        Arc::clone(&self.waker)
     }
 
     /// 接上 relay 平面的事件/状态桥（connector 在构造后立即调用；host 测试与
     /// 无 relay 的路径不调用——`None` 时分类退回既有语义）。锁序见
     /// [`RelayPlaneLink`]：本编排在自己的编排锁下取件，relay 平面只入队。
     pub fn set_relay_plane(&mut self, link: Arc<RelayPlaneLink>) {
+        // 断连事件在 relay 平面自己的线程上入队，泵必须在那一刻被叫醒（上游
+        // 的 `case <-g.relayedConnDisconnected:` 臂是 select 的事件，不是节拍）。
+        link.set_waker(Arc::clone(&self.waker));
         self.relay_plane = Some(link);
+    }
+
+    /// 本编排**下一次必须醒来的时刻**（注入时钟；`None` = 没有任何定时器）。
+    ///
+    /// 事件驱动 ICE 泵的截止期来源：把「一拍会做的事」的每一个定时器/待办
+    /// 取最小值。**不新增定时器**——每条都是 `run_once` 既有分支的真实到期
+    /// 时刻（会话侧见 [`IceSession::next_deadline_ms`]）：
+    ///
+    /// - 周期 `N5e_ICE|pump|…` 拍计数行 / mux 计数行（`HEALTH_SUMMARY_MS`）；
+    ///   计数窗口起点为 0（尚未开窗）时就是「立刻」；
+    /// - 每个 peer 的 guard 跳（`guard_next_at_ms`，0 = 首跳立刻）；
+    /// - 每个**已 start 会话**的 peer 的健康摘要行（`HEALTH_SUMMARY_MS`）——
+    ///   条件的另一半（`session.is_some() && started`）与
+    ///   [`Self::emit_health_summary`] 的 `due` 逐字一致，否则未 start 的 peer
+    ///   会永远给出「立刻」，把泵变成忙循环；
+    /// - 会话自身的定时器（[`IceSession::next_deadline_ms`]）；
+    /// - 卡在 outbox 的帧：signal 就绪时按 ICE 短节拍重试（与旧 10 ms 拍
+    ///   同频；signal 未就绪时由 `set_signal_ready` 的唤醒负责，不必轮询）。
+    ///
+    /// 调用方（生产泵）还要把结果与 [`PUMP_IDLE_CAP_MS`] 取小，并对已经到期
+    /// 的截止期加防自旋下限——本方法只做纯计算。
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
+        let mut next: Option<u64> = None;
+        let mut push = |t: u64| {
+            next = Some(match next {
+                Some(n) => n.min(t),
+                None => t,
+            });
+        };
+        // 周期行（泵拍计数 / mux 计数）：窗口起点未开 → 立刻。
+        push(if self.last_pump_stats_ms == 0 {
+            now_ms
+        } else {
+            self.last_pump_stats_ms.saturating_add(HEALTH_SUMMARY_MS)
+        });
+        if self.ice_mux().is_some() {
+            push(if self.last_mux_stats_ms == 0 {
+                now_ms
+            } else {
+                self.last_mux_stats_ms.saturating_add(HEALTH_SUMMARY_MS)
+            });
+        }
+        for p in &self.peers {
+            push(if p.guard_next_at_ms == 0 { now_ms } else { p.guard_next_at_ms });
+            if p.session.is_some() && p.started {
+                push(if p.last_health_ms == 0 {
+                    now_ms
+                } else {
+                    p.last_health_ms.saturating_add(HEALTH_SUMMARY_MS)
+                });
+            }
+            if let Some(session) = p.session.as_ref() {
+                if let Some(t) = session.next_deadline_ms(now_ms) {
+                    push(t);
+                }
+            }
+            if self.signal_ready && !p.outbox.is_empty() {
+                push(now_ms.saturating_add(crate::connector::ICE_PUMP_TICK_MS));
+            }
+        }
+        next
+    }
+
+    /// 本拍之后允许的**最长等待**（保底上界，见 [`PUMP_IDLE_CAP_MS`]）。
+    ///
+    /// 例外只有一处，而且是既有语义的原样保留：**没有读线程的共享 mux**。
+    /// 那种形状（主机 CLI / 注入时钟 harness —— 生产设备的 mux 一定有自己的
+    /// 读线程，`connector_ice_mux_arm` 在同一步 `start_reader()`）下
+    /// [`Self::run_once`] 的 `drain` 分支**就是**收包路径，所以泵必须保留一个
+    /// 有界的短节拍 `ICE_PUMP_TICK_MS`，否则入向 STUN 要等到下一个粗截止期。
+    pub fn pump_wait_cap_ms(&self) -> u64 {
+        match self.ice_mux() {
+            Some(mux) if !mux.reader_running() => crate::connector::ICE_PUMP_TICK_MS,
+            _ => PUMP_IDLE_CAP_MS,
+        }
     }
 
     /// 换 guard 的熵源（注入缝）。生产从不调用（默认 [`OsRandom`]）；注入
@@ -1458,6 +1739,9 @@ impl PeerIceOrchestrator {
     /// [`PeerIceOrchestrator::drop_stale_mux_sessions`]）。
     pub fn set_ice_mux(&mut self, slot: IceMuxSlot) {
         self.mux = slot;
+        // 换槽 = 事件：新 mux 上的会话与收包节奏都变了（旧槽里的 mux 由
+        // `drop_mux` / 壳层自己收起）。
+        self.waker.notify(PumpWake::Mux);
     }
 
     /// 当前共享 mux（若已就位）。
@@ -1497,12 +1781,14 @@ impl PeerIceOrchestrator {
         let mux = crate::ice_mux::IceMux::adopt_unbound(owned, want, overlay)
             .map_err(|e| ManagementError::Network(format!("ice:no-mux: {e}")))?;
         mux.attach_udp_sink(Arc::new(WgApplierSink(self.wg.clone())));
+        mux.set_waker(Arc::clone(&self.waker));
         crate::hilog::emit(&format!(
             "N5e_ICE|mux-armed|source=provider|port={}|fixed={}",
             mux.local_port(),
             self.fixed_local_port.unwrap_or(0)
         ));
         *self.mux.lock().unwrap_or_else(|p| p.into_inner()) = Some(mux.clone());
+        self.waker.notify(PumpWake::Mux);
         Ok(mux)
     }
 
@@ -1541,6 +1827,7 @@ impl PeerIceOrchestrator {
         let port = mux.local_port();
         let shared = self.wg.set_shared_socket_reader(true);
         mux.attach_udp_sink(Arc::new(WgApplierSink(self.wg.clone())));
+        mux.set_waker(Arc::clone(&self.waker));
         let replaced = self
             .mux
             .lock()
@@ -1552,6 +1839,7 @@ impl PeerIceOrchestrator {
             u8::from(replaced),
             u8::from(shared)
         ));
+        self.waker.notify(PumpWake::Mux);
         Ok((mux, replaced))
     }
 
@@ -1564,6 +1852,7 @@ impl PeerIceOrchestrator {
         match taken {
             Some(mux) => {
                 mux.stop_reader();
+                self.waker.notify(PumpWake::Mux);
                 true
             }
             None => false,
@@ -1596,6 +1885,7 @@ impl PeerIceOrchestrator {
     /// start 路径必经 signal 材料 → 必然注入）。
     pub fn set_local_key(&mut self, key: String) {
         self.local_key = Some(key);
+        self.waker.notify(PumpWake::Peers);
     }
 
     /// `netbird_config.stuns[].uri` → 解析后的 STUN 服务器集
@@ -1608,6 +1898,7 @@ impl PeerIceOrchestrator {
                 self.stuns.push(s);
             }
         }
+        self.waker.notify(PumpWake::Peers);
         self.stuns.len()
     }
 
@@ -1636,6 +1927,9 @@ impl PeerIceOrchestrator {
             let rng = &mut *self.guard_rng;
             self.peers.push(PeerConn::new(key.clone(), rng));
         }
+        // 新 peer 的 guard 首跳是「立刻」（`guard_next_at_ms = 0`），泵必须在
+        // 这一刻被叫醒，而不是等上一个截止期。
+        self.waker.notify(PumpWake::Peers);
     }
 
     /// signal 流就绪（connector 持有注册好的 signal 流后置位；置位前
@@ -1649,7 +1943,13 @@ impl PeerIceOrchestrator {
             }
             self.signal_ever_ready = true;
         }
+        let changed = self.signal_ready != ready;
         self.signal_ready = ready;
+        // 就绪/断流都是事件：置位时要把 `signal_reconnected` 的 guard 复位与
+        // outbox 重试当拍跑掉；断流时也要让泵去处理后续的会话超时。
+        if changed {
+            self.waker.notify(PumpWake::Signal);
+        }
     }
 
     /// signal 流就绪状态（N5d：link 的 `Registered`/`Broken` 事件维护；
@@ -1665,6 +1965,7 @@ impl PeerIceOrchestrator {
         if let Some(p) = self.peers.iter_mut().find(|p| p.key == key) {
             p.initiator = initiator;
         }
+        self.waker.notify(PumpWake::Peers);
     }
 
     pub fn peer_keys(&self) -> Vec<String> {
@@ -1988,6 +2289,12 @@ impl PeerIceOrchestrator {
         // 收到该 peer 的信令 = 远端不静默：不再有「连续静默」计数（那套自造
         // 退避随 guard 节拍一起删除）。重谈判的节奏只由 guard 决定，而
         // guard 的复位条件是断连/网络事件（`guard.go:141-177`），不是收帧。
+        //
+        // 事件驱动（0.0.28）：本调用本身是「自己的一拍」，但它刚刚改掉的会话
+        // 状态（新凭证 → maybe_start → 会话起表、迟到候选形成新对、ANSWER 采纳）
+        // 都要求**紧接着**再跑一拍——泵在等待时必须因此立即返回，否则新会话的
+        // 首个检查要等到下一个粗截止期。
+        self.waker.notify(PumpWake::Signal);
         Ok(())
     }
 
@@ -2002,9 +2309,9 @@ impl PeerIceOrchestrator {
     pub fn run_once(&mut self, now_ms: u64) -> Result<(), ManagementError> {
         // STAGE 0（官方对齐审计 §2.7）：整拍墙钟。入口取一次、出口与本拍
         // 注入时钟一起记一行——「一拍 ≤ X ms」这个断言此前没有量：真机
-        // 报告（relay report §4.7-3）要的正是这条。生产 tick 是
-        // [`crate::connector::ICE_PUMP_TICK_MS`]（10 ms），逐拍打印就是
-        // 刷屏，所以只记**慢拍**（≥ [`TICK_SLOW_LOG_MS`]）：健康拍长 0~1 ms，
+        // 报告（relay report §4.7-3）要的正是这条。事件驱动后（0.0.28）拍
+        // 不再有固定节拍（等到最早截止期或唤醒事件），逐拍打印依旧是刷屏，
+        // 所以只记**慢拍**（≥ [`TICK_SLOW_LOG_MS`]）：健康拍长 0~1 ms，
         // 慢拍恰好是"有东西阻塞了泵"的现场。
         let pass_start_ms = crate::sys::mono_ms();
         // 真机 0.0.27 CPU 报告 §1.1：泵的真实拍率此前不可观测（周期 mux 行只
@@ -2035,6 +2342,11 @@ impl PeerIceOrchestrator {
         // 拍读走也一样）。没有读线程时（注入时钟的 host harness、主机 CLI）本拍
         // 照旧承担读循环，语义与 stage 2 完全一致。
         if let Some(mux) = self.ice_mux() {
+            // 事件驱动（0.0.28）：读线程排进会话队列的每一批 STUN 都会
+            // `notify(Mux)`；这里把**同一个唤醒器**补给 mux（幂等，槽里的 mux
+            // 由壳层/arm 路径换掉时下一拍跟上）。没有它，mux 的排包就没有
+            // 等待方需要叫醒——入向检查会拖到下一个粗截止期。
+            mux.set_waker(Arc::clone(&self.waker));
             if !mux.reader_running() {
                 let read = mux.drain();
                 if read > 0 {
@@ -2074,6 +2386,7 @@ impl PeerIceOrchestrator {
                 self.pump_passes_total,
                 passes,
                 window_ms,
+                &self.waker.counts(),
             ));
         }
         // 壳层换过 mux（物理网络切换后重新 protect + feed）：仍骑旧 mux 的
@@ -2507,6 +2820,10 @@ impl PeerIceOrchestrator {
             let tx = tx.clone();
             let socks = self.socks.clone();
             let mux = mux.clone();
+            // 事件驱动（0.0.28）：collect 完成不再是「下一拍 try_recv 顺便看见」，
+            // 而是一个**唤醒事件**——否则泵正睡在一个粗截止期上时，srflx 候选
+            // 要等到那个截止期才被取走（旧实现最坏 10 ms，事件驱动必须显式叫醒）。
+            let waker = Arc::clone(&self.waker);
             let spawned = self.exec.spawn(Box::new(move || {
                 let servers = [server];
                 let round = crate::ice::gather_srflx_round(
@@ -2518,6 +2835,7 @@ impl PeerIceOrchestrator {
                 // send 失败 = 接收端已丢（会话被拆/peer 被移除）：本阶段 worker
                 // 不持有任何 fd（socket 是 mux 的），直接退出即可。
                 let _ = tx.send(round);
+                waker.notify(PumpWake::Gather);
             }));
             if spawned {
                 pending += 1;
@@ -3102,6 +3420,7 @@ impl PeerIceOrchestrator {
             self.drop_session(idx, PeerIceState::Failed, "physical-network-change");
             self.guard_reset(idx, now_ms);
         }
+        self.waker.notify(PumpWake::Peers);
     }
 
     /// N2 T5a（§4 B 列 I 行）：端点定向断链。每个有会话/已选端点的 peer 都被
@@ -3120,6 +3439,9 @@ impl PeerIceOrchestrator {
             self.guard_reset(idx, now_ms);
             acted += 1;
         }
+        if acted > 0 {
+            self.waker.notify(PumpWake::Peers);
+        }
         acted
     }
 
@@ -3134,6 +3456,9 @@ impl PeerIceOrchestrator {
             p.gather = None;
             p.outbox.clear();
         }
+        // 停止是一个事件：泵可能正睡在一个小时档的截止期上，必须在
+        // `connector_stop()` 里立刻醒来退出（stop_flag 已在调用本方法之前置位）。
+        self.waker.notify(PumpWake::Stop);
     }
 
     /// 非网络图 peer 的 signal 帧计数（观测）。
@@ -5152,16 +5477,29 @@ mod tests {
         );
 
         // 周期行形状（与 `N5e_ICE|mux|…|periodic=1` 的兄弟行）被逐字钉住；
-        // 尾数截断：700 拍 / 14 s → 500 拍/10 s。
+        // 尾数截断：700 拍 / 14 s → 500 拍/10 s。0.0.28 的唤醒原因计数是
+        // TAIL 追加：既有字段一字不动，只在行尾补 `wake_<原因>=<累计>`。
+        let no_wakes = [0u64; PUMP_WAKE_KINDS];
         assert_eq!(
-            pump_stats_line(1_001, 1_001, 10_000),
-            "N5e_ICE|pump|passes_total=1001|passes_per_10s=1001|window_ms=10000|periodic=1"
+            pump_stats_line(1_001, 1_001, 10_000, &no_wakes),
+            "N5e_ICE|pump|passes_total=1001|passes_per_10s=1001|window_ms=10000|periodic=1\
+             |wake_signal=0|wake_gather=0|wake_mux=0|wake_relay=0|wake_peers=0|wake_stop=0"
         );
         assert_eq!(
-            pump_stats_line(700, 700, 14_000),
-            "N5e_ICE|pump|passes_total=700|passes_per_10s=500|window_ms=14000|periodic=1"
+            pump_stats_line(700, 700, 14_000, &no_wakes),
+            "N5e_ICE|pump|passes_total=700|passes_per_10s=500|window_ms=14000|periodic=1\
+             |wake_signal=0|wake_gather=0|wake_mux=0|wake_relay=0|wake_peers=0|wake_stop=0"
         );
-        assert!(!pump_stats_line(1, 1, 0).contains("passes_per_10s=1"));
+        assert!(!pump_stats_line(1, 1, 0, &no_wakes).contains("passes_per_10s=1"));
+        // 唤醒计数按 [`PUMP_WAKE_NAMES`] 的顺序逐字出现在行尾。
+        let wakes = [7u64, 0, 12, 0, 3, 1];
+        let line = pump_stats_line(9, 4, 10_000, &wakes);
+        assert!(
+            line.ends_with(
+                "|wake_signal=7|wake_gather=0|wake_mux=12|wake_relay=0|wake_peers=3|wake_stop=1"
+            ),
+            "wake counters are tail-appended in PUMP_WAKE_NAMES order: {line}"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -5854,5 +6192,296 @@ mod tests {
             selected_pair_line("", [10, 0, 0, 1], 1, false),
             "N5_ICE|selected-pair|10.0.0.1:1|endpoint_changed=false|peer="
         );
+    }
+
+    // -------------------------------------------------------------------
+    // 事件驱动（0.0.28）：唤醒器 / 截止期计算 / 短节拍的唯一去向
+    // -------------------------------------------------------------------
+
+    /// **无丢唤醒**（判据本身）：代际读数是在「上一拍之后、进入等待之前」
+    /// 取的，任何在读取之后、等待之前落地的 `notify` 都必须让等待**立刻**
+    /// 返回——这正是事件在拍内到达的窗口。
+    #[test]
+    fn pump_waker_returns_at_once_when_a_notify_lands_before_the_wait() {
+        let waker = PumpWaker::new();
+        let observed = waker.generation();
+        waker.notify(PumpWake::Signal);
+        let t0 = std::time::Instant::now();
+        let now = waker.wait_for(observed, 60_000);
+        assert_ne!(now, observed, "the generation must have moved");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(50),
+            "a notify between the pass and the wait must not be lost (waited {:?})",
+            t0.elapsed()
+        );
+        assert_eq!(waker.counts()[PumpWake::Signal.index()], 1);
+    }
+
+    /// 并发唤醒：多线程 `notify` 期间等待方不得丢任何一个（代际单调 + 计数
+    /// 无丢失），也不得睡过给定的上界。
+    #[test]
+    fn pump_waker_loses_no_concurrent_notify() {
+        let waker = PumpWaker::new();
+        let observed = waker.generation();
+        const THREADS: usize = 8;
+        const EACH: usize = 200;
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let w = Arc::clone(&waker);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..EACH {
+                    w.notify(PumpWake::Mux);
+                }
+            }));
+        }
+        // 等待方：被唤醒就重新记一次读数继续等，直到所有 notifier 退出。
+        let t0 = std::time::Instant::now();
+        let mut gen = observed;
+        while gen == observed {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(5),
+                "a concurrent notify must wake the waiter"
+            );
+            gen = waker.wait_for(observed, 1_000);
+        }
+        for h in handles {
+            h.join().expect("notifier thread");
+        }
+        assert_eq!(
+            waker.counts()[PumpWake::Mux.index()],
+            (THREADS * EACH) as u64,
+            "every notify is counted exactly once"
+        );
+        assert_eq!(waker.generation() - observed, (THREADS * EACH) as u64);
+    }
+
+    /// 空闲编排（零 peer、无 mux）：第一拍开窗后，下一截止期必须是周期行的
+    /// 10 s——**不是**旧的 10 ms 拍；保底上界是 [`PUMP_IDLE_CAP_MS`]。
+    #[test]
+    fn next_deadline_is_the_periodic_line_when_there_is_nothing_to_do() {
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        // 窗口起点未开 → 「立刻」（第一拍一定要跑，好把窗口打开）。
+        assert_eq!(orch.next_deadline_ms(1_000), Some(1_000));
+        orch.run_once(1_000).expect("first pass");
+        let d = orch.next_deadline_ms(1_000).expect("the periodic deadline");
+        assert_eq!(d, 1_000 + HEALTH_SUMMARY_MS);
+        assert!(d - 1_000 >= 1_000, "an idle pump sleeps SECONDS, not milliseconds");
+        assert_eq!(orch.pump_wait_cap_ms(), PUMP_IDLE_CAP_MS);
+    }
+
+    /// 把两个周期行（泵拍计数 / mux 计数）的窗口起点对齐到本拍，并把每个
+    /// peer 的 guard 推到一小时外：剩下的最早截止期只可能来自被测的来源。
+    /// （同模块单测，直接钉内部字段；注入时钟下这是唯一能逐值断言各来源的
+    /// 办法。）
+    fn quiet_periodic_and_guard(orch: &mut PeerIceOrchestrator, now: u64) {
+        orch.last_pump_stats_ms = now;
+        orch.last_mux_stats_ms = now;
+        for p in orch.peers.iter_mut() {
+            p.guard_next_at_ms = now.saturating_add(3_600_000);
+        }
+    }
+
+    /// guard 跳 / 健康摘要 / checking 预算 / 检查重传的来源逐条对齐，且
+    /// **取最小**。
+    #[test]
+    fn next_deadline_takes_the_earliest_of_guard_health_and_session() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        // 新 peer 的 guard 首跳是「立刻」（`guard_next_at_ms = 0`）。
+        assert_eq!(orch.next_deadline_ms(1_000), Some(1_000));
+        orch.run_once(1_000).expect("first hop");
+        // 第一拍才把 mux 建起来（provider arm），它的计数窗口还没开 → 「立刻」
+        // 再跑一拍是**有意**的（下一拍打周期行并开窗），不是忙循环：
+        // 第二拍之后窗口就位。
+        assert_eq!(orch.next_deadline_ms(1_000), Some(1_000));
+        orch.run_once(1_001).expect("open both periodic windows");
+        // 定序熵源 0.5 → 裸间隔：下一跳 = 首跳时刻 + GUARD_INITIAL_MS。
+        assert_eq!(
+            orch.next_deadline_ms(1_001),
+            Some(1_000 + GUARD_INITIAL_MS),
+            "the guard hop is the earliest deadline"
+        );
+
+        // 会话起来（拿到 ANSWER）之后：checking 预算 12 s 进入候选集，且
+        // 健康摘要每 10 s 一行同时在场（两者都是 10 s 级的，编排层的最小值
+        // 由周期行/guard 决定；这里在**会话侧**逐值钉住 12 s 那一条）。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "abcd:0123456789012345678901", 1_002)
+            .expect("answer");
+        orch.run_once(1_002).expect("session pass");
+        assert_eq!(
+            orch.peers[0].session.as_ref().expect("session").next_deadline_ms(1_002),
+            Some(1_002 + crate::ice_session::CHECKING_TIMEOUT_MS),
+            "an unpaired Checking session is bounded by pion's one budget"
+        );
+        // 健康摘要（会话已 start 才有的每 10 s 一行）确实进入编排层的最小值：
+        // 把 guard 与两个周期窗口都推到远处，最小值就是它。
+        quiet_periodic_and_guard(&mut orch, 1_002);
+        assert_eq!(
+            orch.next_deadline_ms(1_002),
+            Some(1_002 + HEALTH_SUMMARY_MS),
+            "a started session gets the 10 s health line"
+        );
+
+        // 一个远端候选形成对之后，200 ms 的检查重传成为最早截止期。
+        let cand = Candidate::host_candidate([127, 0, 0, 1], 51_999);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &cand.marshal(), 1_003)
+            .expect("candidate");
+        // 新对是 Waiting → 「当拍就到期」（pump_checks 的 Waiting 扫描无条件跑）。
+        assert_eq!(orch.next_deadline_ms(1_003), Some(1_003));
+        orch.run_once(1_003).expect("first check");
+        quiet_periodic_and_guard(&mut orch, 1_003);
+        assert_eq!(
+            orch.next_deadline_ms(1_003),
+            Some(1_003 + crate::ice_session::CHECK_RTO_MS)
+        );
+        // 到点那一拍真的重传，并把下一次重传排到再一个 RTO 之后。
+        orch.run_once(1_003 + crate::ice_session::CHECK_RTO_MS).expect("retransmit");
+        quiet_periodic_and_guard(&mut orch, 1_003 + crate::ice_session::CHECK_RTO_MS);
+        assert_eq!(
+            orch.next_deadline_ms(1_003 + crate::ice_session::CHECK_RTO_MS),
+            Some(1_003 + 2 * crate::ice_session::CHECK_RTO_MS)
+        );
+    }
+
+    /// 卡在 outbox 的帧（signal 就绪但发送被拒）：按 ICE 短节拍重试——旧
+    /// 10 ms 拍的重试语义原样保留；signal **未**就绪时不给这个周期（改由
+    /// `set_signal_ready` 的唤醒负责），否则断流 6 h 就是 100 Hz 空转。
+    #[test]
+    fn a_stuck_outbox_keeps_the_old_short_retry_cadence() {
+        struct Refusing;
+        impl SignalExchange for Refusing {
+            fn send(
+                &self,
+                _to_key: &str,
+                _kind: PeerSignalKind,
+                _payload: &str,
+                _port: u32,
+            ) -> Result<(), ManagementError> {
+                Err(ManagementError::Network("signal-stream-not-registered".into()))
+            }
+        }
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: Arc::new(Refusing),
+            wg: noop_wg(),
+            tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        seed_guard(&mut orch);
+        orch.set_peers(&["P".to_string()]);
+        orch.set_signal_ready(true);
+        // 发送被拒 → 本拍以 `flush_outbox` 的错误收场（帧留在队列里，既有语义）。
+        let _ = orch.run_once(1_000);
+        assert!(!orch.peers[0].outbox.is_empty(), "the refused OFFER stays queued");
+        // 第二拍把 mux 的计数窗口也开起来（首拍才建的 mux），此后最小值才是
+        // 被测的 outbox 重试节拍。
+        let _ = orch.run_once(1_001);
+        let d = orch.next_deadline_ms(1_001).expect("deadline");
+        assert_eq!(d, 1_001 + crate::connector::ICE_PUMP_TICK_MS);
+        // 断流（signal_ready=false）后不再有这条周期：最小值回到 guard 跳。
+        orch.set_signal_ready(false);
+        assert_eq!(
+            orch.next_deadline_ms(1_001),
+            Some(1_000 + GUARD_INITIAL_MS),
+            "with the signal down the retry waits for the ready edge, not a 100 Hz poll"
+        );
+    }
+
+    /// [`PeerIceOrchestrator::pump_wait_cap_ms`]：**只有**「mux 在、读线程没跑」
+    /// 这一种形状（主机 CLI / 注入时钟 harness）保留短的收包节拍；生产设备的
+    /// mux 有自己的读线程，收包是事件驱动的，保底上界就是 [`PUMP_IDLE_CAP_MS`]。
+    #[test]
+    fn the_short_tick_survives_only_for_a_mux_without_a_reader() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        assert_eq!(orch.pump_wait_cap_ms(), PUMP_IDLE_CAP_MS, "no mux at all");
+        let mux = crate::ice_mux::IceMux::open_wildcard(0).expect("host mux");
+        let slot: IceMuxSlot = Arc::new(Mutex::new(Some(mux.clone())));
+        orch.set_ice_mux(slot);
+        assert_eq!(
+            orch.pump_wait_cap_ms(),
+            crate::connector::ICE_PUMP_TICK_MS,
+            "no reader thread: this pump IS the receive path"
+        );
+        mux.start_reader();
+        assert_eq!(
+            orch.pump_wait_cap_ms(),
+            PUMP_IDLE_CAP_MS,
+            "with the reader thread the production shape is event-driven"
+        );
+        mux.stop_reader();
+    }
+
+    /// 事件入口都 `notify`：signal 收帧 / 配置面 / relay 断连 / 网络换代 / 停止 /
+    /// mux。（丢一个就等于把对应的工作推到下一个粗截止期。）
+    #[test]
+    fn every_event_entry_notifies_the_waker() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        let waker = orch.waker();
+        let count = |w: &PumpWaker, r: PumpWake| w.counts()[r.index()];
+        // 每个事件各自取基线：一次调用可能合法地触发多条事件（例如
+        // `handle_signal` 里的 `start_locals` → `arm_mux` 会补一次 Mux）。
+        let before = count(&waker, PumpWake::Peers);
+        orch.set_peers(&["QUJD".to_string()]);
+        assert_eq!(count(&waker, PumpWake::Peers), before + 1);
+        let before = count(&waker, PumpWake::Peers);
+        orch.set_stuns(&["stun:stun.example:3478".to_string()]);
+        assert_eq!(count(&waker, PumpWake::Peers), before + 1);
+        let before = count(&waker, PumpWake::Signal);
+        orch.set_signal_ready(false);
+        assert_eq!(count(&waker, PumpWake::Signal), before + 1);
+        // 未就绪的重复置位没有变化 → 不叫醒（否则就是无事件的空转）。
+        let before = count(&waker, PumpWake::Signal);
+        orch.set_signal_ready(false);
+        assert_eq!(count(&waker, PumpWake::Signal), before, "no edge, no wake");
+        orch.set_signal_ready(true);
+        let before = count(&waker, PumpWake::Signal);
+        orch.handle_signal("QUJD", PeerSignalKind::Offer, "abcd:0123456789012345678901", 1_000)
+            .expect("offer");
+        assert_eq!(count(&waker, PumpWake::Signal), before + 1);
+
+        let link = RelayPlaneLink::new();
+        orch.set_relay_plane(link.clone());
+        let before = count(&waker, PumpWake::Relay);
+        link.relay_lane_disconnected("QUJD");
+        assert_eq!(count(&waker, PumpWake::Relay), before + 1, "per-peer lane detach");
+        link.relay_lanes_disconnected(&["QUJD".to_string()]);
+        assert_eq!(count(&waker, PumpWake::Relay), before + 2, "the bulk form is one event too");
+
+        let mux = crate::ice_mux::IceMux::open_wildcard(0).expect("host mux");
+        let slot: IceMuxSlot = Arc::new(Mutex::new(Some(mux.clone())));
+        let before = count(&waker, PumpWake::Mux);
+        orch.set_ice_mux(slot);
+        assert_eq!(count(&waker, PumpWake::Mux), before + 1, "a replaced mux slot");
+        // 每一拍把**同一枚**唤醒器补给 mux（`run_once` 里的幂等 set_waker）：
+        // mux 的读线程排进会话队列的 STUN 才能唤醒泵。接线 + 排包本身由
+        // ice_mux 的单测直接驱动（那里能造出真的入向 STUN）。
+        orch.run_once(2_000).expect("pass");
+        assert!(!mux.reader_running(), "no reader in this construction");
+        // 网络换代与定向断链同样是事件。
+        let before = count(&waker, PumpWake::Peers);
+        orch.restart_for_network_change(2_100);
+        assert_eq!(count(&waker, PumpWake::Peers), before + 1);
+        let before = count(&waker, PumpWake::Stop);
+        orch.stop_all();
+        assert_eq!(count(&waker, PumpWake::Stop), before + 1);
     }
 }

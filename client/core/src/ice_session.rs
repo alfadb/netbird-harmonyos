@@ -1269,6 +1269,86 @@ impl IceSession {
         Ok(())
     }
 
+    /// This session's EARLIEST pending timer, on the injected clock — the
+    /// session half of the orchestrator's [`crate::peer_conn::
+    /// PeerIceOrchestrator::next_deadline_ms`], i.e. the event-driven pump's
+    /// wait bound (the pump no longer ticks at a fixed 10 ms).
+    ///
+    /// Every arm mirrors exactly one branch of [`IceSession::run_once`]; **no
+    /// timer is added, none is changed**:
+    ///
+    /// - `pump_checks` retransmission: for every `InProgress` pair with a live
+    ///   transaction, `last_send_ms + CHECK_RTO_MS` (pion's `contact()`
+    ///   cadence, `agent.go:405-425`);
+    /// - `pump_checks`'s Waiting sweep runs UNCONDITIONALLY every pass, so a
+    ///   pair that is still `Waiting` (born after the sweep by a trickled
+    ///   candidate / prflx in this same pass) means work is due NOW — the
+    ///   returned instant is then `now_ms`;
+    /// - the nomination branch (controlling, no selected pair, a `Succeeded`
+    ///   pair not yet nominated and no nomination in flight) also runs every
+    ///   pass: a nomination whose send FAILED leaves no RTO (the pair is not
+    ///   `InProgress`), so the "due now" answer is what keeps its retry at the
+    ///   old 10 ms cadence instead of pushing it to the next coarse deadline;
+    /// - `pump_keepalive`: `last_keepalive_ms + KEEPALIVE_INTERVAL_MS` (4 s);
+    /// - `pump_timeouts`: `checking_since_ms + CHECKING_TIMEOUT_MS` while
+    ///   unselected and not yet Failed; `last_inbound_ms +
+    ///   DISCONNECTED_TIMEOUT_MS` while not yet Disconnected; `last_inbound_ms
+    ///   + DISCONNECTED_TIMEOUT_MS + FAILED_TIMEOUT_MS` while not yet Failed.
+    ///
+    /// `None` = this session has no pending timer at all (not started, stopped,
+    /// or every armed timer has already fired its one-shot event). An instant
+    /// already in the past is returned as-is: the caller owns the anti-spin
+    /// floor (see the pump loop), not this pure computation.
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
+        if self.stopped || !self.started {
+            return None;
+        }
+        let mut next: Option<u64> = None;
+        let mut push = |t: u64| {
+            next = Some(match next {
+                Some(n) => n.min(t),
+                None => t,
+            });
+        };
+        for p in &self.pairs {
+            match p.state {
+                // The Waiting sweep is unconditional in `pump_checks`.
+                PairState::Waiting => return Some(now_ms),
+                PairState::InProgress if p.txn.is_some() => {
+                    push(p.last_send_ms.saturating_add(CHECK_RTO_MS));
+                }
+                _ => {}
+            }
+        }
+        if self.controlling
+            && self.selected.is_none()
+            && self.pairs.iter().any(|p| p.state == PairState::Succeeded && !p.nominated)
+            && !self
+                .pairs
+                .iter()
+                .any(|p| p.nominated && p.state == PairState::InProgress)
+        {
+            return Some(now_ms);
+        }
+        if self.selected.is_none() && !self.emitted_failed {
+            if let Some(t) = self.checking_since_ms {
+                push(t.saturating_add(CHECKING_TIMEOUT_MS));
+            }
+        }
+        if self.selected.is_some() {
+            push(self.last_keepalive_ms.saturating_add(KEEPALIVE_INTERVAL_MS));
+        }
+        if let Some(last) = self.last_inbound_ms {
+            if !self.emitted_disconnected {
+                push(last.saturating_add(DISCONNECTED_TIMEOUT_MS));
+            }
+            if !self.emitted_failed {
+                push(last.saturating_add(DISCONNECTED_TIMEOUT_MS + FAILED_TIMEOUT_MS));
+            }
+        }
+        next
+    }
+
     /// One pump of the session at injected time `now_ms`: sends the next
     /// check / retransmits / keepalives, drains all sockets, applies
     /// timers. Poll timeout is 0 (pure non-blocking pump — the caller owns
@@ -2563,5 +2643,100 @@ mod tests {
             out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex");
         }
         out
+    }
+
+    /// [`IceSession::next_deadline_ms`] 是 `run_once` 三个定时分支的**纯镜像**
+    /// （0.0.28 事件驱动泵的截止期来源）：本用例逐条钉住每个来源与它的优先级，
+    /// 并确认**没有引入任何 run_once 里不存在的新定时器**。
+    ///
+    /// 用同一模块的私有字段手工构造状态（不取 socket、不发包）：被测的就是
+    /// 「给定状态 → 最早到期时刻」这个纯函数。
+    #[test]
+    fn next_deadline_mirrors_the_pump_timers() {
+        let mut s = IceSession::new(
+            IceCredentials { ufrag: "abcd".into(), pwd: "0123456789012345678901".into() },
+            true,
+            Some(7),
+        )
+        .expect("session");
+        // 未 start / 已 stop：没有任何定时器。
+        assert_eq!(s.next_deadline_ms(1_000), None);
+        s.started = true;
+        // 刚进 Checking、还没有对：pion 的唯一预算 checking + 12 s。
+        s.checking_since_ms = Some(1_000);
+        assert_eq!(s.next_deadline_ms(1_000), Some(1_000 + CHECKING_TIMEOUT_MS));
+        // 一个 Waiting 对 = 「当拍就要发」（`pump_checks` 的 Waiting 扫描无条件跑）。
+        s.pairs.push(Pair {
+            local: 0,
+            remote: 0,
+            state: PairState::Waiting,
+            txn: None,
+            attempts: 0,
+            first_send_ms: 0,
+            last_send_ms: 0,
+            nominated: false,
+            priority: 1,
+        });
+        assert_eq!(s.next_deadline_ms(5_000), Some(5_000));
+        // InProgress 且有事务：RTO 200 ms 是唯一最早来源（比 12 s 预算早得多）。
+        s.pairs[0].state = PairState::InProgress;
+        s.pairs[0].txn = Some(TransactionId([1u8; 12]));
+        s.pairs[0].last_send_ms = 9_900;
+        assert_eq!(s.next_deadline_ms(9_900), Some(9_900 + CHECK_RTO_MS));
+        assert_eq!(
+            s.next_deadline_ms(9_900 + CHECK_RTO_MS - 1),
+            Some(9_900 + CHECK_RTO_MS),
+            "not yet due: the same absolute instant, never re-derived from `now`"
+        );
+        // 提名待发（controlling、无 selected、有 Succeeded 未提名、无提名在飞）
+        // → 当拍（发送失败时该对没有 RTO，靠这一条保住 10 ms 级重试）。
+        s.pairs[0].state = PairState::Succeeded;
+        s.pairs[0].txn = None;
+        assert_eq!(s.next_deadline_ms(20_000), Some(20_000));
+        // 已有提名在飞 → 不再是「待发」；此时 checking 预算（13 s）比这个
+        // 远期 RTO 更早 —— 取最小正是这个函数唯一的规则。
+        s.pairs[0].nominated = true;
+        s.pairs[0].state = PairState::InProgress;
+        s.pairs[0].txn = Some(TransactionId([2u8; 12]));
+        s.pairs[0].last_send_ms = 30_000;
+        assert_eq!(s.next_deadline_ms(30_000), Some(1_000 + CHECKING_TIMEOUT_MS));
+    }
+
+    /// 选中之后的两级超时与 keepalive 的优先级（上游 `agent.go:553-579`）：
+    /// keepalive 4 s < disconnected 6 s < failed 12 s；各自 one-shot 之后退出
+    /// 候选集（否则事件驱动泵会一直对着一个已经发过事件的时刻空转）。
+    #[test]
+    fn next_deadline_selected_pair_keepalive_and_two_stage_timeouts() {
+        let mut s = IceSession::new(
+            IceCredentials { ufrag: "abcd".into(), pwd: "0123456789012345678901".into() },
+            false,
+            Some(7),
+        )
+        .expect("session");
+        s.started = true;
+        s.checking_since_ms = Some(1_000);
+        s.selected = Some((0, [127, 0, 0, 1], 51_820));
+        s.last_keepalive_ms = 10_000;
+        s.last_inbound_ms = Some(10_000);
+        assert_eq!(s.next_deadline_ms(10_000), Some(10_000 + KEEPALIVE_INTERVAL_MS));
+        // keepalive 锚点推到 disconnected 之后：两级超时按 6 s / 12 s 出列。
+        s.last_keepalive_ms = 20_000;
+        assert_eq!(s.next_deadline_ms(10_000), Some(10_000 + DISCONNECTED_TIMEOUT_MS));
+        // Disconnected 已发过一次 → 只剩 failed（disconnected + failed）。
+        s.emitted_disconnected = true;
+        assert_eq!(
+            s.next_deadline_ms(10_000),
+            Some(10_000 + DISCONNECTED_TIMEOUT_MS + FAILED_TIMEOUT_MS)
+        );
+        // Failed 也发过、并且不再有选中对 → 本会话没有任何待办定时器。
+        s.emitted_failed = true;
+        s.selected = None;
+        assert_eq!(s.next_deadline_ms(10_000), None);
+        // stop 之后一律 None（未 start 的会话同样是 None，见上一条用例）。
+        s.emitted_disconnected = false;
+        s.emitted_failed = false;
+        s.selected = Some((0, [127, 0, 0, 1], 51_820));
+        s.stop();
+        assert_eq!(s.next_deadline_ms(10_000), None);
     }
 }
