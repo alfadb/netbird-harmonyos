@@ -924,7 +924,10 @@ try {
   check('D: the 关于 rows put the VALUE at the row\'s end (valueEnd: true)',
     PAGE.includes('@Prop valueEnd: boolean = false;') &&
     PAGE.includes('textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)') &&
-    (PAGE.match(/valueEnd: true/g) ?? []).length === 2 &&
+    // 0.0.44 (I9): the peer detail pane's four section call sites now put their value
+    // at the row's end too (the official client's row shape), so the flag has six
+    // users: the 关于 card's two read-only rows and the pane's four sections.
+    (PAGE.match(/valueEnd: true/g) ?? []).length === 6 &&
     PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',"));
   check('D: the settings surface has NO text literal below the 14 vp PC floor',
     (() => {

@@ -170,7 +170,13 @@ import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
 // scale (type sizes / rail paddings). The page still only asks it.
 import {
   BUTTON_INLINE_WIDTH_VP, CONNECT_RING_WIDTH_VP, contentMaxWidthVp,
-  DETAIL_CONTENT_MAX_WIDTH_VP, GUIDE_BLOCK_TOP_GAP_VP, GUIDE_BODY_LINE_HEIGHT_VP,
+  DETAIL_CONTENT_MAX_WIDTH_VP, DETAIL_ICON_BRANCH, DETAIL_ICON_CLOCK,
+  DETAIL_ICON_COPY, DETAIL_ICON_DOWN, DETAIL_ICON_EXIT, DETAIL_ICON_GLOBE,
+  DETAIL_ICON_KEY, DETAIL_ICON_LINK, DETAIL_ICON_NODE,
+  DETAIL_ICON_PIN, DETAIL_ICON_SHIELD, DETAIL_ICON_STATUS, DETAIL_ICON_UP,
+  DETAIL_ROW_CARD_PADDING_VP, DETAIL_ROW_GAP_VP, DETAIL_ROW_ICON_GAP_VP,
+  DETAIL_ROW_ICON_SLOT_VP, DETAIL_ROW_LABEL_WIDTH_VP, DETAIL_ROW_MIN_HEIGHT_VP,
+  DETAIL_ROW_PAGE_PADDING_VP, GUIDE_BLOCK_TOP_GAP_VP, GUIDE_BODY_LINE_HEIGHT_VP,
   GUIDE_EMPTY_MAX_WIDTH_VP, GUIDE_LOGIN,
   OV_HERO_ADDRESS, OV_HERO_FQDN, OV_ROW_ERROR, OV_ROW_NONE, OV_ROW_OFFLINE,
   OV_ROW_RELAY_IN_USE, OV_TILE_CONNECTED, OV_TILE_DIRECT, OV_TILE_RELAY,
@@ -178,7 +184,7 @@ import {
   OverviewFacts, overviewRowKeys, PANE_DEST_GUIDE,
   PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf,
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
-  peerDetailCopyValue, peerDetailSectionOf, peerFqdnDuplicatesTitle,
+  peerDetailCopyValue, peerDetailIconKind, peerDetailSectionOf, peerFqdnDuplicatesTitle,
   PEER_LIST_CARD_RADIUS_VP, PEER_ROW_COPY_GLYPH_VP, PEER_ROW_COPY_SLOT_VP,
   PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
   PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
@@ -865,28 +871,291 @@ function defaultRouteText(network: DetailNetworkView): string {
   return `已保留未下发（原因：${reason}）`;
 }
 
-// 0.0.43 (I8) §3 — THE COPY AFFORDANCE, one component for every surface that has
-// one (the peer list's name/IP, the peer detail's 域名 / NetBird IP, the rail's
-// local NetBird IP / 域名).
+// 0.0.44 (I9) — ONE COMPONENT DRAWS EVERY GLYPH THE ROWS NEED.
 //
-// THE GLYPH IS DRAWN, NOT A SYMBOL RESOURCE. SymbolGlyph exists in this SDK
+// THE GLYPHS ARE DRAWN, NOT SYMBOL RESOURCES, and that decision is I8's, restated
+// here because I9 multiplies it by thirteen. SymbolGlyph exists in this SDK
 // (component/symbolglyph.d.ts:29) and takes `$r('sys.symbol.*')`, but the symbol
 // NAMES are not enumerable from the SDK: they live in the device's system resource
 // package, the only `sys.symbol` occurrences in the SDK's own d.ts files are doc
 // EXAMPLES (symbolglyph.d.ts:34's ohos_wifi, symbol_span.d.ts:41's ohos_wifi), and
 // nothing in build-tools resolves or lists them. A name a host selfcheck cannot
-// verify is a runtime failure waiting for a typo — and this project has already
-// answered the same question the same way twice (the search field's magnifier,
-// Index.ets) — so the glyph is TWO OVERLAPPING ROUNDED RECTANGLES ~16 vp, the
-// universal duplicate/copy mark, drawn from ArkUI primitives.
+// verify is a runtime failure waiting for a typo, and this project has already
+// answered the same question the same way twice (the search field's magnifier) — so
+// every glyph is ArkUI primitives inside ONE 16 vp box, monochrome, tinted
+// `nb_text_muted` (the row's own label colour), painting nothing outside the box:
+//
+//   pin      a ring with a filled centre over a 45°-rotated square (the point)
+//   globe    a ring, a vertical ellipse through it (the meridian), a diameter bar
+//   node     a rounded box with two slits (a bounded host / a network segment)
+//   link     two overlapping rings (a chain) — the bearer / relay channel
+//   key      a small ring on a 45° shaft, with a tooth
+//   clock    a ring with two hands out of its centre
+//   status   the app's own verdict dot: one filled disc
+//   exit     a plug: two prongs above a rounded body (本机出口)
+//   up/down  a shaft with a two-bar chevron head, mirrored (发送 / 接收)
+//   shield   a rounded top block over a 45°-rotated square (a filled badge)
+//   branch   a stem forking into two 35° diagonals (candidate paths)
+//   copy     I8's two overlapping rounded sheets (the row's TRAILING mark)
+//
+// The shape APIs used are the documented ones: Circle/Ellipse with `{ width, height }`
+// in vp (circle.d.ts:72-84 / ellipse.d.ts:30-56), `fill`/`fillOpacity`/`stroke`/
+// `strokeWidth` from CommonShapeMethod (common.d.ts:23031-23443), and the plain
+// `border`/`borderRadius`/`backgroundColor`/`rotate`/`offset` attributes for the bar
+// and sheet primitives (the same ones I8's copy mark and the app's verdict dots use).
+// `Path`/`Polygon` are deliberately NOT used: their coordinates are px, not vp
+// (path.d.ts:135), so they could not be sized from this file's vp constants.
+@Component
+struct FieldIcon {
+  // The glyph kind (NetBirdHarmonyLayout's DETAIL_ICON_*). An unknown kind draws an
+  // empty 16 vp box rather than throwing inside the render pass.
+  @Prop kind: string = '';
+
+  build() {
+    Stack() {
+      if (this.kind === DETAIL_ICON_PIN) {
+        // The ring …
+        Circle({ width: 9, height: 9 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+          .offset({ x: 0, y: -3 })
+        Circle({ width: 3, height: 3 })
+          .fill($r('app.color.nb_text_muted'))
+          .offset({ x: 0, y: -3 })
+        // … and the point below it.
+        Column()
+          .width(6)
+          .height(6)
+          .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+          .rotate({ angle: 45 })
+          .offset({ x: 0, y: 4 })
+      } else if (this.kind === DETAIL_ICON_GLOBE) {
+        Circle({ width: 14, height: 14 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+        Ellipse({ width: 6, height: 14 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+        Column()
+          .width(12)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+      } else if (this.kind === DETAIL_ICON_NODE) {
+        Column()
+          .width(12)
+          .height(14)
+          .borderRadius(3)
+          .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+        Column()
+          .width(7)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: -3 })
+        Column()
+          .width(7)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: 1 })
+      } else if (this.kind === DETAIL_ICON_LINK) {
+        // Two rings overlapping by 3 vp: a chain link, the bearer.
+        Circle({ width: 9, height: 9 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+          .offset({ x: -3, y: 0 })
+        Circle({ width: 9, height: 9 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+          .offset({ x: 3, y: 0 })
+      } else if (this.kind === DETAIL_ICON_KEY) {
+        Circle({ width: 7, height: 7 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+          .offset({ x: -4, y: -4 })
+        // The shaft, 45°, from the ring's edge to the box's lower-right …
+        Column()
+          .width(10)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: 45 })
+          .offset({ x: 2, y: 2 })
+        // … and its tooth, across the shaft.
+        Column()
+          .width(4)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: -45 })
+          .offset({ x: 3, y: 3 })
+      } else if (this.kind === DETAIL_ICON_CLOCK) {
+        Circle({ width: 14, height: 14 })
+          .fillOpacity(0)
+          .stroke($r('app.color.nb_text_muted'))
+          .strokeWidth(1.5)
+        Column()
+          .width(1.5)
+          .height(5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: -2 })
+        Column()
+          .width(4.5)
+          .height(1.5)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 1.75, y: 1 })
+      } else if (this.kind === DETAIL_ICON_STATUS) {
+        // The app's own verdict dot, at glyph scale: one disc, no ring.
+        Circle({ width: 9, height: 9 })
+          .fill($r('app.color.nb_text_muted'))
+      } else if (this.kind === DETAIL_ICON_EXIT) {
+        // A plug: the body …
+        Column()
+          .width(9)
+          .height(9)
+          .borderRadius(2.5)
+          .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+          .offset({ x: 0, y: 3 })
+        // … and its two prongs.
+        Column()
+          .width(1.5)
+          .height(4)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: -2.25, y: -5 })
+        Column()
+          .width(1.5)
+          .height(4)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 2.25, y: -5 })
+      } else if (this.kind === DETAIL_ICON_UP) {
+        Column()
+          .width(1.5)
+          .height(12)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: 1 })
+        // The two head bars meet at (0, -6), so the head points up.
+        Column()
+          .width(1.5)
+          .height(6)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: -45 })
+          .offset({ x: -2, y: -4 })
+        Column()
+          .width(1.5)
+          .height(6)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: 45 })
+          .offset({ x: 2, y: -4 })
+      } else if (this.kind === DETAIL_ICON_DOWN) {
+        Column()
+          .width(1.5)
+          .height(12)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: -1 })
+        Column()
+          .width(1.5)
+          .height(6)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: 45 })
+          .offset({ x: -2, y: 4 })
+        Column()
+          .width(1.5)
+          .height(6)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: -45 })
+          .offset({ x: 2, y: 4 })
+      } else if (this.kind === DETAIL_ICON_SHIELD) {
+        // A filled badge silhouette: the shoulders, then the point.
+        Column()
+          .width(12)
+          .height(9)
+          .borderRadius({ topLeft: 4, topRight: 4 })
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .offset({ x: 0, y: -3 })
+        Column()
+          .width(8.5)
+          .height(8.5)
+          .borderRadius(1)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .rotate({ angle: 45 })
+          .offset({ x: 0, y: 2.5 })
+      } else if (this.kind === DETAIL_ICON_BRANCH) {
+        // A stem forking into two candidate paths.
+        Column()
+          .width(1.5)
+          .height(6)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .offset({ x: 0, y: 4 })
+        Column()
+          .width(1.5)
+          .height(7)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: -35 })
+          .offset({ x: -3.5, y: -3 })
+        Column()
+          .width(1.5)
+          .height(7)
+          .backgroundColor($r('app.color.nb_text_muted'))
+          .borderRadius(1)
+          .rotate({ angle: 35 })
+          .offset({ x: 3.5, y: -3 })
+      } else if (this.kind === DETAIL_ICON_COPY) {
+        // I8's mark, kept verbatim: the sheet behind, up and to the left …
+        Column()
+          .width(8)
+          .height(10)
+          .borderRadius(2)
+          .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+          .offset({ x: -3, y: -3 })
+        // … and the sheet in front, down and to the right: the two overlap by 5 x 7
+        // vp inside the 16 vp box, which is what makes the pair read as "copy".
+        Column()
+          .width(8)
+          .height(10)
+          .borderRadius(2)
+          .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+          .offset({ x: 3, y: 3 })
+      }
+    }
+    .width(DETAIL_ROW_ICON_SLOT_VP)
+    .height(DETAIL_ROW_ICON_SLOT_VP)
+  }
+}
+
+// 0.0.43 (I8) §3 — THE COPY AFFORDANCE, one component for every surface that has
+// one (the peer list's name/IP, the peer detail's identifier/address rows, the rail's
+// local NetBird IP / 域名). 0.0.44 (I9) widened the detail pane's copyable set to the
+// owner's six identifier/address rows and moved the GLYPH itself into FieldIcon
+// above, so the row layout has exactly one drawing of each mark; this component keeps
+// what is specific to a copy control: the touch target and the write.
 //
 // THE TOUCH TARGET IS 40 x 40 vp THOUGH THE GLYPH IS 16. The node's layout slot is
-// PEER_ROW_COPY_SLOT_VP (24 vp) and `responseRegion`
-// (component/common.d.ts:17311, public since API 8: "Sets one or more touch
-// targets ... The default touch target is the entire component") widens the HIT
-// area to PEER_ROW_COPY_TOUCH_VP (40) around the glyph. The region is the only
-// thing larger than the glyph — nothing is painted outside the 16 vp mark, so no
-// target overlaps the text or the chip on screen.
+// PEER_ROW_COPY_SLOT_VP (= the 16 vp glyph, because the slot is reserved on every
+// row of the list tier and a taller node raised the rows — the 0.0.43 device frame)
+// and `responseRegion` (component/common.d.ts:17311, public since API 8: "Sets one
+// or more touch targets ... The default touch target is the entire component")
+// widens the HIT area to PEER_ROW_COPY_TOUCH_VP (40) around the glyph. The region is
+// the only thing larger than the glyph — nothing is painted outside the 16 vp mark,
+// so no target overlaps the text or the chip on screen.
 //
 // VISIBILITY IS `Visibility.Hidden`, NEVER `Visibility.None`
 // (component/enums.d.ts:1831-1861 — Hidden "is hidden, and a placeholder is used
@@ -903,21 +1172,7 @@ struct CopyIconButton {
 
   build() {
     Stack() {
-      // The sheet behind, up and to the left of the one in front …
-      Column()
-        .width(8)
-        .height(10)
-        .borderRadius(2)
-        .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
-        .offset({ x: -3, y: -3 })
-      // … and the sheet in front, down and to the right: the two overlap by 5 x 7
-      // vp inside the 16 vp box, which is what makes the pair read as "copy".
-      Column()
-        .width(8)
-        .height(10)
-        .borderRadius(2)
-        .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
-        .offset({ x: 3, y: 3 })
+      FieldIcon({ kind: DETAIL_ICON_COPY })
     }
     .width(PEER_ROW_COPY_SLOT_VP)
     .height(PEER_ROW_COPY_SLOT_VP)
@@ -931,7 +1186,8 @@ struct CopyIconButton {
     .onClick(() => {
       // The string is the caller's, never re-derived here: the name icon copies the
       // hostname and the IP icon copies the address because that is what the row
-      // handed this component (I8's own acceptance test).
+      // handed this component (I8's own acceptance test; I9's is the same rule over
+      // the six identifier/address rows).
       this.onCopy(this.value);
     })
   }
@@ -941,6 +1197,13 @@ struct CopyIconButton {
 // NOT the old @Builder(fieldRow): a @Builder's by-value expression arguments
 // are frozen at mount in ArkUI (the B.1 device defect), while @Prop re-syncs
 // from the parent every time the observed published state re-renders.
+//
+// 0.0.44 (I9): the PEER DETAIL pane's rows carry the official client's leading
+// semantic glyph (`iconKind`, from the pure peerDetailIconKind mapping) and put the
+// value at the row's end (`valueEnd`), and they are a 48 vp band with their content
+// centred vertically (DETAIL_ROW_MIN_HEIGHT_VP). A row WITHOUT an icon — the
+// settings / 详细状态 / 关于 pages, whose calls are unchanged since I4 — keeps
+// today's Top-aligned, content-sized row, so nothing outside the peer pane moves.
 @Component
 struct DetailRow {
   @Prop label: string = '';
@@ -962,18 +1225,37 @@ struct DetailRow {
   @Prop mono: boolean = false;
   // 0.0.43 (I8) §3: non-empty ⇒ this row carries the copy icon, ALWAYS visible
   // (the detail pane has no hover rule). The caller decides the string through the
-  // pure `peerDetailCopyValue` policy, so the ONLY rows that can carry it are the
-  // domain/hostname and the IP — 公钥 is deliberately left uncopyable.
+  // pure `peerDetailCopyValue` policy, so the rows that can carry it are exactly the
+  // owner's identifier/address list (0.0.44 (I9): 域名, NetBird IP, 对端端点,
+  // 中继通道地址, 对端网络, 公钥 — never a state/time/traffic row).
   @Prop copyValue: string = '';
+  // 0.0.44 (I9): non-empty ⇒ this row renders the LEADING semantic glyph of that
+  // kind (FieldIcon) and takes the 48 vp centred rhythm. A pure function of the
+  // row's LABEL (peerDetailIconKind), so it joins no ForEach key of its own: the
+  // keys already carry the label.
+  @Prop iconKind: string = '';
   onCopy: (value: string) => void = (): void => {
   };
 
   build() {
-    Row({ space: 8 }) {
-      Text(this.label)
-        .fontSize(TYPE_CAPTION_VP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width(96)
+    // The outer gap is today's 8 vp; the leading glyph and the label form an inner
+    // pair 4 vp apart, because the glyph belongs to the label rather than to the
+    // row's columns. `DETAIL_ROW_ICON_SLOT_VP + DETAIL_ROW_ICON_GAP_VP` is exactly
+    // what the value column pays for the glyph (see detailRowValueWidthVp): at the
+    // narrowest wide tier the value keeps 108 vp, which clears the one-line floor of
+    // the IPv4 the pane leads with (105) — the icons can shorten no value into an
+    // ellipsis.
+    Row({ space: DETAIL_ROW_GAP_VP }) {
+      Row({ space: DETAIL_ROW_ICON_GAP_VP }) {
+        if (this.iconKind.length > 0) {
+          FieldIcon({ kind: this.iconKind })
+        }
+        Text(this.label)
+          .fontSize(TYPE_CAPTION_VP)
+          .fontColor($r('app.color.nb_text_muted'))
+          .width(DETAIL_ROW_LABEL_WIDTH_VP)
+      }
+      .alignItems(VerticalAlign.Center)
       // Truthiness (not .length): a value that slipped through as null or
       // undefined renders '—' instead of throwing inside the render pass.
       Text(this.value ? this.value : '—')
@@ -995,7 +1277,8 @@ struct DetailRow {
       }
     }
     .width('100%')
-    .alignItems(VerticalAlign.Top)
+    .alignItems(this.iconKind.length > 0 ? VerticalAlign.Center : VerticalAlign.Top)
+    .constraintSize({ minHeight: this.iconKind.length > 0 ? DETAIL_ROW_MIN_HEIGHT_VP : 0 })
     .padding({ top: 6, bottom: 6 })
   }
 }
@@ -5217,6 +5500,8 @@ struct Index {
                     DetailRow({
                       label: field.label,
                       value: field.value,
+                      iconKind: peerDetailIconKind(field.label),
+                      valueEnd: true,
                       copyValue: peerDetailCopyValue(field.label, field.value),
                       onCopy: (value: string): void => {
                         this.copyToClipboard(value);
@@ -5234,7 +5519,10 @@ struct Index {
                   .padding({ top: 8 })
               }
               .width('100%')
-              .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+              .padding({
+                left: DETAIL_ROW_CARD_PADDING_VP, right: DETAIL_ROW_CARD_PADDING_VP,
+                top: 4, bottom: 12
+              })
               .borderRadius(16)
               // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
               // in dark mode instead of a slightly-different dark rectangle (the I1
@@ -5258,6 +5546,8 @@ struct Index {
                     DetailRow({
                       label: field.label,
                       value: field.value,
+                      iconKind: peerDetailIconKind(field.label),
+                      valueEnd: true,
                       copyValue: peerDetailCopyValue(field.label, field.value),
                       onCopy: (value: string): void => {
                         this.copyToClipboard(value);
@@ -5266,7 +5556,10 @@ struct Index {
                   }, (field: DetailField) => `pp|${field.label}=${field.value}`)
               }
               .width('100%')
-              .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+              .padding({
+                left: DETAIL_ROW_CARD_PADDING_VP, right: DETAIL_ROW_CARD_PADDING_VP,
+                top: 4, bottom: 12
+              })
               .borderRadius(16)
               .border({ width: 1, color: $r('app.color.nb_card_border') })
               .backgroundColor($r('app.color.nb_card_background'))
@@ -5287,6 +5580,8 @@ struct Index {
                     DetailRow({
                       label: field.label,
                       value: field.value,
+                      iconKind: peerDetailIconKind(field.label),
+                      valueEnd: true,
                       copyValue: peerDetailCopyValue(field.label, field.value),
                       onCopy: (value: string): void => {
                         this.copyToClipboard(value);
@@ -5301,7 +5596,10 @@ struct Index {
                   .padding({ top: 8 })
               }
               .width('100%')
-              .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+              .padding({
+                left: DETAIL_ROW_CARD_PADDING_VP, right: DETAIL_ROW_CARD_PADDING_VP,
+                top: 4, bottom: 12
+              })
               .borderRadius(16)
               .border({ width: 1, color: $r('app.color.nb_card_border') })
               .backgroundColor($r('app.color.nb_card_background'))
@@ -5324,6 +5622,8 @@ struct Index {
                     DetailRow({
                       label: field.label,
                       value: field.value,
+                      iconKind: peerDetailIconKind(field.label),
+                      valueEnd: true,
                       mono: true,
                       copyValue: peerDetailCopyValue(field.label, field.value),
                       onCopy: (value: string): void => {
@@ -5333,7 +5633,10 @@ struct Index {
                   }, (field: DetailField) => `pid|${field.label}=${field.value}`)
               }
               .width('100%')
-              .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+              .padding({
+                left: DETAIL_ROW_CARD_PADDING_VP, right: DETAIL_ROW_CARD_PADDING_VP,
+                top: 4, bottom: 12
+              })
               .borderRadius(16)
               .border({ width: 1, color: $r('app.color.nb_card_border') })
               .backgroundColor($r('app.color.nb_card_background'))
@@ -5346,7 +5649,10 @@ struct Index {
           // beside the list column, so on a 2560 vp window it would still be 1700 vp
           // of prose. Centred by the Scroll's own align(Alignment.Top).
           .constraintSize({ maxWidth: DETAIL_CONTENT_MAX_WIDTH_VP })
-          .padding(16)
+          // 0.0.44 (I9): the pane's own padding, named — the row budget
+          // (detailRowValueWidthVp) subtracts this and the card's, so the width the
+          // icons are paid from is the shipped padding rather than a copy of it.
+          .padding(DETAIL_ROW_PAGE_PADDING_VP)
           .alignItems(HorizontalAlign.Start)
         }
         .width('100%')

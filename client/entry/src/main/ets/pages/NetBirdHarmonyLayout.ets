@@ -53,6 +53,16 @@
 // its own parts (98), because the column now has to be exactly as wide as the
 // chrome it holds.
 //
+// 0.0.44 (I9): the detail row adopts the official desktop client's shape — a leading
+// semantic glyph, the label, the value, and the copy mark when the value is an
+// identifier or an address. The DECISIONS are here: a row's FIELD KIND (its semantic
+// identity), the glyph that kind draws, and whether that kind's value may be copied.
+// All three are pure functions over the row's label, so "every row of the pane has a
+// glyph" and "exactly the owner's six identifier/address rows are copyable" are
+// host-asserted over the whole rendered label set. The row's value budget is here
+// too, because the glyphs are paid for by the row's WIDTH and that arithmetic is
+// what says no value can be ellipsised by them.
+//
 // Nothing here reads `deviceInfo.deviceType`: the layout follows the WINDOW, never
 // the device (a 2in1 window can be dragged through every tier — DESIGN-HARMONY
 // §A.2/§C.2). deviceType stays where it is already correct: the tray gate and
@@ -1276,26 +1286,37 @@ export function peerDetailSectionOf(label: string): string {
 }
 
 /**
- * 0.0.43 (I8) §3 — WHICH DETAIL ROWS ARE COPYABLE, AND WHAT THEY COPY.
+ * WHICH DETAIL ROWS ARE COPYABLE, AND WHAT THEY COPY.
  *
- * The owner's scope for this pass is exact: the domain/hostname and the IP, and
- * NOTHING else — "no public-key copy in this pass". So the answer is a policy over
- * the row's LABEL (the same shape as peerDetailSectionOf), and it returns the
- * string to copy only for the two labels that are a hostname or an address:
+ * 0.0.43 (I8) §3 introduced the copy mark with a deliberately narrow scope: the
+ * domain/hostname and the IP, "no public-key copy in this pass". 0.0.44 (I9) is the
+ * pass the owner asked for, and its scope is the whole identifier/address set:
  *
- *   域名        the peer's fqdn (or the row's own value when the page fell back)
- *   NetBird IP  the peer's overlay address
+ *   域名            the peer's fqdn (or the row's own value when the page fell back)
+ *   NetBird IP      the peer's overlay address
+ *   对端端点        the peer's WireGuard endpoint (host:port)
+ *   中继通道地址    the relay channel the peer's traffic is carried on
+ *   对端网络        the peer's allowed-IP networks
+ *   公钥            the peer's public identity key
  *
- * Every other label — including 公钥, which is the one row whose whole point is a
- * 64-character identity — answers '' and therefore renders NO copy affordance at
- * all. A row that says '未知' (the page's own not-carried marker) is not copied
- * either: copying "未知" would put a placeholder on the clipboard.
+ * The rows the owner EXCLUDED stay excluded, and they are excluded by KIND rather
+ * than by a second list: 状态 / 连接方式 / 最近握手 / 发送 / 接收 / 本机出口 /
+ * 承载 / 本机中继会话 / every ICE row answer '' and therefore render NO copy
+ * affordance at all. `peerDetailCopyable` is that predicate; the list lives in
+ * `peerDetailKindCopyable` (kind → copyable) so the page never keeps one.
+ *
+ * A row that does not CARRY its value is not copied either: '未知' and the rows'
+ * own '未知（核心未上报）' placeholder would otherwise put a placeholder on the
+ * clipboard, which is not a copy of anything.
  */
 export function peerDetailCopyValue(label: string, value: string): string {
-  if (label !== '域名' && label !== 'NetBird IP') {
+  if (!peerDetailCopyable(label)) {
     return '';
   }
-  return value === '未知' ? '' : value;
+  if (value.length === 0 || value === '未知' || value.indexOf('未知（') === 0) {
+    return '';
+  }
+  return value;
 }
 
 /**
@@ -1307,4 +1328,355 @@ export function peerDetailCopyValue(label: string, value: string): string {
  */
 export function peerFqdnDuplicatesTitle(name: string, fqdn: string): boolean {
   return fqdn.length > 0 && fqdn === name;
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.44 (I9) — THE DETAIL ROW'S LEADING GLYPH, ITS FIELD KIND, ITS COPYABILITY
+// ---------------------------------------------------------------------------
+// The owner's reference frame of the official desktop client draws every detail row
+// as: a leading semantic glyph · the label · the value (right-aligned) · a copy mark
+// when the value is an identifier or an address. I8 had already drawn the copy mark;
+// I9 adds the LEADING glyph to every row of the peer detail pane and widens the copy
+// rule to the owner's full identifier/address list.
+//
+// THE MAPPING IS HERE, NOT IN THE PAGE, for the same reason the section classifier
+// is: "which glyph does this row carry, and may its value be copied" is a decision
+// the host selfcheck can pin over the WHOLE rendered label set
+// (PEER_DETAIL_*_LABELS) without an ArkUI runtime. The page only asks.
+//
+// A row's FIELD KIND is its semantic identity, and the glyph and the copyability are
+// both functions of it, so a row cannot gain one without the other. The shipped
+// table (asserted label by label in run-detail-icons.mts):
+//
+//   label                 field kind        leading glyph   copyable
+//   域名                  domain            globe           yes
+//   NetBird IP            overlay-ip        pin             yes
+//   状态                  state             status dot      no
+//   连接方式              mode              cable/link      no
+//   最近握手              handshake         clock           no
+//   发送 / 接收           tx / rx           up / down       no
+//   对端端点              endpoint          node            yes
+//   本机出口              egress            plug/exit       no
+//   对端网络              networks          node            yes
+//   承载                  carrier           cable/link      no
+//   中继通道地址          relay-channel     cable/link      yes
+//   本机中继会话          relay-session     cable/link      no
+//   ICE (the group row)   ice-group         shield          no
+//   ICE 状态              ice-state         shield          no
+//   ICE 角色              ice-role          branch          no
+//   ICE 本端              ice-local         branch          no
+//   ICE 对端              ice-remote        branch          no
+//   ICE 可达性            ice-reach         shield          no
+//   ICE 最近错误          ice-error         shield          no
+//   公钥                  key               key             yes
+//
+// THE VALUE BUDGET IS HERE TOO, because the glyphs are paid for out of the row's
+// WIDTH and that arithmetic — not a screenshot — is what says no value was pushed
+// into an ellipsis by them. See detailRowValueWidthVp / detailRowValueLines.
+
+/** The leading semantic glyph's box (vp) — the same 16 vp octave as the copy mark. */
+export const DETAIL_ROW_ICON_SLOT_VP: number = 16;
+/**
+ * The gap between the leading glyph and the label (vp). Tighter than
+ * DETAIL_ROW_GAP_VP because the glyph reads as part of the label, and because this
+ * pair (slot + gap) is the only width the value column pays for the glyph: at the
+ * narrowest wide tier the value keeps 108 vp of its former 132 (the copyable rows
+ * keep 108 against the copy rows' former 128), which still clears the one-line floor
+ * below.
+ */
+export const DETAIL_ROW_ICON_GAP_VP: number = 4;
+/**
+ * The gap between the label block and the value, and between the value and the copy
+ * mark (vp) — the detail row's own `Row({ space: DETAIL_ROW_GAP_VP })`, unchanged
+ * from the row I8 shipped.
+ */
+export const DETAIL_ROW_GAP_VP: number = 8;
+/** The label column (vp) — unchanged since I4, and shared by both branches. */
+export const DETAIL_ROW_LABEL_WIDTH_VP: number = 96;
+/** The detail card's own horizontal padding (vp) — the row's outer edge. */
+export const DETAIL_ROW_CARD_PADDING_VP: number = 16;
+/** The detail pane's own horizontal padding around the card (vp). */
+export const DETAIL_ROW_PAGE_PADDING_VP: number = RAIL_PAGE_PADDING_VP;
+/**
+ * The I9 row's rhythm (vp). The official client's detail rows are a 48 vp band with
+ * their content centred vertically; the UX standard this project already cites asks
+ * for a >= 48 vp row where >= 40 is the must (DESIGN-HARMONY's 触摸热区 row), and the
+ * row's own trailing copy target is 40 vp tall — a 33 vp row would let two adjacent
+ * rows' touch regions overlap. So the icon-bearing row is a 48 vp band, and the
+ * rows WITHOUT one (the settings/关于 pages' read-only rows, unchanged since I4)
+ * keep their own content-driven height.
+ */
+export const DETAIL_ROW_MIN_HEIGHT_VP: number = 48;
+/**
+ * The detail pane's content-width floor (vp) wherever the shell is mounted: the
+ * compact tier's own reservation (320). The narrow (phone/tablet) branch is never
+ * narrower either — a 320 vp phone pane is the same arithmetic — so this is the
+ * binding case for the row's value budget.
+ */
+export const DETAIL_ROW_PANE_MIN_WIDTH_VP: number = PEER_LIST_CONTENT_MIN_COMPACT_VP;
+/** The characters the value column must fit on ONE line: the overlay IPv4 it leads with. */
+export const DETAIL_ROW_VALUE_CHARS: number = 14;
+/**
+ * The width budget of one value character at TYPE_BODY_VP — 0.5 em, the same
+ * proportional-Latin rule PEER_ROW_NAME_CHAR_VP states at 14 vp.
+ */
+export const DETAIL_ROW_VALUE_CHAR_VP: number = TYPE_BODY_VP / 2;
+/** The floor the value column must clear: that IPv4 (14 × 7.5 = 105 vp) on one line. */
+export const DETAIL_ROW_VALUE_MIN_WIDTH_VP: number =
+  DETAIL_ROW_VALUE_CHARS * DETAIL_ROW_VALUE_CHAR_VP;
+/** The longest value the pane renders: the 64-character public key, in mono. */
+export const DETAIL_ROW_LONGEST_VALUE_CHARS: number = 64;
+/** A monospace glyph's advance (vp) at TYPE_BODY_VP — the 0.6 em rule. */
+export const DETAIL_ROW_MONO_CHAR_VP: number = TYPE_BODY_VP * 0.6;
+/** The line cap the peer detail's rows are mounted with (DetailRow's own default). */
+export const DETAIL_ROW_VALUE_MAX_LINES: number = 8;
+
+// ---- the field kinds --------------------------------------------------------
+export const DETAIL_KIND_DOMAIN: string = 'domain';
+export const DETAIL_KIND_OVERLAY_IP: string = 'overlay-ip';
+export const DETAIL_KIND_STATE: string = 'state';
+export const DETAIL_KIND_MODE: string = 'mode';
+export const DETAIL_KIND_HANDSHAKE: string = 'handshake';
+export const DETAIL_KIND_TX: string = 'tx';
+export const DETAIL_KIND_RX: string = 'rx';
+export const DETAIL_KIND_ENDPOINT: string = 'endpoint';
+export const DETAIL_KIND_EGRESS: string = 'egress';
+export const DETAIL_KIND_NETWORKS: string = 'networks';
+export const DETAIL_KIND_CARRIER: string = 'carrier';
+export const DETAIL_KIND_RELAY_CHANNEL: string = 'relay-channel';
+export const DETAIL_KIND_RELAY_SESSION: string = 'relay-session';
+export const DETAIL_KIND_ICE_GROUP: string = 'ice-group';
+export const DETAIL_KIND_ICE_STATE: string = 'ice-state';
+export const DETAIL_KIND_ICE_ROLE: string = 'ice-role';
+export const DETAIL_KIND_ICE_LOCAL: string = 'ice-local';
+export const DETAIL_KIND_ICE_REMOTE: string = 'ice-remote';
+export const DETAIL_KIND_ICE_REACH: string = 'ice-reach';
+export const DETAIL_KIND_ICE_ERROR: string = 'ice-error';
+export const DETAIL_KIND_KEY: string = 'key';
+/** A label the classifier does not know: no glyph, no copy — nothing is invented. */
+export const DETAIL_KIND_NONE: string = '';
+
+// ---- the glyph kinds --------------------------------------------------------
+/** location/pin — NetBird IP. */
+export const DETAIL_ICON_PIN: string = 'pin';
+/** globe — 域名 / hostname. */
+export const DETAIL_ICON_GLOBE: string = 'globe';
+/** node/endpoint — 对端端点, 对端网络. */
+export const DETAIL_ICON_NODE: string = 'node';
+/** cable/link — 承载, 中继通道地址, 连接方式, 本机中继会话. */
+export const DETAIL_ICON_LINK: string = 'link';
+/** key — 公钥. */
+export const DETAIL_ICON_KEY: string = 'key';
+/** clock — 最近握手. */
+export const DETAIL_ICON_CLOCK: string = 'clock';
+/** status dot — 状态. */
+export const DETAIL_ICON_STATUS: string = 'status';
+/** plug/exit — 本机出口. */
+export const DETAIL_ICON_EXIT: string = 'exit';
+/** arrow up / arrow down — 发送 / 接收. */
+export const DETAIL_ICON_UP: string = 'up';
+export const DETAIL_ICON_DOWN: string = 'down';
+/** shield — the ICE verdict rows (the group row, 状态, 可达性, 最近错误). */
+export const DETAIL_ICON_SHIELD: string = 'shield';
+/** branch — the ICE candidate-path rows (角色, 本端, 对端). */
+export const DETAIL_ICON_BRANCH: string = 'branch';
+/** The I8 copy mark (two overlapping rounded sheets) — the row's TRAILING glyph. */
+export const DETAIL_ICON_COPY: string = 'copy';
+/**
+ * Every glyph the one icon component knows how to draw. The selfcheck walks this
+ * list against the page's switch, so a kind added here but not drawn there is a
+ * failing test rather than a blank 16 vp box on the device.
+ */
+export const DETAIL_ICON_KINDS: string[] = [
+  DETAIL_ICON_PIN, DETAIL_ICON_GLOBE, DETAIL_ICON_NODE, DETAIL_ICON_LINK,
+  DETAIL_ICON_KEY, DETAIL_ICON_CLOCK, DETAIL_ICON_STATUS, DETAIL_ICON_EXIT,
+  DETAIL_ICON_UP, DETAIL_ICON_DOWN, DETAIL_ICON_SHIELD, DETAIL_ICON_BRANCH,
+  DETAIL_ICON_COPY
+];
+
+/**
+ * The row's FIELD KIND (its semantic identity). Every label the pane renders has
+ * one; an unknown label is DETAIL_KIND_NONE, i.e. no glyph and no copy.
+ */
+export function peerDetailFieldKind(label: string): string {
+  if (label === '域名') {
+    return DETAIL_KIND_DOMAIN;
+  }
+  if (label === 'NetBird IP') {
+    return DETAIL_KIND_OVERLAY_IP;
+  }
+  if (label === '状态') {
+    return DETAIL_KIND_STATE;
+  }
+  if (label === '连接方式') {
+    return DETAIL_KIND_MODE;
+  }
+  if (label === '最近握手') {
+    return DETAIL_KIND_HANDSHAKE;
+  }
+  if (label === '发送') {
+    return DETAIL_KIND_TX;
+  }
+  if (label === '接收') {
+    return DETAIL_KIND_RX;
+  }
+  if (label === '对端端点') {
+    return DETAIL_KIND_ENDPOINT;
+  }
+  if (label === '本机出口') {
+    return DETAIL_KIND_EGRESS;
+  }
+  if (label === '对端网络') {
+    return DETAIL_KIND_NETWORKS;
+  }
+  if (label === '承载') {
+    return DETAIL_KIND_CARRIER;
+  }
+  if (label === '中继通道地址') {
+    return DETAIL_KIND_RELAY_CHANNEL;
+  }
+  if (label === '本机中继会话') {
+    return DETAIL_KIND_RELAY_SESSION;
+  }
+  if (label === 'ICE') {
+    return DETAIL_KIND_ICE_GROUP;
+  }
+  if (label === 'ICE 状态') {
+    return DETAIL_KIND_ICE_STATE;
+  }
+  if (label === 'ICE 角色') {
+    return DETAIL_KIND_ICE_ROLE;
+  }
+  if (label === 'ICE 本端') {
+    return DETAIL_KIND_ICE_LOCAL;
+  }
+  if (label === 'ICE 对端') {
+    return DETAIL_KIND_ICE_REMOTE;
+  }
+  if (label === 'ICE 可达性') {
+    return DETAIL_KIND_ICE_REACH;
+  }
+  if (label === 'ICE 最近错误') {
+    return DETAIL_KIND_ICE_ERROR;
+  }
+  if (label === '公钥') {
+    return DETAIL_KIND_KEY;
+  }
+  return DETAIL_KIND_NONE;
+}
+
+/**
+ * Field kind → the leading glyph it draws. Every kind has one, so a rendered row
+ * whose label classifies cannot be glyph-less; an unknown kind draws nothing.
+ */
+export function peerDetailKindIcon(kind: string): string {
+  if (kind === DETAIL_KIND_DOMAIN) {
+    return DETAIL_ICON_GLOBE;
+  }
+  if (kind === DETAIL_KIND_OVERLAY_IP) {
+    return DETAIL_ICON_PIN;
+  }
+  if (kind === DETAIL_KIND_STATE) {
+    return DETAIL_ICON_STATUS;
+  }
+  if (kind === DETAIL_KIND_MODE) {
+    return DETAIL_ICON_LINK;
+  }
+  if (kind === DETAIL_KIND_HANDSHAKE) {
+    return DETAIL_ICON_CLOCK;
+  }
+  if (kind === DETAIL_KIND_TX) {
+    return DETAIL_ICON_UP;
+  }
+  if (kind === DETAIL_KIND_RX) {
+    return DETAIL_ICON_DOWN;
+  }
+  if (kind === DETAIL_KIND_ENDPOINT || kind === DETAIL_KIND_NETWORKS) {
+    return DETAIL_ICON_NODE;
+  }
+  if (kind === DETAIL_KIND_EGRESS) {
+    return DETAIL_ICON_EXIT;
+  }
+  if (kind === DETAIL_KIND_CARRIER || kind === DETAIL_KIND_RELAY_CHANNEL ||
+    kind === DETAIL_KIND_RELAY_SESSION) {
+    return DETAIL_ICON_LINK;
+  }
+  if (kind === DETAIL_KIND_ICE_GROUP || kind === DETAIL_KIND_ICE_STATE ||
+    kind === DETAIL_KIND_ICE_REACH || kind === DETAIL_KIND_ICE_ERROR) {
+    return DETAIL_ICON_SHIELD;
+  }
+  if (kind === DETAIL_KIND_ICE_ROLE || kind === DETAIL_KIND_ICE_LOCAL ||
+    kind === DETAIL_KIND_ICE_REMOTE) {
+    return DETAIL_ICON_BRANCH;
+  }
+  if (kind === DETAIL_KIND_KEY) {
+    return DETAIL_ICON_KEY;
+  }
+  return DETAIL_KIND_NONE;
+}
+
+/** The row's label → the leading glyph it draws. */
+export function peerDetailIconKind(label: string): string {
+  return peerDetailKindIcon(peerDetailFieldKind(label));
+}
+
+/**
+ * Field kind → may this row's value be copied? THE OWNER'S LIST, and nothing else:
+ * the six identifier/address kinds. The state, the mode, the handshake time, the
+ * traffic counters, the local egress, the bearer label, the local relay session and
+ * every ICE row are FALSE.
+ */
+export function peerDetailKindCopyable(kind: string): boolean {
+  return kind === DETAIL_KIND_DOMAIN || kind === DETAIL_KIND_OVERLAY_IP ||
+    kind === DETAIL_KIND_ENDPOINT || kind === DETAIL_KIND_RELAY_CHANNEL ||
+    kind === DETAIL_KIND_NETWORKS || kind === DETAIL_KIND_KEY;
+}
+
+/** The row's label → may its value be copied? */
+export function peerDetailCopyable(label: string): boolean {
+  return peerDetailKindCopyable(peerDetailFieldKind(label));
+}
+
+/**
+ * The width (vp) the detail pane's CONTENT has at a window width: the pane's width
+ * (window − rail) minus the list column Navigation carves out of it — the same two
+ * functions the shell itself is built from, so the row budget cannot drift from the
+ * layout. Never negative.
+ */
+export function detailPaneContentWidthVp(windowVp: number): number {
+  const pane: number = splitPaneWidthVp(windowVp);
+  const navBar: number = peerListNavBarWidthVp(pane, windowVp);
+  const content: number = pane - navBar;
+  return content > 0 ? content : 0;
+}
+
+/**
+ * The width (vp) a detail row's VALUE column has in a pane of this width: the pane,
+ * less the page's padding, the card's padding, the leading glyph and its gap, the
+ * label column and its gap, and — for a copyable row — the copy mark and its gap.
+ * This is the number the ellipsis argument rests on; never negative.
+ */
+export function detailRowValueWidthVp(paneWidthVp: number, copyable: boolean): number {
+  let width: number = paneWidthVp - 2 * DETAIL_ROW_PAGE_PADDING_VP -
+    2 * DETAIL_ROW_CARD_PADDING_VP;
+  width -= DETAIL_ROW_ICON_SLOT_VP + DETAIL_ROW_ICON_GAP_VP;
+  width -= DETAIL_ROW_LABEL_WIDTH_VP + DETAIL_ROW_GAP_VP;
+  if (copyable) {
+    width -= DETAIL_ROW_GAP_VP + PEER_ROW_COPY_SLOT_VP;
+  }
+  return width > 0 ? width : 0;
+}
+
+/**
+ * The lines a value of `chars` characters at `charVp` per character wraps to in a
+ * column `valueWidthVp` wide — the estimate `<= DETAIL_ROW_VALUE_MAX_LINES` is
+ * exactly "the row's value is not ellipsised". A nonsense argument answers 0 (the
+ * empty value), never NaN and never a divide by zero.
+ */
+export function detailRowValueLines(chars: number, charVp: number,
+  valueWidthVp: number): number {
+  if (!(chars > 0) || !(charVp > 0) || !(valueWidthVp > 0)) {
+    return 0;
+  }
+  return Math.ceil((chars * charVp) / valueWidthVp);
 }

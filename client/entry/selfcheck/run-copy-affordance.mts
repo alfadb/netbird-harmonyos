@@ -1,4 +1,7 @@
 // 0.0.43 (I8) §3 — host-side checks for the COPY affordance. No device, no build.
+// 0.0.44 (I9) widened half B's copyable set to the owner's identifier/address list
+// and moved the GLYPH into the shared FieldIcon component; those two assertions were
+// re-pointed at the shipped code without changing what the file proves.
 //
 // Three halves, all against the shipped sources:
 //
@@ -12,7 +15,10 @@
 //      makes "no ACL" (no ohos.permission.READ_PASTEBOARD) a checked property.
 //   B. THE POLICY: which surfaces show the icon — the list rows on hover/selection
 //      only, the detail pane and the rail ALWAYS, the phone's rows never — and which
-//      VALUES are copyable at all (the domain/hostname and the IP; never 公钥).
+//      VALUES are copyable at all. 0.0.44 (I9) made that the owner's identifier /
+//      address set (域名, NetBird IP, 对端端点, 中继通道地址, 对端网络, 公钥) and
+//      moved its full label-by-label table into run-detail-icons.mts; this file
+//      keeps the surface policy and the two ends of the set.
 //   C. THE ROW KEY: the icon's presence is an ATTRIBUTE driven by observed state,
 //      so peerRowKey gained no hover/selection/copy input. That is the 0.0.35
 //      lesson's other direction: a key that changed with the pointer would rebuild
@@ -99,17 +105,47 @@ try {
   const ui = await import(pathToFileURL(join(dir, 'NetBirdUiModel.ts')).href);
 
   // ---- B. which VALUES are copyable -------------------------------------------
-  check('B: only the 域名 and the NetBird IP row are copyable (no public-key copy)',
+  // 0.0.44 (I9): the owner's identifier/address list. The full table (every
+  // rendered label, its glyph and its copyability) is asserted in
+  // run-detail-icons.mts; here are the two ends of the set plus the rows the owner
+  // excluded, and the fact that the predicate IS a predicate (no hand-kept list in
+  // the page).
+  check('B: the identifier/address rows copy their own value (I9 widened I8\'s two)',
     m.peerDetailCopyValue('域名', 'alfadbphone.netcenter.local') ===
       'alfadbphone.netcenter.local' &&
     m.peerDetailCopyValue('NetBird IP', IP) === IP &&
-    m.peerDetailCopyValue('公钥', 'aVeryLongPublicKeyThatMustNotBeCopied') === '' &&
+    m.peerDetailCopyValue('对端端点', '192.168.50.183:43833') === '192.168.50.183:43833' &&
+    m.peerDetailCopyValue('中继通道地址', 'rels://home.alfadb.cn:28443') ===
+      'rels://home.alfadb.cn:28443' &&
+    m.peerDetailCopyValue('对端网络', '10.0.0.0/24、192.168.50.0/24') ===
+      '10.0.0.0/24、192.168.50.0/24' &&
+    m.peerDetailCopyValue('公钥', 'aVeryLongPublicKeyThatIsCopied') ===
+      'aVeryLongPublicKeyThatIsCopied');
+  check('B: the state/time/traffic/bearer/ICE rows the owner excluded stay excluded',
     m.peerDetailCopyValue('状态', '已连接') === '' &&
+    m.peerDetailCopyValue('连接方式', '直连') === '' &&
     m.peerDetailCopyValue('最近握手', '1 分钟前') === '' &&
+    m.peerDetailCopyValue('发送', '12.3 MB') === '' &&
+    m.peerDetailCopyValue('接收', '4.5 MB') === '' &&
+    m.peerDetailCopyValue('本机出口', '192.168.50.12') === '' &&
+    m.peerDetailCopyValue('承载', '中继') === '' &&
+    m.peerDetailCopyValue('本机中继会话', 'rels://home.alfadb.cn:28443') === '' &&
     m.peerDetailCopyValue('ICE 对端', '1.2.3.4:51820') === '' &&
-    m.peerDetailCopyValue('对端网络', '10.0.0.0/24') === '');
+    m.peerDetailCopyValue('ICE 可达性', '可达') === '');
   check('B: a not-carried value is not copied either (no「未知」on the clipboard)',
-    m.peerDetailCopyValue('域名', '未知') === '' && m.peerDetailCopyValue('NetBird IP', '未知') === '');
+    m.peerDetailCopyValue('域名', '未知') === '' && m.peerDetailCopyValue('NetBird IP', '未知') === '' &&
+    // the rows' own other placeholder — the collapsed 路径 rows fall back to it
+    m.peerDetailCopyValue('对端端点', '未知（核心未上报）') === '');
+  check('B: the copy policy is a PREDICATE over the row kind, not a list in the page',
+    m.peerDetailCopyable('公钥') === true && m.peerDetailCopyable('状态') === false &&
+    m.peerDetailKindCopyable(m.DETAIL_KIND_KEY) === true &&
+    m.peerDetailKindCopyable(m.DETAIL_KIND_STATE) === false &&
+    m.peerDetailKindCopyable(m.DETAIL_KIND_HANDSHAKE) === false &&
+    m.peerDetailKindCopyable(m.DETAIL_KIND_TX) === false &&
+    m.peerDetailKindCopyable(m.DETAIL_KIND_RX) === false &&
+    !PAGE.includes('peerDetailCopyValue(field.label) ===') &&
+    (PAGE.match(/copyValue: peerDetailCopyValue\(field\.label, field\.value\),/g) ?? [])
+      .length === 4);
 
   // ---- B. which SURFACES show it ---------------------------------------------
   check('B: the LIST rows show the icon only on the pointer tiers (hover/selection)',
@@ -158,7 +194,7 @@ try {
     railRow.includes('if (this.copyValue.length > 0) {') &&
     !/hover/i.test(stripComments(detailRow)) && !/hover/i.test(stripComments(railRow)) &&
     detailRow.includes('visible: true,') && railRow.includes('visible: true,'));
-  check('B: the detail pane wires the two copyable rows through the label policy',
+  check('B: the detail pane wires its copyable rows through the label policy',
     (PAGE.match(/copyValue: peerDetailCopyValue\(field\.label, field\.value\),/g) ?? [])
       .length === 4 &&
     (PAGE.match(/onCopy: \(value: string\): void => \{\n\s+this\.copyToClipboard\(value\);/g) ?? [])
@@ -187,11 +223,20 @@ try {
     PAGE.includes("'UI_COPY|bundle=%{public}s|length=%{public}d'"));
   const icon = PAGE.slice(PAGE.indexOf('struct CopyIconButton {'),
     PAGE.indexOf('// One label/value row of the detail screens'));
+  // 0.0.44 (I9): the drawing moved into the ONE shared FieldIcon component, so the
+  // copy mark is asserted on its own branch of that switch, and CopyIconButton is
+  // asserted to RENDER it rather than to re-draw it (one drawing of each mark).
+  const glyphs = PAGE.slice(PAGE.indexOf('struct FieldIcon {'),
+    PAGE.indexOf('// 0.0.43 (I8) §3 — THE COPY AFFORDANCE'));
+  const copyGlyph = glyphs.slice(glyphs.indexOf('DETAIL_ICON_COPY) {'),
+    glyphs.indexOf('.width(DETAIL_ROW_ICON_SLOT_VP)'));
   check('B: the glyph is DRAWN (two overlapping rounded sheets) — no unverifiable symbol',
-    icon.length > 0 && (icon.match(/\.offset\(\{ x: -?3, y: -?3 \}\)/g) ?? []).length === 2 &&
-    (icon.match(/\.borderRadius\(2\)/g) ?? []).length === 2 &&
-    (icon.match(/\.border\(\{ width: 1\.5,/g) ?? []).length === 2 &&
-    !icon.includes('sys.symbol') && !icon.includes('SymbolGlyph'));
+    copyGlyph.length > 0 &&
+    (copyGlyph.match(/\.offset\(\{ x: -?3, y: -?3 \}\)/g) ?? []).length === 2 &&
+    (copyGlyph.match(/\.borderRadius\(2\)/g) ?? []).length === 2 &&
+    (copyGlyph.match(/\.border\(\{ width: 1\.5,/g) ?? []).length === 2 &&
+    icon.includes('FieldIcon({ kind: DETAIL_ICON_COPY })') &&
+    !PAGE_CODE.includes('sys.symbol') && !PAGE_CODE.includes('SymbolGlyph'));
   check('B: the touch target is 40x40 though the glyph is 16, and the slot never reflows',
     icon.includes('width: PEER_ROW_COPY_TOUCH_VP') &&
     icon.includes('height: PEER_ROW_COPY_TOUCH_VP') &&
