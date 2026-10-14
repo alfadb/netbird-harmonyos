@@ -38,7 +38,7 @@
     },
     {
       "name": "nb_card_border",
-      "value": "#3C4B57"
+      "value": "#4A5A66"
     },
     {
       "name": "nb_primary",
@@ -71,6 +71,10 @@
     {
       "name": "nb_status_warning_background",
       "value": "#3F351A"
+    },
+    {
+      "name": "nb_status_info_background",
+      "value": "#233240"
     },
     {
       "name": "nb_on_status",

@@ -68,6 +68,11 @@ const CONTRACT: Array<[string, string, string]> = [
   ['nb_text_tertiary', '#52615B', '#AEBBC5'],
   ['nb_text_muted', '#8A9AA6', '#93A4B0'],
   ['nb_border', '#AAB5BC', '#4A5A66'],
+  // 0.0.39 (I4) P2 (review §4.1): the card stroke was #3C4B57 in dark — ~2.06:1
+  // against the page, which is at the edge of vanishing on a dim panel. It is now
+  // the SAME value as nb_border's dark step (~2.8:1), so no new colour entered the
+  // system; the light step is unchanged.
+  ['nb_card_border', '#DEE5EA', '#4A5A66'],
   ['nb_primary', '#17324D', '#7FB2D9'],
   ['nb_on_primary', '#FFFFFF', '#0B1218'],
   ['nb_neutral_button_background', '#8A9AA6', '#3A4750'],
@@ -76,6 +81,10 @@ const CONTRACT: Array<[string, string, string]> = [
   ['nb_status_error', '#A12622', '#F08A82'],
   ['nb_status_success_background', '#E3EFE7', '#22402F'],
   ['nb_status_warning_background', '#F5EBCF', '#3F351A'],
+  // 0.0.39 (I4) P1.6 (review §4.2): 中继 is a NORMAL NetBird path, so the relay
+  // chip's tint is the primary/info role rather than the warning one — the new
+  // token, in both modes, ~5.8:1 (dark) / ~10.5:1 (light) against nb_primary.
+  ['nb_status_info_background', '#DCE8F2', '#233240'],
   ['nb_on_status', '#FFFFFF', '#0B1218'],
   ['nb_window_status_bar_background', '#F2F6F8', '#10171D'],
   ['nb_window_navigation_bar_background', '#F2F6F8', '#10171D'],
@@ -212,9 +221,9 @@ check('peer status role mapping: connected/idle/offline/unknown',
   peerStatusResource('offline') === 'nb_border' &&
   peerStatusResource('anything-else') === 'nb_border');
 
-// stateColor/logExportToneColor/toggleColor read page state through this.*, so
-// only the pure status→role mapping above is executed; their role assignments
-// are checked structurally instead (each branch must name the contracted role).
+// stateColor/logExportToneColor read page state through this.*, so only the pure
+// status→role mapping above is executed; their role assignments are checked
+// structurally instead (each branch must name the contracted role).
 const stateColorBody = PAGE.match(/private stateColor\(\): ResourceColor \{[\s\S]*?\n  \}/);
 check('home state colour uses success/warning/error/secondary roles',
   stateColorBody !== null &&
@@ -222,12 +231,18 @@ check('home state colour uses success/warning/error/secondary roles',
   stateColorBody[0].includes("nb_status_warning") &&
   stateColorBody[0].includes("nb_status_error") &&
   stateColorBody[0].includes("nb_text_secondary"));
-const toggleColorBody = PAGE.match(/private toggleColor\(\): ResourceColor \{[\s\S]*?\n  \}/);
-check('toggle colour uses success/neutral/primary roles',
-  toggleColorBody !== null &&
-  toggleColorBody[0].includes("nb_status_success") &&
-  toggleColorBody[0].includes("nb_neutral_button_background") &&
-  toggleColorBody[0].includes("nb_primary"));
+// 0.0.39 (I4) P0.1 (review §4.3): the connect disc is a BUTTON, so its fill is the
+// action role (nb_primary) unconditionally and its STATE is the 2 vp ring, painted
+// by stateColor() — the retired toggleColor() painted the current state onto a
+// control whose label is the inverse action ("a lamp, not a button"). The check
+// moves with it: the disc must carry the primary fill, the on-primary ink and the
+// state ring, and the old state-coloured fill must not come back.
+const toggleColorBody = PAGE.match(/private toggleColor\(\): ResourceColor \{/);
+check('the connect disc fills with the action role and rings with the state role',
+  toggleColorBody === null &&
+  PAGE.includes('.backgroundColor($r(\'app.color.nb_primary\'))') &&
+  PAGE.includes('.fontColor($r(\'app.color.nb_on_primary\'))') &&
+  PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })'));
 const toneBody = PAGE.match(/private logExportToneColor\(\): ResourceColor \{[\s\S]*?\n  \}/);
 check('log-export tone uses success/warning/error/primary roles',
   toneBody !== null &&

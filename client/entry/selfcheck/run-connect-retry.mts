@@ -386,11 +386,19 @@ try {
     extSource.includes('this.publishEngineStateReport();'));
   check('P11 the force-cancel window: 2 s delay, toggle gated on it, tap aborts the ' +
     'transition instead of starting a new connect',
-    pageSource.includes('return this.stopSent || this.transitionPainted;') &&
+    // 0.0.39 (I4) DELIBERATE UPDATE (review §4.3): the disc's FILL is no longer the
+    // state marker, so the old `toggleBusy()` (stopSent || transitionPainted → a
+    // neutral fill) retired with it. The transition is still painted and still gates
+    // the tap — through the LABEL (连接中… / 正在断开…), the enabled state and the
+    // state RING (stateColor paints warning for exactly those two states).
+    !pageSource.includes('return this.stopSent || this.transitionPainted;') &&
+    pageSource.includes("if (this.stopSent) {\n      return '正在断开…';") &&
+    pageSource.includes("return this.transitionPainted ? '连接中…' : '连接';") &&
     pageSource.includes('if (this.transitionPainted) {') &&
     pageSource.includes('return this.forceCancelOpen;') &&
     pageSource.includes('if (this.forceCancelOpen) {') &&
     pageSource.includes('this.forceCancelConnection();') &&
+    pageSource.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })') &&
     forceCancel.includes('this.requestStop();'));
   check('P12 the official state set replaced our invented failure labels',
     typeof ui['engineReportState'] === 'function' &&

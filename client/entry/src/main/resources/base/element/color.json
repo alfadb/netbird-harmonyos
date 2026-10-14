@@ -73,6 +73,10 @@
       "value": "#F5EBCF"
     },
     {
+      "name": "nb_status_info_background",
+      "value": "#DCE8F2"
+    },
+    {
       "name": "nb_on_status",
       "value": "#FFFFFF"
     },

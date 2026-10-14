@@ -61,6 +61,16 @@ try {
   check('key: still unique per peer (it starts with the pub_key)',
     m.peerRowKey(peer).startsWith('KEYA|') &&
     m.peerRowKey(peer) !== m.peerRowKey({ ...peer, pub_key: 'KEYB' }));
+  // 0.0.39 (I4): the 连接概览 pane's 离线对端 rows render `last_handshake_s` as
+  // their last-seen text, so the key has to carry it — a row whose ONLY change is
+  // the stamp would otherwise keep its key, keep its node and show the old time.
+  check('key: the 离线对端 last-seen stamp is part of the key (I4\'s rendered field)',
+    m.peerRowKey({ ...peer, last_handshake_s: 7200 }) !==
+      m.peerRowKey({ ...peer, last_handshake_s: 42 }) &&
+    m.peerRowKey({ ...peer, last_handshake_s: null }) !==
+      m.peerRowKey({ ...peer, last_handshake_s: 0 }) &&
+    m.peerRowKey({ ...peer, last_handshake_s: 42 }) ===
+      m.peerRowKey({ ...peer, last_handshake_s: 42 }));
 
   // -------------------------------------------------------------------------
   // 2. the rendered list model — the documented ArkUI ForEach contract

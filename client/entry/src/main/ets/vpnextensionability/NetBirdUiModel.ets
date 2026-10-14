@@ -1239,11 +1239,21 @@ export function onlinePeerCount(peers: UiPeerEntry[]): number {
 // re-entered, which rebuilds the whole list). A row whose rendered content did not
 // change keeps its key, hence its node — the 0.0.34 skip stays as cheap as it is.
 //
-// Keep this in step with what peerRow renders (name / ip / online chip /
-// connection / status); a field added there belongs here too.
+// 0.0.39 (I4): the key gained `last_handshake_s` — the 连接概览 pane's 离线对端 rows
+// render it as their last-seen text, so a row whose ONLY change is the stamp would
+// otherwise keep its key, keep its node and show the old time. It is a safe
+// SUPERSET for the list rows (Index.peerRow does not render it, and a WireGuard
+// handshake moves every ~2 minutes, so the extra rebuilds are rare) and it is
+// exactly the rule this function states: a field rendered by a peer row belongs
+// here too.
+//
+// Keep this in step with what a peer row renders (name / ip / online chip /
+// connection / status, and the 离线对端 list's last-seen); a field added there
+// belongs here too.
 export function peerRowKey(peer: UiPeerEntry): string {
   return `${peer.pub_key}|${peer.name}|${peer.ip}|${peer.online ? '1' : '0'}` +
-    `|${peer.connection}|${peer.status}`;
+    `|${peer.connection}|${peer.status}|${peer.last_handshake_s === null ||
+      peer.last_handshake_s === undefined ? 'n' : peer.last_handshake_s}`;
 }
 
 // ---------------------------------------------------------------------------

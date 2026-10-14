@@ -1,5 +1,5 @@
 // Host-side checks for the responsive shell — DESIGN-HARMONY I1 (0.0.36), I2
-// (0.0.37) and I3 (0.0.38). No device, no build.
+// (0.0.37), I3 (0.0.38) and I4 (0.0.39). No device, no build.
 //
 // Run: node client/entry/selfcheck/run-harmony-layout.mts
 //
@@ -14,6 +14,15 @@
 //     pane's ROW POLICY (which rows exist for which document), the peer detail's
 //     DEFAULT/ADVANCED classifier, the settings column clamp and the rail's
 //     connection-region cap;
+//     0.0.39 (I4) makes the list column a TIER TABLE with its own per-tier
+//     reservation of the detail pane, states the name floor as "a 28-character
+//     fqdn at 14 vp" and sweeps EVERY window of the shell against it, replaces the
+//     overview policy with the review's five-item pane (hero / tiles / relay /
+//     offline / conditional error, plus the nothing-to-show row), replaces the
+//     detail's default/advanced split with FOUR named sections + the 域名
+//     duplicate rule, and pins the disc's fill/ring split, the rail's one text
+//     axis, the rail seam, the settings 680 cap / 240 button and the typography
+//     floor;
 //   * the WIRING in pages/Index.ets — that the narrow branch's Tabs is still
 //     there, that the split branch exists and re-parents today's builders instead
 //     of re-implementing them, that the layout never reads
@@ -21,12 +30,11 @@
 //     that the pane's content is chosen by the resolved destination (not raw
 //     activeTab), and that the rail's rows cannot break a word.
 //
-// run-peer-list-render.mts stays green next to this file: I3's two-line peer row
-// renders EXACTLY the fields 0.0.35's peerRowKey carries (name / ip / online /
-// connection / status — the IP simply moved to its own line), so no key changed.
-// The two DELIBERATE updates this file needed for I3 are marked in place: the
-// pane's navBarWidth is no longer the framework constant, and the rail has a
-// fourth info row.
+// run-peer-list-render.mts stays green next to this file: the peer row still
+// renders EXACTLY the fields peerRowKey carries (name / ip / online / connection /
+// status — the IP moved to its own line, and I4's 离线对端 last-seen text is the
+// one field that JOINED the key). The DELIBERATE updates this file needed are
+// marked in place.
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -242,7 +250,7 @@ try {
     PAGE.includes('widePaneDestination') && PAGE.includes('contentMaxWidthVp') &&
     PAGE.includes("from './NetBirdHarmonyLayout';"));
   check('rail: the nav block is 48 vp rows with a selected accent bar and group caption',
-    PAGE.includes(".height(48)") && PAGE.includes('.width(3)') &&
+    PAGE.includes(".height(48)") && PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
     PAGE.includes("Text('导航')") && PAGE.includes('PANE_DEST_PEERS') &&
     PAGE.includes('PANE_DEST_SETTINGS'));
   check('rail: pointer + keyboard affordances on the PC (hover, focus, tab order, Enter)',
@@ -282,9 +290,13 @@ try {
     PAGE.includes('.navDestination(this.peerPaneDestination)') &&
     PAGE.includes('NavDestination() {') &&
     PAGE.includes('this.peerDetailBody()'));
-  check('pane: the peer list is rendered from ONE ForEach site (no second key to drift)',
+  // 0.0.39 (I4): the peer-row KEY now serves TWO sites — the list's own ForEach and
+  // the 连接概览 pane's 离线对端 rows — and both go through the same peerRowKey, so
+  // there is still exactly one place a rendered field has to be declared. The list
+  // itself is still one site.
+  check('pane: the list is ONE ForEach site and EVERY peer row keys on peerRowKey',
     (PAGE.match(/ForEach\(this\.visiblePeers\(\)/g) ?? []).length === 1 &&
-    (PAGE.match(/\}, \(peer: UiPeerEntry\) => peerRowKey\(peer\)\)/g) ?? []).length === 1);
+    (PAGE.match(/\}, \(peer: UiPeerEntry\) => peerRowKey\(peer\)\)/g) ?? []).length === 2);
   check('pane: the 设置 body is hosted in its own single-column Navigation',
     PAGE.includes('Navigation(this.settingsNavStack) {') &&
     PAGE.includes('this.settingsTab()') &&
@@ -298,8 +310,11 @@ try {
     // above this same minContentWidth. The Auto rule this check protects is
     // unchanged, and §13 below asserts the NEW width still honours it at every
     // window of the shell.
+    // 0.0.39 (I4) DELIBERATE UPDATE: the reservation itself is TIERED now (320 at
+    // the compact tier, 360 above it) — the framework derives the real navBarWidth
+    // from it, so §13 asserts the tiered value is what keeps the split honest.
     PAGE.includes('.navBarWidth(this.peerListNavBarWidth())') &&
-    PAGE.includes('.minContentWidth(MIN_CONTENT_WIDTH_VP)'));
+    PAGE.includes('.minContentWidth(this.peerContentMinWidth())'));
   check('pane: the content area is never blank (a base route, ensured on appear)',
     PAGE.includes("const PEER_PANE_HOME_ROUTE: string = 'peerPaneHome';") &&
     PAGE.includes("const PEER_DETAIL_ROUTE: string = 'peerDetail';") &&
@@ -408,143 +423,221 @@ try {
     PAGE.includes('this.wideDestination() === PANE_DEST_PEERS'));
 
   // -------------------------------------------------------------------------
-  // 13. 0.0.38 (I3) C — THE PEER LIST COLUMN: wide enough for a real name, and
-  //     still inside the framework's Auto-split rule
+  // 13. 0.0.39 (I4) P0.2 — THE TIERED PEER LIST COLUMN and its per-tier
+  //     reservation of the detail pane (the review's §P0.1 arithmetic)
   // -------------------------------------------------------------------------
   const pane = (w: number) => m.splitPaneWidthVp(w);
-  check('peer list: the column is no longer the framework\'s flat 240 vp default',
-    m.PEER_LIST_NAV_BAR_MAX_VP === 420 &&
-    m.peerListNavBarWidthVp(pane(840)) === 240 &&
-    m.peerListNavBarWidthVp(760) === 400);
-  check('peer list: it takes exactly the pane it can spare, capped, at every tier',
-    m.peerListNavBarWidthVp(600) === 240 && m.peerListNavBarWidthVp(744) === 384 &&
-    m.peerListNavBarWidthVp(1120) === 420 && m.peerListNavBarWidthVp(4000) === 420);
-  check('peer list: THE INVARIANT — column + detail >= 600 for every window of the shell',
+  check('peer list: the column is a TIER TABLE — one cap per rail tier (360/440/480)',
+    m.PEER_LIST_NAV_BAR_CAP_COMPACT_VP === 360 &&
+    m.PEER_LIST_NAV_BAR_CAP_MEDIUM_VP === 440 &&
+    m.PEER_LIST_NAV_BAR_CAP_ROOMY_VP === 480 &&
+    m.peerListNavBarCapVp(840) === 360 && m.peerListNavBarCapVp(1023) === 360 &&
+    m.peerListNavBarCapVp(1024) === 440 && m.peerListNavBarCapVp(1439) === 440 &&
+    m.peerListNavBarCapVp(1440) === 480 && m.peerListNavBarCapVp(4000) === 480);
+  check('peer list: the compact tier reserves 320 for the detail, the rest 360',
+    m.PEER_LIST_CONTENT_MIN_COMPACT_VP === 320 && m.MIN_CONTENT_WIDTH_VP === 360 &&
+    m.peerContentMinWidthVp(840) === 320 && m.peerContentMinWidthVp(1023) === 320 &&
+    m.peerContentMinWidthVp(1024) === 360 && m.peerContentMinWidthVp(1440) === 360);
+  check('peer list: 840 vp splits the 600 vp pane 280 list / 320 detail (not 240/360)',
+    pane(840) === 600 && m.peerListNavBarWidthFor(840) === 280 &&
+    m.peerListNavBarWidthFor(840) + m.peerContentMinWidthVp(840) === pane(840));
+  check('peer list: it takes what the pane can spare, capped, at every tier',
+    m.peerListNavBarWidthFor(1023) === 360 && m.peerListNavBarWidthFor(1024) === 384 &&
+    m.peerListNavBarWidthFor(1250) === 440 && m.peerListNavBarWidthFor(1440) === 480 &&
+    m.peerListNavBarWidthFor(4000) === 480);
+  check('peer list: THE INVARIANT — column + the tier\'s reservation fits the pane, always',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         const bar: number = m.peerListNavBarWidthFor(w);
         if (bar < m.NAV_BAR_WIDTH_VP) { return false; }
-        if (bar + m.MIN_CONTENT_WIDTH_VP > m.splitPaneWidthVp(w)) { return false; }
+        if (bar + m.peerContentMinWidthVp(w) > m.splitPaneWidthVp(w)) { return false; }
+        if (m.splitPaneWidthVp(w) < m.NAV_AUTO_SPLIT_VP) { return false; }
       }
       return true;
     })());
-  check('peer list: THE LIST CAN ONLY SHRINK BY WHAT THE RAIL GROWS (<= 40 vp at a tier step)',
+  check('peer list: the column never shrinks as the window grows',
     (() => {
-      let previous = m.peerListNavBarWidthFor(840);
-      for (let w = 841; w <= 2600; w += 1) {
+      let previous = m.peerListNavBarWidthFor(m.HARMONY_BP_LG_VP - 1);
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         const bar = m.peerListNavBarWidthFor(w);
-        if (bar < previous - 40) { return false; }
+        if (bar < previous) { return false; }
         previous = bar;
       }
       return true;
     })());
   check('peer list: a nonsense pane/window width answers the framework default, never NaN',
-    m.peerListNavBarWidthVp(Number.NaN) === 240 && m.peerListNavBarWidthVp(0) === 240 &&
-    m.peerListNavBarWidthFor(Number.NaN) === 240 && m.peerListNavBarWidthFor(0) === 240);
+    m.peerListNavBarWidthVp(Number.NaN, Number.NaN) === 240 &&
+    m.peerListNavBarWidthVp(0, 0) === 240 && m.peerListNavBarWidthFor(Number.NaN) === 240 &&
+    m.peerListNavBarWidthFor(0) === 240);
 
   // -------------------------------------------------------------------------
-  // 14. 0.0.38 (I3) C — THE TWO-LINE ROW: the IP can never wrap, a real name fits
+  // 14. 0.0.39 (I4) P0.2 — THE TWO-LINE ROW: the IP can never wrap and a real
+  //     28-character fqdn fits at EVERY wide tier (the floor the review states)
   // -------------------------------------------------------------------------
-  check('peer row: the compact row is the 64 vp two-line form, its chrome budgeted',
+  check('peer row: the row is the 64 vp two-line form, its chrome budgeted per tier',
     m.PEER_ROW_MIN_HEIGHT_VP === 64 && m.PEER_ROW_LIST_PADDING_VP === 12 &&
-    m.PEER_ROW_META_WIDTH_VP === 120 && m.PEER_ROW_IP_MIN_WIDTH_VP === 120);
+    m.PEER_ROW_META_WIDE_VP === 112 && m.PEER_ROW_META_COMPACT_VP === 18 &&
+    m.PEER_ROW_L2_META_COMPACT_VP === 88 && m.PEER_ROW_IP_MIN_WIDTH_VP === 120);
+  check('peer row: the name floor is a 28-character fqdn at 14 vp (28 × 7 = 196)',
+    m.PEER_ROW_FQDN_CHARS === 28 && m.PEER_ROW_NAME_CHAR_VP === 7 &&
+    m.PEER_ROW_NAME_MIN_WIDTH_VP === 196);
   check('peer row: line 2 (the IP) owns the row minus page+card padding',
-    m.peerRowTextWidthVp(240) === 240 - 2 * 16 - 2 * 12 &&
-    m.peerRowTextWidthVp(420) === 420 - 2 * 16 - 2 * 12);
+    m.peerRowTextWidthVp(280) === 280 - 2 * 16 - 2 * 12 &&
+    m.peerRowTextWidthVp(480) === 480 - 2 * 16 - 2 * 12);
   check('peer row: THE IP NEVER WRAPS — line 2 clears the dotted-quad floor in the whole range',
     (() => {
-      for (let bar = m.NAV_BAR_WIDTH_VP; bar <= m.PEER_LIST_NAV_BAR_MAX_VP; bar += 1) {
+      for (let bar = m.NAV_BAR_WIDTH_VP; bar <= m.PEER_LIST_NAV_BAR_CAP_ROOMY_VP; bar += 1) {
         if (m.peerRowTextWidthVp(bar) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
       }
       return true;
     })());
-  check('peer row: a real 28-character fqdn fits the name column at the shell\'s top widths',
-    m.peerRowNameWidthVp(m.PEER_LIST_NAV_BAR_MAX_VP) >= m.PEER_ROW_NAME_MIN_WIDTH_VP &&
-    m.peerRowNameWidthVp(410) >= m.PEER_ROW_NAME_MIN_WIDTH_VP &&
-    m.peerRowNameWidthVp(400) >= 200,
-    `name@420=${m.peerRowNameWidthVp(420)} name@400=${m.peerRowNameWidthVp(400)} ` +
-    `floor=${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
-  check('peer row: the name column is 2 vp-multiples of the real I2 window (400 → ~224)',
-    m.peerRowNameWidthVp(400) === 400 - 2 * 16 - 2 * 12 - 120);
-  check('peer row: both text widths are monotone in the column (never shrink as it grows)',
+  check('peer row: the compact tier CONDENSES line 1 (chip + status ride line 2)',
+    m.peerRowCondensed(840) && m.peerRowCondensed(1023) && !m.peerRowCondensed(1024) &&
+    !m.peerRowCondensed(1440) && !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
+    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1024) === 112);
+  check('peer row: THE 28-CHARACTER FQDN FITS AT EVERY WINDOW OF THE SHELL',
     (() => {
-      for (let bar = m.NAV_BAR_WIDTH_VP; bar < m.PEER_LIST_NAV_BAR_MAX_VP; bar += 1) {
-        if (m.peerRowTextWidthVp(bar + 1) < m.peerRowTextWidthVp(bar)) { return false; }
-        if (m.peerRowNameWidthVp(bar + 1) < m.peerRowNameWidthVp(bar)) { return false; }
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
+        if (m.peerRowNameWidthFor(w) < m.PEER_ROW_NAME_MIN_WIDTH_VP) { return false; }
+      }
+      return true;
+    })(),
+    `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
+  check('peer row: the name column at every tier bottom and the measured I3 window',
+    m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - 18 &&
+    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - 112 &&
+    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - 112 &&
+    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - 112,
+    `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
+    `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
+  check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 1023; w += 1) {
+        const text: number = m.peerRowTextWidthVp(m.peerListNavBarWidthFor(w));
+        if (text < m.PEER_ROW_IP_MIN_WIDTH_VP + m.PEER_ROW_L2_META_COMPACT_VP) { return false; }
       }
       return true;
     })());
   check('peer search: capped, never wider than the column, degenerate width is 0',
-    m.PEER_SEARCH_MAX_WIDTH_VP === 320 && m.peerSearchWidthVp(420) === 320 &&
-    m.peerSearchWidthVp(240) === 208 && m.peerSearchWidthVp(0) === 0 &&
+    m.PEER_SEARCH_MAX_WIDTH_VP === 320 && m.peerSearchWidthVp(480) === 320 &&
+    m.peerSearchWidthVp(280) === 248 && m.peerSearchWidthVp(0) === 0 &&
     m.peerSearchWidthVp(Number.NaN) === 0);
 
   // -------------------------------------------------------------------------
-  // 15. 0.0.38 (I3) A — THE 连接概览 PANE's ROW POLICY (which rows EXIST)
+  // 15. 0.0.39 (I4) P0.4 — THE 连接概览 PANE's ROW POLICY (which rows EXIST)
   // -------------------------------------------------------------------------
   const ov = (over: object) => Object.assign(
-    { hasDocument: true, hasAddress: true, hasFqdn: true, hasTraffic: true, peerCount: 3 }, over);
-  check('overview: the full document gets every row, in one fixed order',
+    { hasAddress: true, hasFqdn: true, peerCount: 3, offlineCount: 2,
+      hasRelayInUse: true, hasError: false }, over);
+  check('overview: the full document gets hero + tiles + relay + offline, in ONE order',
     JSON.stringify(m.overviewRowKeys(ov({}))) === JSON.stringify(
-      ['address', 'fqdn', 'direct', 'relay', 'offline', 'tx', 'rx']));
-  check('overview: NO traffic section ⇒ NO 发送/接收 row (never an invented zero)',
-    JSON.stringify(m.overviewRowKeys(ov({ hasTraffic: false }))) === JSON.stringify(
-      ['address', 'fqdn', 'direct', 'relay', 'offline']));
+      ['address', 'fqdn', 'connected', 'direct', 'relay', 'relayInUse', 'offline']));
+  check('overview: the recorded error is the LAST row, and only when one exists',
+    (() => {
+      const withError = m.overviewRowKeys(ov({ hasError: true }));
+      return withError[withError.length - 1] === 'error' &&
+        m.overviewRowKeys(ov({ hasError: false })).indexOf('error') < 0;
+    })());
   check('overview: no own address / no fqdn ⇒ those rows are omitted',
     m.overviewRowKeys(ov({ hasAddress: false })).indexOf('address') < 0 &&
     m.overviewRowKeys(ov({ hasFqdn: false })).indexOf('fqdn') < 0);
-  check('overview: no peers at all ⇒ no counts row, but the identity rows stay',
-    JSON.stringify(m.overviewRowKeys(ov({ peerCount: 0 }))) === JSON.stringify(
-      ['address', 'fqdn', 'tx', 'rx']));
-  check('overview: no document at all ⇒ only the traffic policy cannot fire',
-    m.overviewRowKeys({ hasDocument: false, hasAddress: false, hasFqdn: false,
-      hasTraffic: false, peerCount: 0 }).length === 0);
+  check('overview: no peers at all ⇒ NO tiles (never an invented zero), identity stays',
+    JSON.stringify(m.overviewRowKeys(ov({ peerCount: 0, offlineCount: 0 }))) === JSON.stringify(
+      ['address', 'fqdn', 'relayInUse']));
+  check('overview: no relay in use / nobody offline ⇒ those rows are omitted',
+    m.overviewRowKeys(ov({ hasRelayInUse: false })).indexOf('relayInUse') < 0 &&
+    m.overviewRowKeys(ov({ offlineCount: 0 })).indexOf('offline') < 0);
+  check('overview: nothing at all to show ⇒ the ONE honest row, never an empty pane',
+    JSON.stringify(m.overviewRowKeys({ hasAddress: false, hasFqdn: false, peerCount: 0,
+      offlineCount: 0, hasRelayInUse: false, hasError: false })) === JSON.stringify(['none']));
   check('overview: there is NO 连接时长 row anywhere (the document carries no such stamp)',
     JSON.stringify(m.overviewRowKeys(ov({}))).indexOf('duration') < 0 &&
     !PAGE.includes("label: '连接时长'") && !PAGE.includes("Text('连接时长')") &&
     !PAGE.includes("'连接时长'"));
+  check('overview: the offline list is capped at 5 and the tile geometry is the review\'s',
+    m.OVERVIEW_OFFLINE_MAX_ROWS === 5 && m.OVERVIEW_TILE_HEIGHT_VP === 96 &&
+    m.TYPE_STAT_VALUE_VP === 24);
 
   // -------------------------------------------------------------------------
-  // 16. 0.0.38 (I3) B — THE PEER DETAIL's DEFAULT / ADVANCED CLASSIFIER
+  // 16. 0.0.39 (I4) P1.7 — THE PEER DETAIL's FOUR SECTIONS
   // -------------------------------------------------------------------------
-  check('detail: the DEFAULT rows are exactly B\'s user-facing list',
-    JSON.stringify(m.PEER_DETAIL_DEFAULT_LABELS) === JSON.stringify(
-      ['状态', '连接方式', '最近握手', '发送', '接收', '域名', 'NetBird IP']));
-  check('detail: every default label classifies as default, and the jargon as advanced',
-    m.peerDetailGroupOf('状态') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('连接方式') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('最近握手') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('发送') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('接收') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('域名') === m.PEER_DETAIL_DEFAULT &&
-    m.peerDetailGroupOf('NetBird IP') === m.PEER_DETAIL_DEFAULT);
-  check('detail: B\'s whole jargon list hides behind the collapsed section',
-    ['ICE 状态', 'ICE 角色', 'ICE 本端', 'ICE 对端', 'ICE 可达性', 'ICE 最近错误',
-      'ICE 说明', '承载', '中继通道地址', '对端端点', '本机出口', '本机中继会话',
-      '对端网络'].every((label) => m.peerDetailGroupOf(label) === m.PEER_DETAIL_ADVANCED));
-  check('detail: an UNCLASSIFIED label is ADVANCED (the fail-safe direction)',
-    m.peerDetailGroupOf('公钥') === m.PEER_DETAIL_ADVANCED &&
-    m.peerDetailGroupOf('说明') === m.PEER_DETAIL_ADVANCED &&
-    m.peerDetailGroupOf('某个新行') === m.PEER_DETAIL_ADVANCED);
-  check('detail: the two label lists are disjoint (no row can render in both layers)',
-    m.PEER_DETAIL_DEFAULT_LABELS.every(
-      (label) => m.PEER_DETAIL_ADVANCED_LABELS.indexOf(label) < 0));
+  check('detail: the 连接 section is the session the user came for',
+    JSON.stringify(m.PEER_DETAIL_CONNECTION_LABELS) === JSON.stringify(
+      ['域名', 'NetBird IP', '状态', '连接方式', '最近握手', '发送', '接收']));
+  check('detail: 路径 is the endpoints and the bearer',
+    JSON.stringify(m.PEER_DETAIL_PATH_LABELS) === JSON.stringify(
+      ['对端端点', '本机出口', '对端网络', '承载', '中继通道地址', '本机中继会话']));
+  check('detail: ICE is the six candidate-path rows (说明 is a caption, not a row)',
+    JSON.stringify(m.PEER_DETAIL_ICE_LABELS) === JSON.stringify(
+      ['ICE', 'ICE 状态', 'ICE 角色', 'ICE 本端', 'ICE 对端', 'ICE 可达性', 'ICE 最近错误']) &&
+    m.PEER_DETAIL_ICE_LABELS.indexOf('ICE 说明') < 0);
+  check('detail: 标识 is the public key alone',
+    JSON.stringify(m.PEER_DETAIL_IDENTITY_LABELS) === JSON.stringify(['公钥']));
+  check('detail: the classifier maps every label to exactly ONE of the four sections',
+    m.peerDetailSectionOf('状态') === m.PEER_DETAIL_CONNECTION &&
+    m.peerDetailSectionOf('域名') === m.PEER_DETAIL_CONNECTION &&
+    m.peerDetailSectionOf('发送') === m.PEER_DETAIL_CONNECTION &&
+    m.peerDetailSectionOf('承载') === m.PEER_DETAIL_PATH &&
+    m.peerDetailSectionOf('对端端点') === m.PEER_DETAIL_PATH &&
+    m.peerDetailSectionOf('中继通道地址') === m.PEER_DETAIL_PATH &&
+    m.peerDetailSectionOf('ICE 状态') === m.PEER_DETAIL_ICE &&
+    m.peerDetailSectionOf('ICE 最近错误') === m.PEER_DETAIL_ICE &&
+    m.peerDetailSectionOf('公钥') === m.PEER_DETAIL_IDENTITY);
+  check('detail: an UNCLASSIFIED label falls into the COLLAPSED 路径 section',
+    m.peerDetailSectionOf('某个新行') === m.PEER_DETAIL_PATH &&
+    m.peerDetailSectionOf('说明') === m.PEER_DETAIL_PATH);
+  check('detail: the four label lists are disjoint (no row can render in two sections)',
+    (() => {
+      const lists = [m.PEER_DETAIL_CONNECTION_LABELS, m.PEER_DETAIL_PATH_LABELS,
+        m.PEER_DETAIL_ICE_LABELS, m.PEER_DETAIL_IDENTITY_LABELS];
+      const seen: string[] = [];
+      for (const list of lists) {
+        for (const label of list) {
+          if (seen.indexOf(label) >= 0) { return false; }
+          seen.push(label);
+        }
+      }
+      return true;
+    })());
+  check('detail: the 域名 row is dropped exactly when it repeats the card title',
+    m.peerFqdnDuplicatesTitle('blkint.netcenter.local', 'blkint.netcenter.local') &&
+    !m.peerFqdnDuplicatesTitle('blkint (手改)', 'blkint.netcenter.local') &&
+    !m.peerFqdnDuplicatesTitle('blkint.netcenter.local', '') &&
+    !m.peerFqdnDuplicatesTitle('', ''));
 
   // -------------------------------------------------------------------------
-  // 17. 0.0.38 (I3) D/E — the settings clamp and the rail's connection cap
+  // 17. 0.0.39 (I4) P0.3 — the settings clamp, the button, the detail cap
   // -------------------------------------------------------------------------
-  check('settings: the column cap is 840 and it only constrains where it can bite',
-    m.SETTINGS_CONTENT_MAX_WIDTH_VP === 840 &&
-    m.settingsContentMaxWidthVp(840) === 0 && m.settingsContentMaxWidthVp(761) === 0 &&
-    m.settingsContentMaxWidthVp(841) === 840 && m.settingsContentMaxWidthVp(2560) === 840 &&
+  check('settings: the column cap is 680 (I3 used 840) and bites only from pane > 680',
+    m.SETTINGS_CONTENT_MAX_WIDTH_VP === 680 &&
+    m.settingsContentMaxWidthVp(680) === 0 && m.settingsContentMaxWidthVp(601) === 0 &&
+    m.settingsContentMaxWidthVp(681) === 680 && m.settingsContentMaxWidthVp(2560) === 680 &&
     m.settingsContentMaxWidthVp(Number.NaN) === 0);
   check('rail: the connection region is capped so the nav group can never be pushed out',
     m.RAIL_CONNECTION_MAX_HEIGHT_PCT === 60);
-  check('buttons: the inline (non-primary) button width is a real button, not a bar',
-    m.BUTTON_INLINE_WIDTH_VP > 0 && m.BUTTON_INLINE_WIDTH_VP <= 200);
+  check('buttons: the inline (non-primary) button is the review\'s ~240, not a bar',
+    m.BUTTON_INLINE_WIDTH_VP === 240);
+  check('detail: the detail card is capped at 720 vp',
+    m.DETAIL_CONTENT_MAX_WIDTH_VP === 720 &&
+    m.OVERVIEW_CONTENT_MAX_WIDTH_VP === 720);
 
   // -------------------------------------------------------------------------
-  // 18. the I3 WIRING, against the shipped page source
+  // 17b. 0.0.39 (I4) P1.8 — THE RAIL's one text axis and its seam
+  // -------------------------------------------------------------------------
+  check('rail axis: every rail line lands on 32 vp, from the module\'s own numbers',
+    m.RAIL_TEXT_AXIS_VP === 32 &&
+    m.RAIL_DESTINATIONS_PADDING_VP + m.RAIL_CARD_PADDING_VP === m.RAIL_TEXT_AXIS_VP &&
+    m.RAIL_DESTINATIONS_PADDING_VP + m.RAIL_NAV_ROW_PADDING_VP + m.RAIL_NAV_BAR_WIDTH_VP +
+      m.RAIL_NAV_LABEL_GAP_VP === m.RAIL_TEXT_AXIS_VP &&
+    m.RAIL_PAGE_PADDING_VP + m.RAIL_CARD_PADDING_VP === m.RAIL_TEXT_AXIS_VP &&
+    m.RAIL_NAV_BAR_WIDTH_VP === 3);
+  check('rail seam: the rail/pane boundary is a 1 vp stroke, one vp grid',
+    m.RAIL_SEAM_WIDTH_VP === 1);
+  check('disc: the state ring is 2 vp (the review\'s §4.3)',
+    m.CONNECT_RING_WIDTH_VP === 2);
+
+  // -------------------------------------------------------------------------
+  // 18. the I3 + I4 WIRING, against the shipped page source
   // -------------------------------------------------------------------------
   check('A: the pane\'s no-selection page is the 连接概览, and the I2 hint is gone',
     PAGE.includes('this.connectionOverviewPane()') &&
@@ -552,28 +645,80 @@ try {
     !PAGE.includes('this.widePeerHint()') &&
     !PAGE.includes("Text('选择一个对端查看详情')") &&
     PAGE.includes("Text('连接概览')") &&
-    PAGE.includes('this.overviewPanelRows()') &&
-    PAGE.includes('private overviewPanelRows(): DetailField[] {') &&
-    PAGE.includes('overviewRowKeys(this.overviewFacts())'));
+    PAGE.includes('this.overviewRowKeys()') &&
+    PAGE.includes('private overviewRowKeys(): string[] {') &&
+    PAGE.includes('return overviewRowKeys(this.overviewFacts());'));
   check('A: the overview reads live state only (no new field, no frozen by-value row)',
     PAGE.includes('private overviewDirectCount(): number {') &&
     PAGE.includes('private overviewRelayCount(): number {') &&
     PAGE.includes('private overviewOfflineCount(): number {') &&
-    PAGE.includes('private overviewTrafficText(sent: boolean): string {') &&
+    PAGE.includes('private overviewOfflinePeers(): UiPeerEntry[] {') &&
     PAGE.includes('return byteText(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);') &&
+    PAGE.includes('private overviewHas(key: string): boolean {') &&
     !PAGE.includes('@State overviewRows'));
-  check('B: the detail is two ForEach layers fed by ONE row source and one classifier',
-    PAGE.includes('private selectedPeerFieldsByGroup(group: string): DetailField[] {') &&
-    PAGE.includes('if (peerDetailGroupOf(all[i].label) === group) {') &&
-    PAGE.includes('this.selectedPeerPrimaryFields()') &&
-    PAGE.includes('this.selectedPeerAdvancedFields()') &&
-    PAGE.includes('PEER_DETAIL_DEFAULT)') &&
+  check('A: THE PANE CARRIES THE NUMBERS — hero, three tiles, relay, offline, error',
+    (() => {
+      const from = PAGE.indexOf('connectionOverviewPane() {');
+      const pane = PAGE.slice(from, PAGE.indexOf('keepAliveCard() {', from));
+      return pane.includes('this.homeAddressText()') && pane.includes('this.homeFqdnText()') &&
+        pane.includes('this.overviewDirectCount()') && pane.includes('this.overviewRelayCount()') &&
+        pane.includes('this.relayUrlText()') &&
+        pane.includes('this.overviewOfflinePeers()') &&
+        pane.includes('this.lastErrorLine()') &&
+        pane.includes("Text('已连接')") && pane.includes("Text('直连')") &&
+        pane.includes("Text('中继')") &&
+        pane.includes('OVERVIEW_TILE_HEIGHT_VP') && pane.includes('TYPE_STAT_VALUE_VP') &&
+        pane.includes('OV_TILE_CONNECTED') && pane.includes('OV_HERO_ADDRESS') &&
+        pane.includes('OV_ROW_RELAY_IN_USE') && pane.includes('OV_ROW_OFFLINE') &&
+        pane.includes('OV_ROW_ERROR') && pane.includes('OV_ROW_NONE');
+    })());
+  check('A: THE NON-DUPLICATION GUARD — no connect control and no verdict row in the pane',
+    (() => {
+      const from = PAGE.indexOf('connectionOverviewPane() {');
+      const pane = PAGE.slice(from, PAGE.indexOf('keepAliveCard() {', from));
+      // No connect command and no second state lamp: the rail owns both.
+      return !pane.includes('this.toggleLabel()') && !pane.includes('this.requestStart()') &&
+        !pane.includes('this.requestStop()') && !pane.includes('this.beginConnectLogin()') &&
+        !pane.includes('Button(') &&
+        !pane.includes('this.stateText()') && !pane.includes('this.stateColor()') &&
+        !pane.includes('this.toggleOn()');
+    })());
+  check('B: the detail is FOUR sections fed by ONE row source and one classifier',
+    PAGE.includes('private peerDetailSectionFields(section: string): DetailField[] {') &&
+    PAGE.includes('if (peerDetailSectionOf(field.label) !== section) {') &&
+    PAGE.includes('this.peerDetailSectionFields(PEER_DETAIL_CONNECTION)') &&
+    PAGE.includes('this.peerDetailSectionFields(PEER_DETAIL_PATH)') &&
+    PAGE.includes('this.peerDetailSectionFields(PEER_DETAIL_ICE)') &&
+    PAGE.includes('this.peerDetailSectionFields(PEER_DETAIL_IDENTITY)') &&
     (PAGE.match(/this\.selectedPeerFields\(\)/g) ?? []).length === 1);
-  check('B: the advanced layer is COLLAPSED by default and is a real expandable header',
-    PAGE.includes('@State peerAdvancedOpen: boolean = false;') &&
-    PAGE.includes("title: '高级信息 / 诊断',") &&
-    PAGE.includes('expanded: this.peerAdvancedOpen,') &&
-    PAGE.includes('this.peerAdvancedOpen = !this.peerAdvancedOpen;'));
+  check('B: only the 连接 section is OPEN; 路径 / ICE / 标识 are collapsed headers',
+    PAGE.includes('@State peerConnectionOpen: boolean = true;') &&
+    PAGE.includes('@State peerPathOpen: boolean = false;') &&
+    PAGE.includes('@State peerIceOpen: boolean = false;') &&
+    PAGE.includes('@State peerIdentityOpen: boolean = false;') &&
+    PAGE.includes("title: '连接',") && PAGE.includes("title: '路径',") &&
+    PAGE.includes("title: 'ICE',") && PAGE.includes("title: '标识',") &&
+    PAGE.includes('expanded: this.peerConnectionOpen,') &&
+    PAGE.includes('expanded: this.peerIdentityOpen,') &&
+    !PAGE.includes('高级信息 / 诊断') &&
+    !PAGE.includes('@State peerAdvancedOpen'));
+  check('B: the 域名 duplicate rule, the mono public key and the 720 vp card cap are wired',
+    PAGE.includes('peerFqdnDuplicatesTitle(title, field.value)') &&
+    PAGE.includes('DetailRow({ label: field.label, value: field.value, mono: true })') &&
+    PAGE.includes('@Prop mono: boolean = false;') &&
+    PAGE.includes('.constraintSize({ maxWidth: DETAIL_CONTENT_MAX_WIDTH_VP })') &&
+    PAGE.includes('private peerDetailSectionFields(') &&
+    PAGE.includes('const title: string = this.selectedPeerName();'));
+  check('B: the ICE 说明 and the accounting caveat are 14 vp CAPTIONS, not rows',
+    (() => {
+      // Scoped to the DETAIL pane's own row source: the 详细状态 page legitimately
+      // has its own 说明 rows, and this rule is about the peer detail.
+      const fields = PAGE.slice(PAGE.indexOf('private selectedPeerFields(): DetailField[] {'),
+        PAGE.indexOf('private peerDetailSectionFields('));
+      return !fields.includes("label: 'ICE 说明'") && !fields.includes("label: '说明'") &&
+        PAGE.includes('ICE 各行只描述候选路径与端点应用情况') &&
+        PAGE.includes('发送/接收为本对端的明文 IP 载荷字节');
+    })());
   check('B: the default rows carry plain Chinese (no 明文 / no session jargon)',
     PAGE.includes("label: '发送'") && PAGE.includes("label: '接收'") &&
     PAGE.includes("value: peer.online ? connectionLabel(peer.connection) : '未连接'") &&
@@ -583,21 +728,21 @@ try {
       // Scoped to the detail pane's own rows: the 详细状态 page's per-peer BLOCK
       // text (peerBlockText) legitimately keeps the diagnostic phrasing.
       const fields = PAGE.slice(PAGE.indexOf('private selectedPeerFields(): DetailField[] {'),
-        PAGE.indexOf('private selectedPeerFieldsByGroup('));
+        PAGE.indexOf('private peerDetailSectionFields('));
       return !fields.includes('未知（无本机会话）') && fields.includes(": '未连接'");
     })());
-  check('C: the row is TWO-LINE — the IP is line 2 at the row\'s full width, maxLines(1)',
+  check('C: the compact tier condenses the row and the 已连接 text no longer renders',
     (() => {
       const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
         PAGE.indexOf('peersTab() {'));
-      const ipAt = row.indexOf("Text(peer.ip.length > 0 ? peer.ip : '无 IP')");
-      const line1At = row.indexOf('Row({ space: 8 }) {');
-      return line1At > 0 && ipAt > line1At && row.includes('.width(\'100%\')') &&
-        row.includes('.maxLines(1)') &&
-        row.includes('.constraintSize({ minHeight: PEER_ROW_MIN_HEIGHT_VP })') &&
-        row.includes('.padding({ top: 12, bottom: 12 })');
+      // the chip appears in BOTH shapes (line 1 wide / line 2 compact) and the
+      // status text is gated on a non-connected status in both.
+      return (row.match(/this\.peerRowCondensed\(\)/g) ?? []).length >= 3 &&
+        (row.match(/connectionLabel\(peer.connection\)/g) ?? []).length === 2 &&
+        (row.match(/if \(peer\.status !== 'connected'/g) ?? []).length === 2 &&
+        row.indexOf('if (peer.online && !this.peerRowCondensed()) {') > 0;
     })());
-  check('C: the row renders EXACTLY the fields peerRowKey carries (no new column)',
+  check('C: the row renders EXACTLY the fields peerRowKey carries (no new column here)',
     (() => {
       const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
         PAGE.indexOf('peersTab() {'));
@@ -608,9 +753,13 @@ try {
         !row.includes('peer.last_handshake_s') && !row.includes('peer.endpoint') &&
         !row.includes('peer.tx_bytes');
     })());
-  check('C/F: the list column width and the search width are the pure tables\' answers',
+  check('C/F: the list column, the reservation and the search are the pure tables\' answers',
     PAGE.includes('private peerListNavBarWidth(): number {') &&
     PAGE.includes('return peerListNavBarWidthFor(this.widthVp);') &&
+    PAGE.includes('private peerContentMinWidth(): number {') &&
+    PAGE.includes('return peerContentMinWidthVp(this.widthVp);') &&
+    PAGE.includes('private peerRowCondensed(): boolean {') &&
+    PAGE.includes('return peerRowCondensed(this.widthVp);') &&
     PAGE.includes('private peerSearchWidth(): Length {') &&
     PAGE.includes('.width(this.peerSearchWidth())') &&
     PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
@@ -626,7 +775,30 @@ try {
       const card = PAGE.slice(PAGE.indexOf('serverConfigCard() {'),
         PAGE.indexOf('logoutAction() {'));
       return card.includes('.width(BUTTON_INLINE_WIDTH_VP)') &&
-        !card.includes("Button('更改配置')\n        .fontSize(15)\n        .height(40)\n        .width('100%')");
+        !card.includes("Button('更改配置')\n        .fontSize(TYPE_BODY_VP)\n        .height(40)\n        .width('100%')");
+    })());
+  check('D: 注销 lives INSIDE the server card, behind a 1 vp divider (no orphan red row)',
+    (() => {
+      const card = PAGE.slice(PAGE.indexOf('serverConfigCard() {'),
+        PAGE.indexOf('// 诊断日志 (settings tab'));
+      const tab = PAGE.slice(PAGE.indexOf('settingsTab() {'),
+        PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
+      return card.includes('this.logoutAction()') && card.includes('.height(1)') &&
+        !tab.includes('this.logoutAction()');
+    })());
+  check('D: the 关于 rows put the VALUE at the row\'s end (valueEnd: true)',
+    PAGE.includes('@Prop valueEnd: boolean = false;') &&
+    PAGE.includes('textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)') &&
+    (PAGE.match(/valueEnd: true/g) ?? []).length === 2 &&
+    PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',"));
+  check('D: the settings surface has NO text literal below the 14 vp PC floor',
+    (() => {
+      const from = PAGE.indexOf('setupFormCard() {');
+      const to = PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择');
+      const settings = PAGE.slice(from, to);
+      const sizes = settings.match(/\.fontSize\((\d+)\)/g) ?? [];
+      return sizes.length > 0 &&
+        sizes.every((site) => Number(site.replace(/\D/g, '')) >= 14);
     })());
   check('D: the 诊断日志 explanation is behind a collapsed 说明, not a grey wall',
     PAGE.includes('@State diagnosticsNoteOpen: boolean = false;') &&
@@ -638,7 +810,7 @@ try {
       return card.indexOf('if (this.diagnosticsNoteOpen) {') > 0 &&
         card.indexOf('if (this.diagnosticsNoteOpen) {') < card.indexOf('滚动保留：');
     })());
-  check('E: the rail\'s connection region is CONTENT height (the I2 gap is gone)',
+  check('E: the rail centres the identity block and pins the nav block at the bottom',
     PAGE.includes('private homeBodyHeight(): Length {') &&
     PAGE.includes("return this.wideLayout() ? 'auto' : '100%';") &&
     PAGE.includes('.height(this.homeBodyHeight())') &&
@@ -646,9 +818,14 @@ try {
     (() => {
       const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
         PAGE.indexOf('railDestinations() {'));
+      // 0.0.39 (I4) DELIBERATE UPDATE: the rail now carries exactly ONE
+      // layoutWeight(1) — the centring wrapper around the identity block, which is
+      // what pushes the navigation group to the bottom (the review's §1.2 option a).
       return rail.includes('.height(\'auto\')') &&
         rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
-        !rail.includes('.layoutWeight(1)');
+        (rail.match(/\.layoutWeight\(1\)/g) ?? []).length === 1 &&
+        rail.indexOf('.layoutWeight(1)') > rail.indexOf('this.homeTab()') &&
+        rail.includes('.justifyContent(FlexAlign.Center)');
     })());
   check('E: the 详细状态 row is a proper entry (short subtitle + chevron, no 路… artefact)',
     PAGE.includes("Text('中继 · DNS · 路由 · 流量')") &&
@@ -658,6 +835,14 @@ try {
       const row = PAGE.slice(at, at + 500);
       return row.includes("Text('›')") && !row.includes('textOverflow');
     })());
+  check('E+8: the rail text sits on ONE axis and the rail/pane seam is drawn',
+    PAGE.includes('.padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })') &&
+    PAGE.includes('.margin({ left: RAIL_NAV_LABEL_GAP_VP })') &&
+    PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
+    PAGE.includes('.padding({ left: RAIL_CARD_PADDING_VP, bottom: 4 })') &&
+    PAGE.includes('.padding({ left: RAIL_CARD_PADDING_VP })') &&
+    PAGE.includes('left: RAIL_DESTINATIONS_PADDING_VP, right: RAIL_DESTINATIONS_PADDING_VP,') &&
+    PAGE.includes('.border({ width: { right: RAIL_SEAM_WIDTH_VP }, color: $r(\'app.color.nb_card_border\') })'));
   check('A: THE CONNECTED + NO-SELECTION PANE IS THE 连接概览 (the whole chain)',
     // the pure rule: fully connected, no explicit choice -> the 对端 destination
     m.widePaneDestination({ activeTab: 0, connected: true, needsLogin: false }) ===
@@ -670,6 +855,28 @@ try {
     PAGE.indexOf('} else if (name === PEER_PANE_HOME_ROUTE) {') <
       PAGE.indexOf('this.connectionOverviewPane()') &&
     !PAGE.includes('this.widePeerHint()'));
+  check('P0.1: the disc fills with the ACTION role and rings with the STATE role',
+    PAGE.includes('private stateColor(): ResourceColor {') &&
+    PAGE.includes('.backgroundColor($r(\'app.color.nb_primary\'))') &&
+    PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })') &&
+    !PAGE.includes('private toggleColor()') &&
+    !PAGE.includes('private toggleBusy()') &&
+    PAGE.includes('return this.wideLayout() ? 104 : 132;') &&
+    PAGE.includes('return this.wideLayout() ? 18 : 22;'));
+  check('P1.6: the 中继 chip carries the primary tint, warning stays for warnings',
+    // The chip is the only tinted pill in the peer row and it pairs the primary INK
+    // with the info tint in BOTH row shapes. The warning tint keeps its ONE other
+    // user on this page (the "no status document" banner), i.e. a real warning.
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      const info = /\$r\('app\.color\.nb_status_info_background'\)/g;
+      const primary = /\$r\('app\.color\.nb_primary'\)/g;
+      const warning = /\$r\('app\.color\.nb_status_warning_background'\)/g;
+      return (row.match(info) ?? []).length === 2 && !warning.test(row) &&
+        (row.match(primary) ?? []).length === 2 &&
+        (PAGE.match(warning) ?? []).length === 1;
+    })());
   check('G: the narrow branch keeps its information architecture (bottom tabs, one column)',
     PAGE.includes('Tabs({ barPosition: BarPosition.End, index: this.activeTab })') &&
     PAGE.includes("this.settingsTab()") &&

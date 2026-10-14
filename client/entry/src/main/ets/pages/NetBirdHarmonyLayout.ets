@@ -20,6 +20,17 @@
 // detail's default/advanced split as a classifier over a row's label, the
 // settings column's width clamp and the rail's connection-region cap.
 //
+// 0.0.39 (I4): the independent visual review (pc-ui-design/K3-REVIEW-I2.md) read
+// the I2 build and its P0.2 asked for TWO things the I3 column could not do at
+// once — the column becomes a TIERED table (a cap per rail tier, plus its own
+// per-tier reservation of the detail pane's minimum), and the ROW itself is
+// condensed at the narrowest wide tier so the name column reaches a floor that is
+// stated as "what a 28-character fqdn needs at 14 vp". The same review's P0.3/P1
+// set the settings column to 680, the 关于 values to the row's end, the rail's
+// text to ONE axis, the peer detail to four named sections and the connect disc's
+// fill/ring split. Every one of those numbers lives here, so the host selfcheck
+// can assert them instead of a screenshot.
+//
 // Nothing here reads `deviceInfo.deviceType`: the layout follows the WINDOW, never
 // the device (a 2in1 window can be dragged through every tier — DESIGN-HARMONY
 // §A.2/§C.2). deviceType stays where it is already correct: the tray gate and
@@ -311,6 +322,8 @@ export const TYPE_SECTION_TITLE_VP: number = 16;
 export const TYPE_BODY_VP: number = 15;
 /** Secondary/caption text: ≥ 12 vp everywhere, ≥ 14 vp on the PC (this value). */
 export const TYPE_CAPTION_VP: number = 14;
+/** The 连接概览 pane's stat-tile number (the review's 24 vp Medium tile figure). */
+export const TYPE_STAT_VALUE_VP: number = 24;
 
 // ---- the rail's inner width and the label/value policy ----------------------
 /**
@@ -322,6 +335,40 @@ export const RAIL_PAGE_PADDING_VP: number = 16;
 export const RAIL_CARD_PADDING_VP: number = 16;
 /** The floor the label/value rows need to render a value on ONE line. */
 export const RAIL_INFO_MIN_VALUE_VP: number = 160;
+
+// ---- the rail's ONE text axis (0.0.39, I4) ---------------------------------
+// The review's §5.1: the rail's text started on three different x positions —
+// the card's text at 32 (page 16 + card 16), the 导航 caption at 24, the nav
+// labels at 35 — and the wordmark was centred. One axis at 32, expressed here so
+// the page can be laid out from it and the selfcheck can assert the sum:
+//
+//   caption      RAIL_DESTINATIONS_PADDING_VP + RAIL_CARD_PADDING_VP     = 32
+//   nav label    RAIL_DESTINATIONS_PADDING_VP + RAIL_NAV_ROW_PADDING_VP
+//                  + RAIL_NAV_BAR_WIDTH_VP + RAIL_NAV_LABEL_GAP_VP        = 32
+//   wordmark     RAIL_PAGE_PADDING_VP + RAIL_CARD_PADDING_VP             = 32
+//   card text    RAIL_PAGE_PADDING_VP + RAIL_CARD_PADDING_VP             = 32
+/** The rail's one text axis (vp): every rail text line starts here. */
+export const RAIL_TEXT_AXIS_VP: number = 32;
+/** The destinations block's outer padding (vp) — the axis minus the card padding. */
+export const RAIL_DESTINATIONS_PADDING_VP: number =
+  RAIL_TEXT_AXIS_VP - RAIL_CARD_PADDING_VP;
+/** The nav row's own left padding (vp): 0, so the accent bar hugs the block edge. */
+export const RAIL_NAV_ROW_PADDING_VP: number = 0;
+/** The selected accent bar's width (vp). */
+export const RAIL_NAV_BAR_WIDTH_VP: number = 3;
+/** The gap between that bar and the nav label (vp) — what lands the label on 32. */
+export const RAIL_NAV_LABEL_GAP_VP: number =
+  RAIL_TEXT_AXIS_VP - RAIL_DESTINATIONS_PADDING_VP - RAIL_NAV_BAR_WIDTH_VP;
+/** The rail/content seam's stroke (vp): the rail and the pane share one surface. */
+export const RAIL_SEAM_WIDTH_VP: number = 1;
+
+// ---- the connect control's state ring (0.0.39, I4) -------------------------
+// The review's §4.3: the 104 vp disc painted the CURRENT STATE as its fill while
+// its label is the INVERSE ACTION (断开 on green), so it read as a lamp and it
+// outranked the status card it exists to support. Fill = the primary action role
+// always; the state moves to this ring in the state colour.
+/** The connect disc's state ring (vp). */
+export const CONNECT_RING_WIDTH_VP: number = 2;
 
 /**
  * The width (vp) an info row's VALUE gets in the rail's card: the rail width
@@ -367,35 +414,130 @@ export function railInfoValueWidthVp(widthVp: number): number {
 // never wraps" and "real names fit" requirements become arithmetic instead of a
 // screenshot someone has to squint at.
 
-/** The most the peer list column may take from the pane (vp). */
-export const PEER_LIST_NAV_BAR_MAX_VP: number = 420;
+// 0.0.39 (I4) — THE TIERED LIST COLUMN AND THE 28-CHARACTER NAME FLOOR
+// ---------------------------------------------------------------------------
+// I3 widened the column to `pane - 360` (capped 420), which is right for a
+// 1024 vp+ window and does NOTHING at the bottom of the shell: at 840 vp the rail
+// is 240, the pane is exactly 600, and the detail pane's own 360 vp reservation
+// leaves the list column at 240 — the same column the review measured, with the
+// name down to ~64 vp (the "blkint…" of §P0.1). Three things fix it, and all
+// three are arithmetic here:
+//
+//   1. THE COLUMN IS A TIER TABLE (like the rail's own 240/280/320): a cap per
+//      rail tier — 360 / 440 / 480 — monotone in the window, so the list is never
+//      narrower than I3's at any window and a 4000 vp desktop window cannot give
+//      the list a 2000 vp column.
+//   2. THE COMPACT TIER RESERVES LESS FOR THE DETAIL. NavigationMode.Auto derives
+//      its split from the DEFAULTS (240 + 360 = 600) and clamps the real
+//      navBarWidth to `pane - minContentWidth - 1`, so the reservation is ours to
+//      set per tier: at the compact tier the pane's 600 vp is split 280 (list) /
+//      320 (detail) instead of 240 / 360. The 40 vp the list gains is exactly what
+//      makes a real fqdn fit; the detail keeps 320 vp, the width the review's own
+//      numbers leave it, and the pane still splits (320 > 0 and the framework's
+//      `>= 600 vp` rule is measured on the PANE, which never moves).
+//   3. THE ROW IS CONDENSED AT THAT TIER. The 直连/中继 chip and the 空闲/离线 text
+//      move from line 1 to line 2 (beside the IP, which only needs its own 120 vp
+//      floor), leaving line 1's name all but the status dot. Line 2 still holds
+//      everything it did (the IP never wraps: text >= 120 + 88 at every tier).
+//
+// The floor itself is stated the way the review stated it — "what a 28-character
+// fqdn needs at 14 vp" — as 28 x 7 vp (0.5 em, the proportional-Latin rule of
+// thumb, at the 14 vp caption size the PC floor is set in). The selfcheck sweeps
+// EVERY window of the shell (840 … 4000) and asserts the name column clears it,
+// so "a real name fits" is a property of the table, not of one screenshot.
+
+/** The peer list column's cap (vp) at the compact rail tier — [840, 1024). */
+export const PEER_LIST_NAV_BAR_CAP_COMPACT_VP: number = 360;
+/** The peer list column's cap (vp) at the medium rail tier — [1024, 1440). */
+export const PEER_LIST_NAV_BAR_CAP_MEDIUM_VP: number = 440;
+/** The peer list column's cap (vp) at the roomy rail tier — [1440, +inf). */
+export const PEER_LIST_NAV_BAR_CAP_ROOMY_VP: number = 480;
+/**
+ * The compact tier's reservation for the detail pane (vp). 360 is the framework's
+ * own minContentWidth default and stays the reservation at the two wider tiers;
+ * the compact tier reserves 320 so the 600 vp pane at the bottom of the shell
+ * splits 280 / 320 — the same 600 the Auto rule requires, redistributed towards
+ * the list (the review's §P0.1: "the navBar is the bottleneck, not the rail").
+ */
+export const PEER_LIST_CONTENT_MIN_COMPACT_VP: number = 320;
 /** The peer list card's own left/right padding (vp) — 8 vp grid. */
 export const PEER_ROW_LIST_PADDING_VP: number = 12;
 /** The two-line peer row's minimum height (vp): name+chip+status / IP. */
 export const PEER_ROW_MIN_HEIGHT_VP: number = 64;
-/** Line 1's right-hand block: 直连/中继 chip + status text + dot + their gaps. */
-export const PEER_ROW_META_WIDTH_VP: number = 120;
+/**
+ * Line 1's right-hand block at the WIDE tiers (medium/roomy): the 直连/中继 chip,
+ * the 空闲/离线 status text, the status dot and their gaps. The 已连接 TEXT no
+ * longer renders at all (the dot and the chip already say it twice — the review's
+ * §3.1), but the budget keeps room for the longest of the other two states, so a
+ * row that shows 离线 cannot push the name below its floor.
+ */
+export const PEER_ROW_META_WIDE_VP: number = 112;
+/**
+ * Line 1's right-hand block at the COMPACT tier: the status dot and its gap only.
+ * The chip and any 空闲/离线 text ride line 2 (see PEER_ROW_L2_META_COMPACT_VP).
+ */
+export const PEER_ROW_META_COMPACT_VP: number = 18;
+/**
+ * Line 2's right-hand block at the COMPACT tier: the 直连/中继 chip, the
+ * 空闲/离线 text and their gaps, beside the IP. Line 2's text width minus this is
+ * still >= the IP's own one-line floor at every window of the shell.
+ */
+export const PEER_ROW_L2_META_COMPACT_VP: number = 88;
 /** The floor line 2 needs for a dotted-quad IPv4 on ONE line at caption size. */
 export const PEER_ROW_IP_MIN_WIDTH_VP: number = 120;
-/** The floor line 1 needs for a real peer fqdn at body size (e.g. 25 chars). */
-export const PEER_ROW_NAME_MIN_WIDTH_VP: number = 200;
+/** The characters a real peer fqdn is measured in (the review's 28-char name). */
+export const PEER_ROW_FQDN_CHARS: number = 28;
+/**
+ * The width budget of one fqdn character (vp) at the 14 vp the floor is stated
+ * in: 0.5 em, the proportional-Latin rule of thumb. A 28-character self-hosted
+ * fqdn (dots and hyphens are NARROWER than this, so the budget over-estimates).
+ */
+export const PEER_ROW_NAME_CHAR_VP: number = 7;
+/** The floor line 1's name column must clear: a real 28-character fqdn at 14 vp. */
+export const PEER_ROW_NAME_MIN_WIDTH_VP: number =
+  PEER_ROW_FQDN_CHARS * PEER_ROW_NAME_CHAR_VP;
 /** The search field's own cap (vp): a full-width box in a narrow list is noise. */
 export const PEER_SEARCH_MAX_WIDTH_VP: number = 320;
 
+/** The peer list column's cap (vp) for a window width — one per rail tier. */
+export function peerListNavBarCapVp(windowVp: number): number {
+  const tier: string = railTierOf(windowVp);
+  if (tier === RAIL_TIER_ROOMY) {
+    return PEER_LIST_NAV_BAR_CAP_ROOMY_VP;
+  }
+  if (tier === RAIL_TIER_MEDIUM) {
+    return PEER_LIST_NAV_BAR_CAP_MEDIUM_VP;
+  }
+  return PEER_LIST_NAV_BAR_CAP_COMPACT_VP;
+}
+
 /**
- * The peer list column's width (vp) for a pane width: everything the pane can
- * give it above the detail pane's `MIN_CONTENT_WIDTH_VP`, capped at
- * `PEER_LIST_NAV_BAR_MAX_VP` so the list never eats the detail. Below the floor
- * (a pane narrower than 240 + 360, which the split shell never mounts) the
- * answer is the framework default, and a nonsense pane width answers the same —
- * never NaN, never a negative width.
+ * The width (vp) the detail pane keeps at a window width: the compact tier's
+ * 320, the framework's own 360 from the medium tier up. This is what the page
+ * hands Navigation's `minContentWidth` — the value the framework derives the real
+ * navBarWidth from (`calcNavBarWidth = width - minContentWidth - divider`), so it
+ * is the number that decides the split, not a comment about it.
  */
-export function peerListNavBarWidthVp(paneWidthVp: number): number {
-  const room: number = paneWidthVp - MIN_CONTENT_WIDTH_VP;
+export function peerContentMinWidthVp(windowVp: number): number {
+  return railTierOf(windowVp) === RAIL_TIER_COMPACT
+    ? PEER_LIST_CONTENT_MIN_COMPACT_VP : MIN_CONTENT_WIDTH_VP;
+}
+
+/**
+ * The peer list column's width (vp) for a pane width at a window's tier:
+ * everything the pane can give it above that tier's reservation, capped so the
+ * list never eats the detail. Below the floor (a pane narrower than 240 + its
+ * reservation, which the split shell never mounts) the answer is the framework
+ * default, and a nonsense pane width answers the same — never NaN, never a
+ * negative width.
+ */
+export function peerListNavBarWidthVp(paneWidthVp: number, windowVp: number): number {
+  const room: number = paneWidthVp - peerContentMinWidthVp(windowVp);
   if (!(room >= NAV_BAR_WIDTH_VP)) {
     return NAV_BAR_WIDTH_VP;
   }
-  return room < PEER_LIST_NAV_BAR_MAX_VP ? room : PEER_LIST_NAV_BAR_MAX_VP;
+  const cap: number = peerListNavBarCapVp(windowVp);
+  return room < cap ? room : cap;
 }
 
 /**
@@ -404,7 +546,17 @@ export function peerListNavBarWidthVp(paneWidthVp: number): number {
  * rail tier table and therefore of the window.
  */
 export function peerListNavBarWidthFor(windowVp: number): number {
-  return peerListNavBarWidthVp(splitPaneWidthVp(windowVp));
+  return peerListNavBarWidthVp(splitPaneWidthVp(windowVp), windowVp);
+}
+
+/**
+ * True when the peer row must use the CONDENSED form: the split shell's compact
+ * rail tier. The narrow branch (the phone's bottom-tab list) is never condensed —
+ * its rows own the whole page width and keep I3's shape.
+ */
+export function peerRowCondensed(windowVp: number): boolean {
+  return paneLayoutOf(windowVp) === PANE_SPLIT &&
+    railTierOf(windowVp) === RAIL_TIER_COMPACT;
 }
 
 /**
@@ -416,14 +568,24 @@ export function peerRowTextWidthVp(navBarWidthVp: number): number {
   return navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP - 2 * PEER_ROW_LIST_PADDING_VP;
 }
 
+/** Line 1's right-hand block (vp) at a window's tier — see the two constants. */
+export function peerRowMetaWidthVp(windowVp: number): number {
+  return peerRowCondensed(windowVp) ? PEER_ROW_META_COMPACT_VP : PEER_ROW_META_WIDE_VP;
+}
+
 /**
- * The width (vp) line 1's NAME has: the row's text width minus the chip / status
- * text / status dot block. `>= PEER_ROW_NAME_MIN_WIDTH_VP` is exactly "a real
- * peer name fits (at the top of the shell's width range)"; at the very bottom of
- * the shell it ellipsises, which is the honest outcome of a 600 vp pane.
+ * The width (vp) line 1's NAME has at a window width: the row's text width at that
+ * window's column, minus line 1's chip/dot block at that window's tier.
+ * `>= PEER_ROW_NAME_MIN_WIDTH_VP` is exactly "a real 28-character fqdn fits", and
+ * the selfcheck sweeps every window of the shell to hold it there.
  */
-export function peerRowNameWidthVp(navBarWidthVp: number): number {
-  return peerRowTextWidthVp(navBarWidthVp) - PEER_ROW_META_WIDTH_VP;
+export function peerRowNameWidthVp(navBarWidthVp: number, windowVp: number): number {
+  return peerRowTextWidthVp(navBarWidthVp) - peerRowMetaWidthVp(windowVp);
+}
+
+/** The name column's width (vp) for a window width — the composed form. */
+export function peerRowNameWidthFor(windowVp: number): number {
+  return peerRowNameWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
 }
 
 /**
@@ -444,20 +606,20 @@ export function peerSearchWidthVp(navBarWidthVp: number): number {
 // 0.0.38 (I3) — the SETTINGS content column
 // ---------------------------------------------------------------------------
 /**
- * The settings column's width cap (vp). 840 is the design's readable-column
- * number: one column of cards, not a 2000 vp card stretched across a desktop
- * window. The page CENTRES the capped column inside the pane (the same 缩进布局
- * alignment the xl pane already uses) rather than left-aligning it, because a
- * left-aligned 840 column against a 2560 vp pane reads as a half-drawn page.
+ * The settings column's width cap (vp). I3 used 840; the review's §3.3 measured
+ * the result and asked for 680 — a form column, not a page. The page CENTRES the
+ * capped column inside the pane (the same 缩进布局 alignment the xl pane already
+ * uses) rather than left-aligning it, because a left-aligned 680 column against a
+ * 2560 vp pane reads as a half-drawn page.
  */
-export const SETTINGS_CONTENT_MAX_WIDTH_VP: number = 840;
+export const SETTINGS_CONTENT_MAX_WIDTH_VP: number = 680;
 
 /**
  * The settings column's `maxWidth` for a pane width: 0 = NO constraint (the
  * column keeps its 100%), which is what a pane at or below the cap gets — a
  * `maxWidth` larger than the available width constrains nothing and only makes
  * the code look like it is doing something. The clamp starts to bite from
- * `pane > 840`.
+ * `pane > 680`.
  */
 export function settingsContentMaxWidthVp(paneWidthVp: number): number {
   return paneWidthVp > SETTINGS_CONTENT_MAX_WIDTH_VP ? SETTINGS_CONTENT_MAX_WIDTH_VP : 0;
@@ -466,129 +628,206 @@ export function settingsContentMaxWidthVp(paneWidthVp: number): number {
 /**
  * A normal-width button inside a card (vp): the 更改配置 entry. I2 let it stretch
  * the whole card, which reads as the page's primary action when it is really a
- * secondary edit entry.
+ * secondary edit entry; the review's §3.3 sized it at ~240, which is what a
+ * left-aligned card control should be.
  */
-export const BUTTON_INLINE_WIDTH_VP: number = 160;
+export const BUTTON_INLINE_WIDTH_VP: number = 240;
+
+// ---------------------------------------------------------------------------
+// 0.0.39 (I4) — the peer DETAIL pane's width cap
+// ---------------------------------------------------------------------------
+/**
+ * The peer detail's content column cap (vp). The pane's own 1200 vp indent limit
+ * is for the PANE; inside it the detail card sits beside the list column, so on a
+ * very wide window the card can still be 1700 vp of prose. 720 is the readable
+ * cap, centred by the detail Scroll's own alignment.
+ */
+export const DETAIL_CONTENT_MAX_WIDTH_VP: number = 720;
 
 // ---------------------------------------------------------------------------
 // 0.0.38 (I3) — the RAIL's connection region
 // ---------------------------------------------------------------------------
 /**
  * The share of the rail the connection region may take before it starts
- * scrolling (%). E below the navigation group moved directly under the connection
- * card, the region is CONTENT-height; this cap is what keeps the navigation group
- * on screen when the region's content is taller than the rail (a short window),
- * instead of pushing it out of the bottom.
+ * scrolling (%). The region is CONTENT-height; this cap is what keeps the
+ * navigation group on screen when the region's content is taller than the rail (a
+ * short window), instead of pushing it out of the bottom.
  */
 export const RAIL_CONNECTION_MAX_HEIGHT_PCT: number = 60;
 
 // ---------------------------------------------------------------------------
-// 0.0.38 (I3) — the 连接概览 pane's rows
+// 0.0.39 (I4) — the 连接概览 pane (the review's §1.4 content spec)
 // ---------------------------------------------------------------------------
-// A "the pane showed a centred hint" fix is only half an answer: the hint has to
-// be replaced by rows, and the rows must never INVENT a fact the status document
-// did not carry (G: no new core field). So which rows EXIST is a policy — this
-// function — and what each row SAYS is the page's live data. A document without a
-// traffic section therefore loses 发送/接收 instead of rendering 未知 twice, and a
-// state without an overlay address loses the NetBird IP row.
-export const OV_ROW_ADDRESS: string = 'address';
-export const OV_ROW_FQDN: string = 'fqdn';
-export const OV_ROW_DIRECT: string = 'direct';
-export const OV_ROW_RELAY: string = 'relay';
+// The pane is the answer to "the pane, which is ~60% of the window, is empty on a
+// fresh connect" (§1.1) — WITHOUT duplicating the rail: rail = control + verdict
+// (the state dot, the connect command), pane = the numbers the rail cannot hold.
+// So the pane's state-verdict row that I3 shipped is GONE (the rail's status card
+// already carries it) and what remains is exactly the review's five items: the
+// hero (own NetBird IP + 域名), the three stat tiles (已连接 / 直连 / 中继), the
+// relay actually in use, up to five offline peers, and the last error when one is
+// recorded.
+//
+// Every item is still policy-gated, so the I3 rule survives: a fact the document
+// did not carry produces NO row rather than a row saying 未知, and there is no
+// invented zero. The one addition is the "nothing to show" row: with the pane
+// reachable while the tunnel is down (an explicit 对端 choice), a pane that is
+// ONLY a title would read as a broken page.
+export const OV_HERO_ADDRESS: string = 'address';
+export const OV_HERO_FQDN: string = 'fqdn';
+export const OV_TILE_CONNECTED: string = 'connected';
+export const OV_TILE_DIRECT: string = 'direct';
+export const OV_TILE_RELAY: string = 'relay';
+export const OV_ROW_RELAY_IN_USE: string = 'relayInUse';
 export const OV_ROW_OFFLINE: string = 'offline';
-export const OV_ROW_TX: string = 'tx';
-export const OV_ROW_RX: string = 'rx';
+export const OV_ROW_ERROR: string = 'error';
+export const OV_ROW_NONE: string = 'none';
+/** How many offline peers the pane lists (the review's "up to ~5"). */
+export const OVERVIEW_OFFLINE_MAX_ROWS: number = 5;
+/** The 连接概览 pane's stat-tile height (vp) — the review's 96 vp tile. */
+export const OVERVIEW_TILE_HEIGHT_VP: number = 96;
+/**
+ * The pane's own content cap (vp). The tiles and the offline rows are a readable
+ * column, not a stretched one; 720 is the same cap the peer detail card carries.
+ */
+export const OVERVIEW_CONTENT_MAX_WIDTH_VP: number = 720;
 
 export interface OverviewFacts {
-  /** A published status document exists at all (the VPN has run). */
-  hasDocument: boolean;
   /** The document carries the device's own overlay address. */
   hasAddress: boolean;
   /** The document carries the device's own fqdn. */
   hasFqdn: boolean;
-  /** The document carries the aggregate WireGuard counter section. */
-  hasTraffic: boolean;
-  /** How many peers the document lists. */
+  /** How many peers the document lists (0 ⇒ no tiles at all). */
   peerCount: number;
+  /** How many of them management itself lists as offline. */
+  offlineCount: number;
+  /** A relay session is actually in use (the document carries its URL). */
+  hasRelayInUse: boolean;
+  /** A last error line exists to show. */
+  hasError: boolean;
 }
 
 /**
  * The 连接概览 rows that exist for these facts, in render order. There is no
- * 连接时长 row and there will not be one: the document carries no
- * connected-since stamp (only the connector process's own `started_at_unix`,
- * which is an uptime, not a session), and A says to omit what is not there
- * rather than to invent it.
+ * 连接时长 row and there will not be one: the document carries no connected-since
+ * stamp (only the connector process's own `started_at_unix`, which is an uptime,
+ * not a session), and the rule is to omit what is not there rather than to invent
+ * it.
  */
 export function overviewRowKeys(facts: OverviewFacts): string[] {
   const keys: string[] = [];
   if (facts.hasAddress) {
-    keys.push(OV_ROW_ADDRESS);
+    keys.push(OV_HERO_ADDRESS);
   }
   if (facts.hasFqdn) {
-    keys.push(OV_ROW_FQDN);
+    keys.push(OV_HERO_FQDN);
   }
-  if (facts.hasDocument && facts.peerCount > 0) {
-    keys.push(OV_ROW_DIRECT);
-    keys.push(OV_ROW_RELAY);
+  if (facts.peerCount > 0) {
+    keys.push(OV_TILE_CONNECTED);
+    keys.push(OV_TILE_DIRECT);
+    keys.push(OV_TILE_RELAY);
+  }
+  if (facts.hasRelayInUse) {
+    keys.push(OV_ROW_RELAY_IN_USE);
+  }
+  if (facts.offlineCount > 0) {
     keys.push(OV_ROW_OFFLINE);
   }
-  if (facts.hasTraffic) {
-    keys.push(OV_ROW_TX);
-    keys.push(OV_ROW_RX);
+  if (facts.hasError) {
+    keys.push(OV_ROW_ERROR);
+  }
+  if (keys.length === 0) {
+    keys.push(OV_ROW_NONE);
   }
   return keys;
 }
 
 // ---------------------------------------------------------------------------
-// 0.0.38 (I3) — the peer detail's DEFAULT / ADVANCED split
+// 0.0.39 (I4) — the peer detail's FOUR SECTIONS
 // ---------------------------------------------------------------------------
-// B: the detail pane stays LAYERED. The rows the user came for render by default;
-// everything that exists for diagnosis lives behind a collapsed 高级信息 / 诊断
-// section. The split is a property of the ROW, so it is one classifier over the
-// row's label and one ForEach source in the page — never two hand-kept lists that
-// can drift apart.
+// The detail pane stays LAYERED (I3's B): the rows the user came for render open
+// by default, everything that exists for diagnosis stays behind a collapsed
+// header. The review's §3.2/§P1.7 then asks for the flat row stream to be GROUPED
+// with the existing DetailSectionHeader, and names the four groups itself:
 //
-// The DEFAULT class is written out explicitly (that is the promise B makes: these
-// seven rows, and nothing else, are on screen unasked). Anything not on it is
-// ADVANCED — the fail-safe direction: a row nobody classified is far more likely
-// to be a diagnostic than a user-facing fact, so it hides rather than leaking
-// ICE/relay jargon into the default view.
-export const PEER_DETAIL_DEFAULT: string = 'default';
-export const PEER_DETAIL_ADVANCED: string = 'advanced';
-/** The rows shown WITHOUT expanding anything: status, bearer, traffic, identity. */
-export const PEER_DETAIL_DEFAULT_LABELS: string[] = [
+//   连接    the session the user came for (NetBird IP / 状态 / 连接方式 / 最近握手 /
+//           发送 / 接收) — open by default, and the only group that is
+//   路径    the endpoints and the bearer (对端端点 / 本机出口 / 对端网络 / 承载 /
+//           中继通道地址 / 本机中继会话)
+//   ICE     the candidate-path detail (6 rows; the 说明 caveat renders as a 14 vp
+//           caption UNDER the group rather than as a row of its own)
+//   标识    the peer's identity (公钥, rendered in the mono face so a 64-character
+//           key reads as one unit)
+//
+// The classification is a property of the ROW, so it stays ONE classifier over the
+// row's label and ONE row source in the page — never four hand-kept lists that can
+// drift apart. An UNCLASSIFIED label lands in 路径, the fail-safe direction: a row
+// nobody classified is far more likely to be a diagnostic than a user-facing fact,
+// so it hides behind a collapsed header instead of leaking ICE/relay jargon into
+// the default view.
+export const PEER_DETAIL_CONNECTION: string = 'connection';
+export const PEER_DETAIL_PATH: string = 'path';
+export const PEER_DETAIL_ICE: string = 'ice';
+export const PEER_DETAIL_IDENTITY: string = 'identity';
+/** The section shown WITHOUT expanding anything: the session itself. */
+export const PEER_DETAIL_CONNECTION_LABELS: string[] = [
+  '域名',
+  'NetBird IP',
   '状态',
   '连接方式',
   '最近握手',
   '发送',
-  '接收',
-  '域名',
-  'NetBird IP'
+  '接收'
 ];
-/** The rows that live inside the collapsed section (the jargon list of B). */
-export const PEER_DETAIL_ADVANCED_LABELS: string[] = [
+/** The endpoints / bearer section (collapsed by default). */
+export const PEER_DETAIL_PATH_LABELS: string[] = [
   '对端端点',
   '本机出口',
   '对端网络',
   '承载',
   '中继通道地址',
-  '本机中继会话',
-  '公钥',
+  '本机中继会话'
+];
+/** The ICE candidate-path section (collapsed by default). */
+export const PEER_DETAIL_ICE_LABELS: string[] = [
   'ICE',
   'ICE 状态',
   'ICE 角色',
   'ICE 本端',
   'ICE 对端',
   'ICE 可达性',
-  'ICE 最近错误',
-  'ICE 说明'
+  'ICE 最近错误'
+];
+/** The identity section: the public key, in mono (collapsed by default). */
+export const PEER_DETAIL_IDENTITY_LABELS: string[] = [
+  '公钥'
 ];
 
-export function peerDetailGroupOf(label: string): string {
-  for (let i = 0; i < PEER_DETAIL_DEFAULT_LABELS.length; i++) {
-    if (label === PEER_DETAIL_DEFAULT_LABELS[i]) {
-      return PEER_DETAIL_DEFAULT;
+export function peerDetailSectionOf(label: string): string {
+  for (let i = 0; i < PEER_DETAIL_CONNECTION_LABELS.length; i++) {
+    if (label === PEER_DETAIL_CONNECTION_LABELS[i]) {
+      return PEER_DETAIL_CONNECTION;
     }
   }
-  return PEER_DETAIL_ADVANCED;
+  for (let i = 0; i < PEER_DETAIL_ICE_LABELS.length; i++) {
+    if (label === PEER_DETAIL_ICE_LABELS[i]) {
+      return PEER_DETAIL_ICE;
+    }
+  }
+  for (let i = 0; i < PEER_DETAIL_IDENTITY_LABELS.length; i++) {
+    if (label === PEER_DETAIL_IDENTITY_LABELS[i]) {
+      return PEER_DETAIL_IDENTITY;
+    }
+  }
+  return PEER_DETAIL_PATH;
+}
+
+/**
+ * The review's "drop the 域名 row when it duplicates the title" rule: the card's
+ * title is the peer's display NAME, and management's fqdn is what that name is
+ * built from — so when the two are the same string the row repeats the 20 vp
+ * heading 8 vp below it. A fqdn that says something the title does not (a peer
+ * renamed by hand) keeps its row.
+ */
+export function peerFqdnDuplicatesTitle(name: string, fqdn: string): boolean {
+  return fqdn.length > 0 && fqdn === name;
 }
