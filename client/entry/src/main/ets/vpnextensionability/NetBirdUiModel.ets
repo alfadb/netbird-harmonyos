@@ -240,6 +240,13 @@ export interface UiStatusDocument {
   // zeros). The KEY ABSENT means a document written before this field existed
   // (same rule as `management`).
   ice_mux?: UiIceMux | null;
+  // 0.0.34 peer-status lag fix: the core's process-monotonic EDGE revision
+  // (core `status_revision`), passed through verbatim and APPENDED after every
+  // pre-existing field. It is what the UI reader compares (together with
+  // `updated_at_ms`) to decide whether anything it renders actually changed —
+  // an idle screen then does no re-derivation. OMITTED when the core did not
+  // deliver it (an older core), never defaulted to 0.
+  status_revision?: number;
 }
 
 export interface UiManagementEndpoint {
@@ -500,6 +507,28 @@ function iceEndpointView(endpoint: CoreIceEndpoint | null | undefined):
 // connection: `state` and `reachable` are carried verbatim from the core, so
 // a `disconnected` peer that still holds its selected pair stays
 // reachable=false.
+//
+// 0.0.34 (peer-status lag REPORT §5 F4): a STALE sample is the same kind of
+// "unknown" — see ICE_SNAPSHOT_UNKNOWN_AGE_MS / iceSnapshotIsUnknown below.
+export const ICE_SNAPSHOT_UNKNOWN_AGE_MS: number = 5000;
+
+// Is the ICE sample in this document too old to be a statement about NOW?
+// The core marks a served-from-cache sample `ice_snapshot_stale:true` with its
+// real age (`null` = there never was a successful read to age). Beyond one
+// publication period the numbers describe a past instant, so the ICE block is
+// rendered 未知 instead of passing them off as the current selection — the
+// pre-0.0.34 code ignored the marks and rendered stale values as live.
+export function iceSnapshotIsUnknown(stale: boolean | undefined,
+  ageMs: number | null | undefined): boolean {
+  if (stale !== true) {
+    return false;
+  }
+  if (typeof ageMs !== 'number' || !Number.isFinite(ageMs)) {
+    return true;
+  }
+  return ageMs >= ICE_SNAPSHOT_UNKNOWN_AGE_MS;
+}
+
 export function iceDetailView(entry: CoreIcePeerEntry | null | undefined):
   UiPeerIceDetail | undefined {
   if (entry === undefined || entry === null) {
@@ -614,10 +643,18 @@ export function peerStatusOf(online: boolean, mgmtOnline: boolean): string {
 // that cannot be read leaves that peer's `ice` ABSENT — ICE 未知, never a
 // fabricated state/endpoint/role. Nothing here feeds `connection`/`online`:
 // endpoint presence is not a connection verdict.
+//
+// 0.0.34 (peer-status lag REPORT §5 F4): `iceUnknown` (see
+// iceSnapshotIsUnknown) says the whole ICE sample is too old to describe NOW —
+// then EVERY peer's `ice` stays ABSENT (未知) instead of publishing a stale
+// selection as the current one. It does not touch `connection`/`online`, which
+// are WG-session facts (and the F5 label predicate is a separate, product-owned
+// change).
 export function mergePeers(network: CoreNetworkConfig | null,
   wgPeers: WgPeerStatusEntry[] | undefined,
   peerRelays?: CorePeerRelayEntry[] | null,
-  icePeers?: CoreIcePeerEntry[] | null): UiPeerEntry[] {
+  icePeers?: CoreIcePeerEntry[] | null,
+  iceUnknown: boolean = false): UiPeerEntry[] {
   const byKey: Map<string, WgPeerStatusEntry> = new Map();
   if (wgPeers !== undefined && wgPeers !== null) {
     for (let i = 0; i < wgPeers.length; i++) {
@@ -651,8 +688,9 @@ export function mergePeers(network: CoreNetworkConfig | null,
   // there, so that peer's `ice` stays absent. A null/absent table and a
   // delivered table without this peer's key are BOTH 未知 for that peer —
   // nobody made a statement about it, so nothing is published.
+  // A STALE sample (iceUnknown) is the same honest 未知 for every peer.
   const iceDetails: Map<string, UiPeerIceDetail> = new Map();
-  if (icePeers !== undefined && icePeers !== null) {
+  if (!iceUnknown && icePeers !== undefined && icePeers !== null) {
     for (let i = 0; i < icePeers.length; i++) {
       const ice: CoreIcePeerEntry = icePeers[i];
       if (ice === undefined || ice === null ||
@@ -984,6 +1022,14 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
   const sessionExpiresAt: number | undefined =
     typeof status.session_expires_at_unix === 'number' &&
       status.session_expires_at_unix > 0 ? status.session_expires_at_unix : undefined;
+  // 0.0.34 (peer-status lag REPORT §5 F1): the core's edge revision, passed
+  // through verbatim. Omitted when the core did not deliver a number (an older
+  // core): the reader then falls back to `updated_at_ms` alone, never to a
+  // fabricated 0 that would look like "the first revision".
+  const statusRevision: number | undefined =
+    typeof status.status_revision === 'number' &&
+      Number.isFinite(status.status_revision) && status.status_revision >= 0
+      ? status.status_revision : undefined;
   // Core process times (Unix SECONDS), for the UI uptime row. Passed through
   // verbatim and ONLY when the core really delivered a positive integer stamp:
   // an absent/null/non-numeric/0 value is omitted, so the UI shows no uptime
@@ -1021,7 +1067,8 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
     reconnects: status.reconnects,
     peers: mapDelivered && network !== null
       ? mergePeers(network, status.wg !== undefined && status.wg !== null
-        ? status.wg.wg_peers : undefined, status.peer_relays, status.ice_peers)
+        ? status.wg.wg_peers : undefined, status.peer_relays, status.ice_peers,
+        iceSnapshotIsUnknown(status.ice_snapshot_stale, status.ice_snapshot_age_ms))
       : [],
     iface_present: ifacePresent,
     mtu: mtu,
@@ -1034,7 +1081,8 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
     started_at_unix: coreStartedAt,
     last_update_unix: coreLastUpdate,
     management: management,
-    ice_mux: iceMux
+    ice_mux: iceMux,
+    status_revision: statusRevision
   };
   return doc;
 }

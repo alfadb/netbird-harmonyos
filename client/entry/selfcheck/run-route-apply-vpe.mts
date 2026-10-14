@@ -109,6 +109,10 @@ const REQUEST_ID = 'req-route-apply-vpe';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // 0.0.34 peer-status lag fix (REPORT §5 F1/F4): the publish-debounce policy
+  // the REAL extension now imports by value — zero imports, no erased type
+  // crossing the value import, staged byte-identically, no shim.
+  'NetBirdStatusPolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy',
   // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
   // REAL extension now imports by value for its synchronous write; zero

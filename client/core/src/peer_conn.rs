@@ -988,6 +988,24 @@ pub struct PeerIceStatus {
     pub last_error: Option<ErrorClass>,
 }
 
+/// 0.0.34（peer-status lag REPORT §5 F1）：单个 peer 的 ICE **渲染事实**的
+/// 紧凑快照（全 `Copy`，无分配）——[`PeerConn::ice_edge_facts`] 的产物，
+/// 由 [`PeerIceOrchestrator::note_ice_edges`] 与上一拍的值比较，变了才抬
+/// 一次状态边沿。**纯计数器不进这里**（检查/keepalive/候选对计数、guard
+/// 重试档），否则每一拍都会退化成被它取代的那个定时器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PeerIceFacts {
+    state: PeerIceState,
+    controlling: Option<bool>,
+    /// 选中对的本地 socket 下标（[`IceSession::selected_pair_identity`] 的
+    /// 第一项）——本地侧重选到同一远端也是"选中对变了"。
+    selected_local: Option<usize>,
+    selected_remote: Option<([u8; 4], u16)>,
+    endpoint_applied: bool,
+    reachable: bool,
+    last_error: Option<ErrorClass>,
+}
+
 /// selected pair 的一个端点（公开摘要：候选类型 + ip:port）。
 ///
 /// 只投影 [`Candidate`] 中与状态展示有关的三个字段：`foundation` /
@@ -1375,6 +1393,10 @@ struct PeerConn {
     last_health_ms: u64,
     /// 正在跑的异步本地候选收集（STAGE 1）。`None` = 没有收集在跑。
     gather: Option<GatherInFlight>,
+    /// 0.0.34（peer-status lag REPORT §5 F1）：上一拍记录的
+    /// [`PeerIceFacts`]。`None` = 尚未观测过（首个快照只建立基线，不是边沿：
+    /// peer 的出现本身由 `set_peers`/网络图那一侧负责）。
+    edge_facts: Option<PeerIceFacts>,
 }
 
 impl PeerConn {
@@ -1411,6 +1433,7 @@ impl PeerConn {
             guard_hourly: false,
             last_health_ms: 0,
             gather: None,
+            edge_facts: None,
         }
     }
 
@@ -1420,6 +1443,34 @@ impl PeerConn {
             pub_key: self.key.clone(),
             state: self.state,
             controlling,
+            selected_remote: self.selected_remote,
+            endpoint_applied: self.endpoint_applied,
+            reachable: self.state == PeerIceState::Connected && self.endpoint_applied,
+            last_error: self.last_error,
+        }
+    }
+
+    /// 0.0.34 (peer-status lag REPORT §5 F1): the per-peer ICE facts this
+    /// crate RENDERS (`ice_peers[]`: state / role / selected pair / landing /
+    /// reachability / last error class) as one `Copy` value — the change
+    /// detector behind [`PeerIceOrchestrator::note_ice_edges`]. Deliberately
+    /// NOT the check/keepalive/pair counters or the guard's retry token: a
+    /// counter tick is not an edge (upstream judges an edge on exactly the
+    /// status/relayed facts, `peer/status.go:662 hasStatusOrRelayedChange`).
+    /// `selected_local` is the session's own cheap pair identity
+    /// ([`IceSession::selected_pair_identity`]) — no candidate is cloned.
+    fn ice_edge_facts(&self) -> PeerIceFacts {
+        let (controlling, selected_local) = match self.session.as_ref() {
+            Some(session) => (
+                Some(session.is_controlling()),
+                session.selected_pair_identity().map(|(local, _, _)| local),
+            ),
+            None => (None, None),
+        };
+        PeerIceFacts {
+            state: self.state,
+            controlling,
+            selected_local,
             selected_remote: self.selected_remote,
             endpoint_applied: self.endpoint_applied,
             reachable: self.state == PeerIceState::Connected && self.endpoint_applied,
@@ -1907,6 +1958,7 @@ impl PeerIceOrchestrator {
     /// 其 WG endpoint/egress，既有的保持现状（上游对网络图刷新不拆已有
     /// 连接）。
     pub fn set_peers(&mut self, keys: &[String]) {
+        let before = self.peers.len();
         let removed: Vec<String> = self
             .peers
             .iter()
@@ -1914,6 +1966,7 @@ impl PeerIceOrchestrator {
             .map(|p| p.key.clone())
             .collect();
         self.peers.retain(|p| keys.contains(&p.key));
+        let removed_any = !removed.is_empty();
         for key in removed {
             self.wg.recycle_endpoint(&key);
         }
@@ -1926,6 +1979,12 @@ impl PeerIceOrchestrator {
             // 是不同字段，编译器按字段拆分借用）。
             let rng = &mut *self.guard_rng;
             self.peers.push(PeerConn::new(key.clone(), rng));
+        }
+        if self.peers.len() != before || removed_any {
+            // 0.0.34（peer-status lag REPORT §5 F1）：peer 集合本身变了
+            // （`ice_peers` 表的行、`ice.peers` 计数）——一次边沿。同一份
+            // 网络图重复 apply 时集合不变，这里不抬（否则每次 sync 都抬）。
+            crate::status_events::edge("ice-peers");
         }
         // 新 peer 的 guard 首跳是「立刻」（`guard_next_at_ms = 0`），泵必须在
         // 这一刻被叫醒，而不是等上一个截止期。
@@ -2438,6 +2497,14 @@ impl PeerIceOrchestrator {
             // 判读 H1/H3/H4 的最低配证据。
             self.emit_health_summary(idx, now_ms);
         }
+        // 0.0.34（peer-status lag REPORT §5 F1）：本拍所有 per-peer 渲染事实
+        // 都改完了——与上一拍的值比较，变了就抬**一次**边沿（本拍内多个
+        // peer/多次迁移折叠成一次唤醒，容量 1 的上游合并语义）。纯计数器
+        // （`pump_passes_total`、检查收发、候选对计数）不在事实集里，所以
+        // 空转的一拍**不**抬边沿。这一拍之外的改动（`handle_signal` 等）
+        // 由它们自己的 `waker.notify` 保证紧随其后有一拍，同样在下一次比较
+        // 里被看到。
+        self.note_ice_edges();
         // STAGE 0: exit side of the whole-tick wall clock (entry above). Only
         // a pass that spent real time is worth a line; `round=` is the injected
         // clock the pass ran on, `pass_ms=` the wall clock it actually cost.
@@ -2450,6 +2517,33 @@ impl PeerIceOrchestrator {
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
+        }
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：把每个 peer 的 ICE 渲染事实与
+    /// 上一拍比较，**任一** peer 变了就抬一次边沿（`ice_peers[]` 的任何变化
+    /// ——state/角色/选中对/落配/reachable/错误类）。全 `Copy`、零分配、
+    /// 零锁（编排锁本来就由调用方持有）。
+    ///
+    /// 为什么用"与上一拍比较"而不是在每个迁移点各抬一次：迁移点有六处以上
+    /// （Gathering×2 / Checking / Connected / Disconnected / drop_session 的
+    /// Failed，外加 `handle_signal` 的会话重建），逐点插桩容易漏、也容易被
+    /// 后来者绕过；比较法把"渲染出来的事实"本身当成判据，与文档的字段一一
+    /// 对应（`PeerIceDetail`），并且天然忽略纯计数器。首个快照只建立基线
+    /// （`None` → 不抬）：peer 的出现/消失由 [`Self::set_peers`] 负责。
+    fn note_ice_edges(&mut self) {
+        let mut changed = false;
+        for peer in self.peers.iter_mut() {
+            let now = peer.ice_edge_facts();
+            if let Some(prev) = peer.edge_facts {
+                if prev != now {
+                    changed = true;
+                }
+            }
+            peer.edge_facts = Some(now);
+        }
+        if changed {
+            crate::status_events::edge("ice-peer");
         }
     }
 
@@ -6137,6 +6231,47 @@ mod tests {
             orch.peers[0].session.as_ref().expect("session").local_candidates().len(),
             1
         );
+    }
+
+    // ---- 0.0.34 peer-status lag: the ICE rendered-fact edge detector --------
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：per-peer ICE **渲染事实**的变化
+    /// （state / 选中对 / 落配 / reachable / 错误类）抬**恰好一次**边沿；空转
+    /// 的一拍（只有泵计数与检查计数前进）一次都不抬；peer 集合真变了才抬。
+    ///
+    /// 断言用 `status_events` 的线程本地点数（lib 测试二进制并行跑）。
+    #[test]
+    fn ice_rendered_facts_raise_one_edge_per_pass_and_counters_none() {
+        use crate::status_events;
+        let (mut orch, _signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        const T0: u64 = 1_000;
+        // ① 第一拍只建立基线：peer 出现本身由 `set_peers` 负责，首个快照不是边沿。
+        let before = status_events::thread_edges();
+        orch.run_once(T0).expect("first pass");
+        assert_eq!(status_events::thread_edges(), before, "the baseline pass is not an edge");
+        // ② 紧随其后空转的一拍：泵计数前进，渲染事实不变。
+        let before = status_events::thread_edges();
+        orch.run_once(T0 + 10).expect("idle pass");
+        assert_eq!(status_events::thread_edges(), before, "an idle pass is not an edge");
+        assert!(orch.pump_passes_total >= 2, "the pump counter really advanced");
+
+        // ③ 真的变了：物理网络换代拆掉会话（state → Failed、选中对清空）。
+        //    同一拍内的多次迁移合并成一次边沿。
+        let before = status_events::thread_edges();
+        orch.restart_for_network_change(T0 + 20);
+        orch.run_once(T0 + 30).expect("post-restart pass");
+        assert_eq!(status_events::thread_edges(), before + 1, "the teardown is ONE edge");
+        assert_eq!(status_events::thread_last_reason(), "ice-peer");
+        assert_ne!(orch.peer_status("PPPPpeer").expect("status").state, PeerIceState::Idle);
+
+        // ④ peer 集合变化：一次边沿；同一份集合重复 apply 不再抬。
+        let before = status_events::thread_edges();
+        orch.set_peers(&["PPPPpeer".to_string(), "AAApeer".to_string()]);
+        assert_eq!(status_events::thread_edges(), before + 1, "a new peer set is ONE edge");
+        assert_eq!(status_events::thread_last_reason(), "ice-peers");
+        let before = status_events::thread_edges();
+        orch.set_peers(&["PPPPpeer".to_string(), "AAApeer".to_string()]);
+        assert_eq!(status_events::thread_edges(), before, "the same peer set is not an edge");
     }
 
     // ---- 0.0.26 gap 1 / gap 4: the two new evidence lines -------------------

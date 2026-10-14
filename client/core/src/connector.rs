@@ -1754,7 +1754,12 @@ impl ConnectorShared {
     }
 
     fn set_running(&self, v: bool) {
-        self.running.store(v, Ordering::Release);
+        // 0.0.34 (peer-status lag REPORT §5 F1): the running flag is part of
+        // the rendered document (`running`, and `terminal` with the state) — a
+        // real flip is an edge; a repeated store is not.
+        if self.running.swap(v, Ordering::AcqRel) != v {
+            crate::status_events::edge("connector-running");
+        }
     }
 
     /// Drive the state machine, ignoring transitions that are illegal from
@@ -1766,6 +1771,13 @@ impl ConnectorShared {
             g.machine.transition(event).ok()
         };
         if let Some(to) = to {
+            // 0.0.34 (peer-status lag REPORT §5 F1): ONE choke point for the
+            // `state`/`terminal` half of the document — upstream's
+            // `UpdatePeerState` notification shape (`peer/status.go:368`).
+            // Raised with NO shared lock held (the guard above is already
+            // dropped): the edge only bumps an atomic and hands a
+            // non-blocking wake to the shell.
+            crate::status_events::edge("connector-state");
             // 2026-10-12（diag/0027 item 3）：管理状态机迁移是**证据行**
             // （每次迁移一行），走 phone log 的小额优先预算。
             hilog::emit_evidence(&format!("connector: state -> {}", to.as_str()));
@@ -2200,7 +2212,20 @@ impl ConnectorShared {
     }
 
     fn record_error(&self, err: &ManagementError) {
-        self.lock().last_error = Some(ErrorClass::from_management(err));
+        // 0.0.34 (peer-status lag REPORT §5 F1): `last_error` is rendered
+        // (class + status only), so a REAL class change is an edge. The
+        // repeated identical failure of a retry loop is not — otherwise the
+        // backoff would wake the shell once per attempt forever.
+        let next = Some(ErrorClass::from_management(err));
+        let changed = {
+            let mut g = self.lock();
+            let changed = g.last_error != next;
+            g.last_error = next;
+            changed
+        };
+        if changed {
+            crate::status_events::edge("connector-error");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -6375,12 +6400,15 @@ impl ConnectorHandle {
             Some(s) => (s.pending() as i64, s.taken() as i64),
             None => (-1, -1),
         };
-        with_ice_sockets_section(
-            &base,
-            queued,
-            taken,
-            ice.stale,
-            ice.age_ms,
+        // 0.0.34 (peer-status lag REPORT §5 F1): the monotonic rendered-state
+        // revision is the NEW TAIL of the document — appended AFTER
+        // `ice_sockets`, every pre-existing field keeps its position (the
+        // a1947b9 tail-append discipline). It is the shell's cheap
+        // change-detector: the reader tick and the publish debounce compare it
+        // instead of diffing the document.
+        with_status_revision(
+            &with_ice_sockets_section(&base, queued, taken, ice.stale, ice.age_ms),
+            crate::status_events::revision(),
         )
     }
 
@@ -7959,36 +7987,57 @@ fn parse_connect_addr(json: &str) -> Result<SocketAddr, ConfigError> {
 pub fn connector_status_json() -> String {
     let slot = connector_slot();
     match slot.as_ref() {
+        // The LIVE document already ends with the 0.0.34 `status_revision` tail
+        // (see [`ConnectorHandle::status_json`]): it must not be appended twice.
         Some(handle) => handle.status_json(),
-        None => ConnectorStatus {
-            running: false,
-            state: ConnState::Disconnected,
-            started_at_unix: None,
-            last_update_unix: None,
-            peer_count: 0,
-            route_count: 0,
-            reconnects: 0,
-            last_error: None,
-            deadline: SessionDeadline::Unknown,
-            wg_apply_failed: false,
-            wg_apply_errors: 0,
-            logout_ok: None,
-            terminal: false,
-            ice: IceOrchestratorSummary::default(),
-            signal: SignalLinkStatus::default(),
-            wg: crate::wg_device::WgDataplaneStatus::default(),
-            recreate: RecreateStatus::default(),
-            relay: RelayStatus::disabled(),
-            // no connector at all ⇒ no relay carrier ⇒ no actual lane: the
-            // honest `null` (an empty array would claim a carrier exists)
-            peer_relays: None,
-            // ... and no ICE orchestrator either: `null`, not `[]`
-            ice_peers: None,
-            // 0.0.26 gap 1: no mux either
-            ice_mux: None,
-        }
-        .to_json(),
+        None => with_status_revision(
+            &ConnectorStatus {
+                running: false,
+                state: ConnState::Disconnected,
+                started_at_unix: None,
+                last_update_unix: None,
+                peer_count: 0,
+                route_count: 0,
+                reconnects: 0,
+                last_error: None,
+                deadline: SessionDeadline::Unknown,
+                wg_apply_failed: false,
+                wg_apply_errors: 0,
+                logout_ok: None,
+                terminal: false,
+                ice: IceOrchestratorSummary::default(),
+                signal: SignalLinkStatus::default(),
+                wg: crate::wg_device::WgDataplaneStatus::default(),
+                recreate: RecreateStatus::default(),
+                relay: RelayStatus::disabled(),
+                // no connector at all ⇒ no relay carrier ⇒ no actual lane: the
+                // honest `null` (an empty array would claim a carrier exists)
+                peer_relays: None,
+                // ... and no ICE orchestrator either: `null`, not `[]`
+                ice_peers: None,
+                // 0.0.26 gap 1: no mux either
+                ice_mux: None,
+            }
+            .to_json(),
+            // 0.0.34: the no-connector document carries the same tail field as
+            // the live one (the shell reader's change detection must not have to
+            // special case "no connector": the revision is process-monotonic
+            // and stays valid across stop/start).
+            crate::status_events::revision(),
+        ),
     }
+}
+
+/// 0.0.34 (peer-status lag REPORT §5 F1's cheap read face): the status
+/// revision ALONE — `{"revision":N}`.
+///
+/// Deliberately NOT a document: no connector slot is taken, no lock is
+/// touched, no JSON document is assembled (the shell's wake/heartbeat policy
+/// calls this several times per second and must never contend with a status
+/// read). It answers "did any rendered status fact change since my last read?"
+/// for the heartbeat tick path and for telemetry.
+pub fn connector_status_revision_json() -> String {
+    format!("{{\"revision\":{}}}", crate::status_events::revision())
 }
 
 // ---------------------------------------------------------------------------
@@ -8313,6 +8362,29 @@ fn with_ice_sockets_section(
         ice_snapshot_stale,
         age,
         ice_sockets_section(queued, taken)
+    )
+}
+
+/// 0.0.34 (peer-status lag REPORT §5 F1): the FULL `connector_status()` text
+/// with the monotonic `status_revision` appended as the document's LAST field
+/// (the same brace dance as [`with_ice_sockets_section`]: the trailing `}` is
+/// replaced by `,"status_revision":N}`). Additive only — every pre-existing
+/// field keeps its bytes and its position, and `ice_sockets` remains the last
+/// section before the new tail.
+///
+/// The value is the process-monotonic [`crate::status_events::revision`]: it
+/// bumps exactly when a RENDERED status fact changed (connector state/running/
+/// error class, WG session established/expired, carrier attach/detach and the
+/// carrier↔direct transitions, the per-peer ICE rendered facts, the relay
+/// state/url, the peer set) and never on pure counters. It is the shell's
+/// cheap change detector: a reader compares it instead of diffing the
+/// document, and a publish can be skipped when it (and the rest of the
+/// document's own inputs) did not move.
+fn with_status_revision(base: &str, status_revision: u64) -> String {
+    format!(
+        "{},\"status_revision\":{}}}",
+        &base[..base.len() - 1],
+        status_revision
     )
 }
 
@@ -9989,6 +10061,129 @@ mod tests {
             "{unread_doc}"
         );
         assert!(matches!(config::parse_document(&unread_doc), Ok(Json::Obj(_))), "{unread_doc}");
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：`status_revision` 是文档**新的
+    /// 尾段**——既有字段逐字不动、位置不变（`ice_sockets` 仍是它前面的最后
+    /// 一段），追加后严格读取器仍接受。逐字冻结，因为 shell 的变更检测与
+    /// 心跳去抖都以"这一段在最后、且只有一个数字字段"为前提。
+    #[test]
+    fn status_revision_is_tail_appended_after_ice_sockets() {
+        let base = with_ice_sockets_section(
+            "{\"running\":true,\"state\":\"connected\"}",
+            3,
+            4,
+            false,
+            Some(0),
+        );
+        let doc = with_status_revision(&base, 41);
+        assert_eq!(
+            doc,
+            "{\"running\":true,\"state\":\"connected\",\
+             \"ice_snapshot_stale\":false,\"ice_snapshot_age_ms\":0,\
+             \"ice_sockets\":{\"queued\":3,\"taken\":4},\"status_revision\":41}"
+        );
+        assert!(
+            doc.ends_with(",\"status_revision\":41}"),
+            "status_revision stays the trailing field of the root object: {doc}"
+        );
+        assert!(matches!(config::parse_document(&doc), Ok(Json::Obj(_))), "{doc}");
+        // 0 is a real revision value, never omitted.
+        assert!(with_status_revision("{\"running\":false}", 0)
+            .ends_with(",\"status_revision\":0}"));
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：状态边沿的**逐事件 +1** 与
+    /// "纯变化才抬"的判据（管理状态机迁移 / running 翻转 / 错误类真的变了），
+    /// 以及**纯计数器不抬**（`reconnects`）。
+    ///
+    /// 断言用的是 `status_events` 的**线程本地点数**（见该模块的测试说明）：
+    /// lib 测试二进制并行跑，只有本线程驱动的迁移才能被精确计数。
+    #[test]
+    fn state_running_and_error_edges_bump_but_pure_counters_do_not() {
+        use crate::status_events;
+        let shared = ConnectorShared::new(false, None);
+
+        // ① 管理状态机迁移：Disconnected → Connecting，恰好一次边沿。
+        let before = status_events::thread_edges();
+        shared.transition(ConnEvent::Connect);
+        assert_eq!(status_events::thread_edges(), before + 1, "one transition ⇒ one edge");
+        assert_eq!(status_events::thread_last_reason(), "connector-state");
+
+        // ② 非法迁移（状态本来就对不上）= 什么都没变 = 不抬。
+        let before = status_events::thread_edges();
+        shared.transition(ConnEvent::Established); // Connecting → Connected
+        assert_eq!(status_events::thread_edges(), before + 1, "a legal transition is an edge");
+        let before = status_events::thread_edges();
+        shared.transition(ConnEvent::Connect); // illegal from Connected
+        assert_eq!(status_events::thread_edges(), before, "an illegal transition changes nothing");
+
+        // ③ running 翻转：只有真的变才抬。
+        let before = status_events::thread_edges();
+        assert!(!shared.is_running());
+        shared.set_running(true);
+        assert_eq!(status_events::thread_edges(), before + 1, "running false → true is an edge");
+        let before = status_events::thread_edges();
+        shared.set_running(true);
+        assert_eq!(status_events::thread_edges(), before, "a repeated store is not an edge");
+
+        // ④ last_error：类真的变了才抬（重试循环里的同一错误不是边沿）。
+        let before = status_events::thread_edges();
+        shared.record_error(&ManagementError::Network("probe".into()));
+        assert_eq!(status_events::thread_edges(), before + 1, "a new error class is an edge");
+        assert_eq!(status_events::thread_last_reason(), "connector-error");
+        let before = status_events::thread_edges();
+        shared.record_error(&ManagementError::Network("probe-again".into()));
+        assert_eq!(status_events::thread_edges(), before, "the same class is not an edge");
+        shared.record_error(&ManagementError::NeedsLogin {
+            status: 7,
+            message: "login required".into(),
+        });
+        assert_eq!(status_events::thread_edges(), before + 1, "a different class is an edge");
+
+        // ⑤ 纯计数器：`reconnects` 前进不抬边沿（否则机制退化成定时器）。
+        let before = status_events::thread_edges();
+        shared.count_retryable_failure();
+        shared.count_retryable_failure();
+        assert_eq!(shared.lock().reconnects, 2);
+        assert_eq!(status_events::thread_edges(), before, "counters are not edges");
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：尾字段的值就是进程单调的
+    /// `status_events::revision`，且**无 connector 的文档也带它**——shell 的
+    /// 变更检测不必特判"没有 connector"。
+    #[test]
+    fn status_documents_carry_the_live_revision_including_with_no_connector() {
+        use crate::status_events;
+        /// The tail field's value, read the way the shell reads it.
+        fn revision_of(doc: &str) -> u64 {
+            const MARKER: &str = ",\"status_revision\":";
+            let at = doc.find(MARKER).expect("tail field") + MARKER.len();
+            let rest = &doc[at..];
+            let end = rest.find('}').expect("closing brace");
+            rest[..end].parse().expect("a number")
+        }
+        // "Reading a status document is not an edge" is asserted on the
+        // THREAD ledger: the process-wide revision legitimately moves when a
+        // concurrent test raises an edge.
+        let edges = status_events::thread_edges();
+        let before = status_events::revision();
+        let doc = connector_status_json();
+        assert_eq!(status_events::thread_edges(), edges, "reading a document is not an edge");
+        let value = revision_of(&doc);
+        assert!(value >= before, "the document carries the live revision ({value} >= {before})");
+        assert!(doc.ends_with(&format!(",\"status_revision\":{value}}}")), "{doc}");
+        assert!(matches!(config::parse_document(&doc), Ok(Json::Obj(_))), "{doc}");
+
+        // the cheap getter is the same live number, without any document
+        let getter = connector_status_revision_json();
+        let prefix = "{\"revision\":";
+        assert!(getter.starts_with(prefix) && getter.ends_with('}'), "{getter}");
+        let getter_value: u64 =
+            getter[prefix.len()..getter.len() - 1].parse().expect("getter number");
+        assert!(getter_value >= value, "the getter never lags a document read before it");
+        status_events::edge("doc-contract-test");
+        assert!(status_events::revision() > before);
     }
 
     /// 2026-10-09（ArkTS 主线程冻结修复）：orchestrator 锁被「另一线程长时间

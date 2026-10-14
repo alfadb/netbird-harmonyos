@@ -267,12 +267,26 @@ fn resource_status_snapshot_cold_start_stop_restart_and_strict_shape() {
     // -----------------------------------------------------------------------
     // The frozen `connector_status()` document is UNTOUCHED: first field and
     // the pre-existing trailing `ice_sockets` section keep their positions,
-    // and no additive key leaks into it.
+    // and no additive key leaks into it. 0.0.34 (peer-status lag fix) appends
+    // ONE more tail field — the monotonic edge `status_revision` — AFTER
+    // `ice_sockets` (tail-append only; every pre-existing field keeps its
+    // position and its bytes).
     // -----------------------------------------------------------------------
     let frozen = connector_status_json();
     assert!(frozen.starts_with("{\"running\":"), "{frozen}");
     assert!(frozen.contains("\"ice_sockets\":{\"queued\":"), "{frozen}");
-    assert!(frozen.trim_end().ends_with("}}"), "{frozen}");
+    assert!(
+        frozen.contains("\"ice_sockets\":{\"queued\":") &&
+        frozen.contains(",\"status_revision\":"),
+        "the revision tail follows the ice_sockets section: {frozen}"
+    );
+    assert!(
+        frozen.trim_end().ends_with('}') &&
+        frozen.matches("\"status_revision\"").count() == 1 &&
+        frozen.trim_end().rfind("\"status_revision\":") >
+            frozen.trim_end().rfind("\"ice_sockets\":"),
+        "status_revision is the LAST field of the root object: {frozen}"
+    );
     for leaked in ["generation", "live_local_sockets", "sessions_present", "resource_status"] {
         assert!(!frozen.contains(leaked), "additive field `{leaked}` leaked into the frozen doc");
     }

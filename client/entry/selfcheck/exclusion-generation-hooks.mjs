@@ -1010,6 +1010,12 @@ const SHIMS = {
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
   './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
+  // 0.0.34 peer-status lag fix (REPORT §5 F1/F4): the REAL extension imports
+  // the publish-debounce policy by value (shouldPublishStatus /
+  // statusHeartbeatMaxAgeMs / statusPublishChangeKey) — a zero-import pure
+  // module with no erased type crossing the value import, so it is staged
+  // byte-identically and needs no shim (same rule as the two above).
+  './NetBirdStatusPolicy': 'NetBirdStatusPolicy.ts',
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',

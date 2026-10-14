@@ -2088,6 +2088,17 @@ impl IceSession {
         Some(self.pair_candidates(pi))
     }
 
+    /// 0.0.34 (peer-status lag REPORT §5 F1): the selected pair's CHEAP
+    /// identity — `(local socket index, remote address, remote port)`, the
+    /// same triple [`IceSession::selected_pair`] resolves and the same one the
+    /// status document renders as `ice_peers[].selected_local`/`selected_remote`.
+    /// `Copy`, no allocation, no pair scan: the peer-status edge detector runs
+    /// once per ICE pump pass and must not clone two candidates per peer to
+    /// answer "did the selection change?".
+    pub fn selected_pair_identity(&self) -> Option<(usize, [u8; 4], u16)> {
+        self.selected
+    }
+
     /// The injected-clock instant the agent entered `Checking` (armed on the
     /// first pump after [`IceSession::start`]) — the anchor of pion's one
     /// negotiation budget (`agent.go:378-387`). Observability/tests only.

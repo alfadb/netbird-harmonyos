@@ -62,6 +62,12 @@ import {
   connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
   connectorStatus, connectorStop, connectorLogout, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
+  // 0.0.34 peer-status lag fix (device report §5 F1): the core's edge wake.
+  // (`connectorStatusRevision` — the same revision without the document — stays
+  // a NetBirdConnector export for the shell's cheaper read face; this ability
+  // reads the value from the document it publishes anyway, so it costs no
+  // second core call.)
+  connectorStatusSubscribe, connectorStatusUnsubscribe,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplySubscribe, socketSupplyUnsubscribe,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
@@ -96,6 +102,11 @@ import type { RouteSelectionSetResult } from './NetBirdConnector';
 
 import { CONNECT_ENTRY_REJECT_RUNNING, UiStatusDocument, buildUiStatusDocument,
   connectEntryDecision } from './NetBirdUiModel';
+// 0.0.34 peer-status lag fix (device report §5 F1/F4): the publish debounce
+// policy — pure, import-free, exercised byte-identically by
+// client/entry/selfcheck/run-status-freshness.mts.
+import { shouldPublishStatus, statusHeartbeatMaxAgeMs, statusPublishChangeKey }
+  from './NetBirdStatusPolicy';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
@@ -845,6 +856,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private socketSupplyTimer: number = -1;
   // Subscribed to the core's enqueue wake (socketSupplySubscribe).
   private socketSupplyWaked: boolean = false;
+  // 0.0.34 peer-status lag fix (device report §5 F1/F3/F4): the core's
+  // edge-triggered STATUS wake and the publication bookkeeping it shares with
+  // the retained 5 s heartbeat tick.
+  //   * statusWaked       — subscribed to connectorStatusSubscribe (the shell's
+  //                         callback runs ON the ArkTS thread on every edge);
+  //   * lastStatusChangeKey / lastStatusPublishMs — what the last SUCCESSFUL
+  //                         publication wrote, so a heartbeat tick whose
+  //                         document would be identical is not rewritten
+  //                         (F4) while the reader's freshness gate stays armed;
+  //   * lastIfacePresence — the LAST measured vpn-tun verdict, so an edge
+  //                         publication stays synchronous (no platform probe on
+  //                         the wake path) without inventing a verdict: it is
+  //                         the same value the tick's own probe just measured,
+  //                         and 'unknown' (field omitted) until the first one.
+  private statusWaked: boolean = false;
+  private lastStatusChangeKey: string = '';
+  private lastStatusPublishMs: number = 0;
+  private lastIfacePresence: string = 'unknown';
   // The UI->VPE route-apply mailbox's own poll (it was carried by the retired
   // 100 ms socket-supply tick) — see startRouteApplyMailbox.
   private routeApplyMailboxTimer: number = -1;
@@ -5175,6 +5204,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.watcherTimer >= 0 || this.destroyRequested) {
       return;
     }
+    // 0.0.34 peer-status lag fix (device report §5 F1): the core's own edge
+    // wake is subscribed exactly while a publication is legal (the watcher is
+    // what makes `publishStatusForUi` allow a steady-state write), and the 5 s
+    // interval below stays what it was: the freshness HEARTBEAT. An edge
+    // publication is not a new timer — it rides the core's threadsafe-function
+    // callback.
+    this.subscribeStatusWake();
     this.watcherTimer = setInterval((): void => {
       // 2026-10-08: the persistent-log writer's own health, ONCE per 60 s on
       // this existing tick (see samplePhoneLogStatus). Deliberately the FIRST
@@ -5321,6 +5357,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // recreate (its settle EXPECTS the interface absent) is excluded by
         // state, not by ordering.
         this.probeVpnIfacePresence().then((ifacePresence: string): void => {
+          // 0.0.34 peer-status lag fix: remember the verdict THIS probe just
+          // measured, so an edge publication between two ticks carries the last
+          // real measurement instead of issuing a platform probe on the wake
+          // path (and never invents one).
+          this.lastIfacePresence = ifacePresence;
           this.publishStatusForUi(status, ifacePresence);
           // same tick, same callback: the offline route catalog (guarded
           // independently, and never a second timer).
@@ -5333,6 +5374,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           hilog.warn(DOMAIN, TAG,
             'VPN_IFACE_PROBE_REJECTED|requestId=%{public}s|summary=%{public}s',
             this.requestId, safeError(probeError));
+          // an unreadable probe is the same 'unknown' the document carries —
+          // remembered so an edge publication reproduces it verbatim.
+          this.lastIfacePresence = 'unknown';
           this.publishStatusForUi(status, 'unknown');
           this.publishRouteCatalogForUi();
         });
@@ -6200,6 +6244,69 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  // 0.0.34 peer-status lag fix (device report §5 F1): install the core's own
+  // edge wake — the official client's notifier shape (capacity-1 coalescing
+  // wake on every rendered status-fact change, `peer/notifier.go:180-233`)
+  // carried across the process boundary by the crate's second threadsafe
+  // function. Once per watcher lifetime; a restarted watcher re-subscribes (the
+  // core replaces and releases the previous callback). A refusal is a LATENCY
+  // failure only: the 5 s heartbeat below keeps publishing.
+  private subscribeStatusWake(): void {
+    if (this.statusWaked) {
+      return;
+    }
+    this.statusWaked = true;
+    try {
+      const answer: SocketFeedResult = connectorStatusSubscribe((): void => {
+        this.statusEdgeWake();
+      });
+      if (!answer.ok) {
+        hilog.warn(DOMAIN, TAG, 'VPN_STATUS_WAKE_SUBSCRIBE_FAILED|error=%{public}s',
+          answer.error ?? 'unknown');
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_STATUS_WAKE_SUBSCRIBE_FAILED|summary=%{public}s',
+        safeError(error as Error));
+    }
+  }
+
+  private stopStatusWake(): void {
+    if (!this.statusWaked) {
+      return;
+    }
+    this.statusWaked = false;
+    try {
+      connectorStatusUnsubscribe();
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_STATUS_WAKE_UNSUBSCRIBE_FAILED|summary=%{public}s',
+        safeError(error as Error));
+    }
+  }
+
+  // The core's edge wake: runs ON the ArkTS thread (native threadsafe-function
+  // callback), so it must return immediately and must never throw. It reads the
+  // live status and republishes the document NOW — the whole point of the fix:
+  // the peer page sees a direct↔relay transition in the time the reader needs
+  // to notice the new document (~1 s), not in up to two timer periods (7 s).
+  //
+  // Deliberately synchronous: the vpn-tun verdict rides the LAST measured value
+  // (this.lastIfacePresence) instead of issuing a platform statistics probe per
+  // edge. The probe belongs to the 5 s tick (its own watchdog semantics), and an
+  // edge is a peer-status fact, not an interface fact.
+  private statusEdgeWake(): void {
+    if (this.destroyRequested || this.destroyPromise !== undefined ||
+      this.connectorDeathHandled || this.watcherTimer < 0) {
+      return;
+    }
+    const status: ConnectorStatusResult | null = pollStatusOrNull();
+    if (status === null) {
+      // the core did not answer: publish NOTHING rather than invent a state
+      // (the heartbeat tick owns the poll-failure accounting).
+      return;
+    }
+    this.publishStatusForUi(status, this.lastIfacePresence);
+  }
+
   // Service the queue until it is EMPTY. Every request is answered by
   // fulfillSocketRequest (which closes its own fd on every path), and an empty
   // answer is the termination condition — never a fixed number of requests.
@@ -6725,6 +6832,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   private stopStatusAndNetcfgWatcher(): void {
     this.stopSocketSupply();
+    // 0.0.34 peer-status lag fix: the edge wake belongs to the watcher's
+    // lifetime (see startStatusAndNetcfgWatcher) — detach it BEFORE the timer
+    // dies, so no edge callback can run against a watcher-less shell.
+    this.stopStatusWake();
     if (this.watcherTimer >= 0) {
       clearInterval(this.watcherTimer);
       this.watcherTimer = -1;
@@ -7297,7 +7408,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // the core did not answer: report NOTHING rather than invent a state.
       return;
     }
-    this.publishStatusForUi(status, 'unknown', true);
+    this.publishStatusForUi(status, 'unknown', true, force);
     hilog.info(DOMAIN, TAG,
       'VPN_ENGINE_REPORT|requestId=%{public}s|state=%{public}s|running=%{public}s|' +
       'note=engine-state-report',
@@ -7314,7 +7425,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // had no such line, so document content vs UI display could not be told
   // apart from the device log.
   private publishStatusForUi(status: ConnectorStatusResult, ifacePresence: string,
-    allowBeforeWatcher: boolean = false): void {
+    allowBeforeWatcher: boolean = false, force: boolean = false): void {
     // Teardown guard: the probe continuation calling this runs one microtask
     // behind its tick — a recreate triggered by that same tick may have
     // already failed closed (or the connector died) and REMOVED the document
@@ -7355,8 +7466,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
         this.requestId, Date.now(), ifacePresent, this.managementUrl,
         this.managementEndpoint, this.appliedTunnelMtu);
+      // 0.0.34 peer-status lag fix (device report §5 F4, write debounce): the
+      // 5 s heartbeat must stay (the reader's freshness gate is built on it),
+      // but a publication whose document would be IDENTICAL to the one already
+      // on disk is a redundant flash write. The change key is cheap and covers
+      // every input that can come from outside the core's own edge set (the
+      // core status revision, the vpn-tun verdict, the applied map serial), and
+      // the freshness rule (statusHeartbeatMaxAgeMs) forces the write before
+      // the gate could lapse; `force` callers (the engine's own start report)
+      // always write.
+      const nowMs: number = Date.now();
+      const changeKey: string = statusPublishChangeKey(doc.status_revision, ifacePresence,
+        network !== null && network.available ? network.serial : undefined);
+      if (!force && !shouldPublishStatus({
+        changeKey: changeKey,
+        lastChangeKey: this.lastStatusChangeKey,
+        nowMs: nowMs,
+        lastPublishMs: this.lastStatusPublishMs,
+        heartbeatMaxAgeMs: statusHeartbeatMaxAgeMs(STATUS_POLL_MS)
+      })) {
+        return;
+      }
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
+      this.lastStatusChangeKey = changeKey;
+      this.lastStatusPublishMs = nowMs;
       const uiSignature: string = `${doc.state}|${doc.address !== null}|` +
         `${doc.peers.length}|${doc.iface_present === true}`;
       const now: number = Date.now();

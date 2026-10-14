@@ -396,6 +396,24 @@ export interface ConnectorStatusResult {
   // an older core. The published document carries the SAME distinction (see
   // NetBirdUiModel.buildIceMux). Counters only.
   ice_mux?: CoreIceMuxStats | null;
+  // 0.0.34 peer-status lag fix: the process-monotonic, edge-driven status
+  // revision (core `status_revision`, the NEW TAIL of the status document,
+  // after `ice_sockets`). It moves exactly when a rendered status fact changed
+  // (never on pure counters) and is the shell's cheap change detector: the
+  // publish debounce and the reader tick compare it instead of diffing the
+  // document. Absent on an older core (the shell then treats the document as
+  // always changed — the pre-0.0.34 behaviour).
+  status_revision?: number;
+  // 2026-10-09 / 0.0.34: were the `ice`/`ice_peers` values in THIS document a
+  // fresh read, and how old is the served sample when they were not
+  // (`age_ms: null` = no successful ICE read to age). The ICE detail block is
+  // rendered as 未知 once the sample is older than
+  // NetBirdUiModel.ICE_SNAPSHOT_UNKNOWN_AGE_MS — stale numbers are not a
+  // statement about now (see NetBirdUiModel.mergePeers / iceSnapshotIsUnknown).
+  // Absent on an older core: the marks are then unknown, and the ICE detail is
+  // rendered as before (never silently upgraded into "fresh").
+  ice_snapshot_stale?: boolean;
+  ice_snapshot_age_ms?: number | null;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -770,6 +788,53 @@ export function socketSupplyShutdown(): void {
   core.socket_supply_shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// 0.0.34 peer-status lag fix (device report `peer-status-lag/REPORT.md` §5 F1):
+// the STATUS-EDGE wake — the core's own edge-triggered publication.
+//
+// The core detects a change of any RENDERED status fact (connector state /
+// running / error class, WG session established+expired, carrier attach/detach
+// and carrier↔direct, the per-peer ICE facts, relay state/current_url, the peer
+// set) and raises ONE capacity-1 COALESCING wake — the exact shape of the
+// official client's notifier (`client/internal/peer/notifier.go:180-233`:
+// `select { case ch <- struct{}{}: default: }` → `OnPeersListChanged`). The
+// callback runs ON the ArkTS thread and carries NO payload, exactly like
+// `socketSupplySubscribe` above: the shell reads the live status itself and
+// republishes the document at once instead of waiting for the next 5 s watcher
+// tick. That 5 s tick STAYS (it is the freshness heartbeat the reader's
+// `STATUS_MAX_AGE_MS` gate is built on); this wake only removes the wait.
+//
+// The answer is parsed so a wiring failure is visible, and a refused
+// subscription is a LATENCY failure, never a correctness one.
+export function connectorStatusSubscribe(wake: () => void): SocketFeedResult {
+  return JSON.parse(core.connector_status_subscribe(wake)) as SocketFeedResult;
+}
+
+// Teardown: detach the hook and release the registered callback. Idempotent.
+export function connectorStatusUnsubscribe(): SocketFeedResult {
+  return JSON.parse(core.connector_status_unsubscribe()) as SocketFeedResult;
+}
+
+// The core's monotonic status revision (`{"revision":N}`) — one atomic load on
+// the native side, no status document, no connector slot, no lock. It bumps
+// exactly on the edges above and never on pure counters, which is what lets the
+// heartbeat tick detect "nothing changed" for free. `-1` = the core did not
+// answer a number (an older core without the export).
+export interface StatusRevisionResult {
+  revision: number;
+}
+
+export function connectorStatusRevision(): number {
+  try {
+    const answer: StatusRevisionResult =
+      JSON.parse(core.connector_status_revision()) as StatusRevisionResult;
+    return typeof answer.revision === 'number' && Number.isFinite(answer.revision)
+      ? answer.revision : -1;
+  } catch (error) {
+    return -1;
+  }
+}
+
 // N7 feed results: {ok:true,device_up:bool,mono_ms:int} — device_up flips true
 // once BOTH the WG socket and the TUN fd have been fed (the data plane is
 // pumping). N2 T7a (item 6): `mono_ms` is the CORE's monotonic instant of this
@@ -931,6 +996,14 @@ export interface PublishedStatus {
   last_update_unix?: number;
   // The management authority (scheme + host + port only — never the URL).
   management?: Object;
+  // 0.0.34 peer-status lag fix: the core's process-monotonic EDGE revision
+  // (`status_revision`, the extension document's trailing field). It moves
+  // exactly when a rendered status fact changed, so the reader tick can tell
+  // "the document really moved" from "another tick of the same document" and
+  // skip re-deriving its UI state (NetBirdStatusPolicy.statusDocumentStamp /
+  // shouldReapplyPublishedStatus). Absent in a pre-0.0.34 document: the reader
+  // then compares `updated_at_ms` alone.
+  status_revision?: number;
 }
 
 // Read the published status. A missing, unreadable, malformed or STALE

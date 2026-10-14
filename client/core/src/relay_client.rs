@@ -1357,6 +1357,12 @@ impl Shared {
         if stats.state_history.len() > STATE_HISTORY_CAP {
             stats.state_history.remove(0);
         }
+        drop(stats);
+        // 0.0.34 (peer-status lag REPORT §5 F1): `relay.state` is rendered on
+        // BOTH pages (the relay chip and the detail row). Raised AFTER the
+        // stats guard is dropped — the edge hands a non-blocking wake to the
+        // shell and must never run under this lock.
+        crate::status_events::edge("relay-state");
     }
 
     fn observe_error(&self, class: RelayErrorClass) {
@@ -2161,12 +2167,24 @@ async fn run_session(
             // redial, by construction.
             WsMessage::Binary(bytes) => match Frame::decode(&bytes) {
                 Ok(Frame::AuthResponse { instance_url }) => {
+                    // 0.0.34 (peer-status lag REPORT §5 F1): `relay.current_url`
+                    // is rendered (详情页中继地址) — a REAL change of the
+                    // effective session URL is an edge. The flag is set inside
+                    // the stats guard and the edge raised OUTSIDE it.
+                    let effective_url = url.config_string();
+                    let mut url_changed = false;
                     shared.bump(|s| {
                         s.frames_rx[MSG_AUTH_RESPONSE as usize] += 1;
                         s.instance_url = Some(instance_url);
-                        s.current_url = Some(url.config_string());
+                        if s.current_url.as_deref() != Some(effective_url.as_str()) {
+                            url_changed = true;
+                        }
+                        s.current_url = Some(effective_url);
                         s.auth_successes += 1;
                     });
+                    if url_changed {
+                        crate::status_events::edge("relay-url");
+                    }
                     ws
                 }
                 Ok(_) => return (RelayErrorClass::AuthProtocol, false),
@@ -3195,6 +3213,30 @@ mod tests {
             }
         }
         got
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：`relay.state` 是两个页面都渲染
+    /// 的事实（中继徽标 + 详情行）。**真的变了**才抬边沿；重复设置同一状态
+    /// 一次都不抬。断言用 `status_events` 的线程本地点数。
+    #[test]
+    fn relay_state_change_raises_one_edge_and_a_repeat_none() {
+        use crate::status_events;
+        let (_client, shared) = fenced_client(RelayState::Disconnected);
+        let before = status_events::thread_edges();
+        shared.set_state(RelayState::Dialing);
+        assert_eq!(status_events::thread_edges(), before + 1, "a state change is ONE edge");
+        assert_eq!(status_events::thread_last_reason(), "relay-state");
+        let before = status_events::thread_edges();
+        shared.set_state(RelayState::Dialing);
+        assert_eq!(status_events::thread_edges(), before, "the same state is not an edge");
+        // ... and the counters a session bumps (frames, reconnects) are not
+        // edges either: `set_state` is the ONLY relay-state edge source.
+        shared.bump(|s| {
+            s.frames_tx[0] += 1;
+            s.reconnects += 1;
+            s.transport_tx_bytes += 128;
+        });
+        assert_eq!(status_events::thread_edges(), before, "relay counters are not edges");
     }
 
     #[test]

@@ -8,7 +8,8 @@ import vpnExtension from '@ohos.net.vpnExtension';
 import common from '@ohos.app.ability.common';
 import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
   removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
-import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
+import { currentPublishedStatus, shouldReapplyPublishedStatus, statusDocumentStamp }
+  from '../vpnextensionability/NetBirdStatusPolicy';
 // 2026-10-08 扩展被系统回收后的自动重连: the WHOLE decision (every gate + the
 // anti-loop state machine) is a PURE module — the host check
 // selfcheck/run-reconnect-policy.mts imports it byte-identical. This page only
@@ -155,7 +156,16 @@ const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 const EXTENSION_ABILITY: string = 'NetBirdVpnExtensionAbility';
-const STATUS_POLL_MS: number = 2000;
+// 0.0.34 peer-status lag fix (device report `peer-status-lag/REPORT.md` §5 F3):
+// the READER's tick. It is no longer a publication-rate copy of the extension's
+// 5 s writer cadence (that was the 2 s value and the reason a peer-status edge
+// could sit unrendered for up to 2 s after the document had already changed):
+// the extension now publishes on the core's own state edges, so this tick is
+// only how fast the page NOTICES a new document. The per-tick work stays bounded
+// because the tick skips all re-derivation unless the document really moved
+// (NetBirdStatusPolicy.statusDocumentStamp / shouldReapplyPublishedStatus) — an
+// idle screen does LESS work than the old 2 s tick, not more.
+const STATUS_POLL_MS: number = 1000;
 // 2026-10-12 upstream tap handling: the recorded connect-failure verdict is shown
 // as a Toast carrying the engine's own message (upstream Toast.LENGTH_LONG,
 // MainActivity.java:1030-1036) exactly ONCE per verdict; the persistent channels
@@ -885,6 +895,13 @@ struct DetailSectionHeader {
 struct Index {
   // ---- live status (published document, fresh within 10 s) ----
   @State published: PublishedStatus | null = null;
+  // 0.0.34 peer-status lag fix (§5 F3): the identity
+  // (NetBirdStatusPolicy.statusDocumentStamp) of the document `published` was
+  // last derived from. The 1 s tick compares it before doing ANY re-derivation
+  // or re-assignment, so a tick that finds the same document (the common case:
+  // the extension publishes on edges + a 5 s heartbeat) costs one file read and
+  // nothing else.
+  private appliedStatusStamp: string = '';
   @State requestSent: boolean = false;
   @State stopSent: boolean = false;
   // 2026-10-13 PC 托盘（0.0.29）: one explicit quit at a time. Not @State — it
@@ -1331,6 +1348,9 @@ struct Index {
         this.lastLiveState = '';
       }
       this.published = null;
+      // this branch is entered with NO live document: the next live document
+      // must be applied even if it were stamped like one applied earlier.
+      this.appliedStatusStamp = '';
       // 2026-10-06 登录失败可见性: no live document AND a matching failure
       // notice = the attempt ended in a recorded failure (login fatal /
       // retry exhausted / startup abort) — the card shows the official
@@ -1347,6 +1367,18 @@ struct Index {
       return;
     }
     this.observedPublishedStatus = true;
+    // 0.0.34 peer-status lag fix (device report §5 F3): the document's own
+    // identity — its write stamp plus the core's edge revision. Nothing below
+    // can differ while the extension has not republished THIS exact document,
+    // so a tick that finds the one already applied re-derives nothing and,
+    // above all, does not re-assign `published` (which is what makes ArkUI walk
+    // the peer list). The per-tick POLICIES above (updatePendingAction,
+    // syncKeepAlive) have their own clocks and ran already.
+    const nextStamp: string = statusDocumentStamp(live);
+    if (this.published !== null && !shouldReapplyPublishedStatus(this.appliedStatusStamp, nextStamp)) {
+      return;
+    }
+    this.appliedStatusStamp = nextStamp;
     this.lastLiveState = live.state;
     if (vpnActiveState(live.state)) {
       this.requestSent = true;

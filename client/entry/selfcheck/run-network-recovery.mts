@@ -51,6 +51,10 @@ const RETRY_MIN_MS = 15000;
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // 0.0.34 peer-status lag fix (REPORT §5 F1/F4): the publish-debounce policy
+  // the REAL extension now imports by value — zero imports, no erased type
+  // crossing the value import, staged byte-identically, no shim.
+  'NetBirdStatusPolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy', 'NetBirdDiagnosticsCore',
   'NetBirdN2Stimulus', 'NetBirdN2AEvent', 'NetBirdN2Sandwich',
   'NetBirdN2ControlRequest', 'NetBirdN2CdPlan', 'NetBirdN2Ring'];

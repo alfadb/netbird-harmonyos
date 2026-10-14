@@ -65,6 +65,10 @@ const MGMT = 'http://mgmt.test:33073';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // 0.0.34 peer-status lag fix (REPORT §5 F1/F4): the publish-debounce policy
+  // the REAL extension now imports by value — zero imports, no erased type
+  // crossing the value import, staged byte-identically, no shim.
+  'NetBirdStatusPolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy',
   'NetBirdDiagnosticsCore', 'NetBirdN2Stimulus', 'NetBirdN2AEvent', 'NetBirdN2Sandwich',
   'NetBirdN2ControlRequest', 'NetBirdN2CdPlan', 'NetBirdN2Ring'];
@@ -378,7 +382,7 @@ try {
     extSource.includes('if (this.watcherTimer < 0 && !allowBeforeWatcher)') &&
     extSource.indexOf('this.publishEngineStateReport(true);') <
       extSource.indexOf('const net: CoreNetworkConfig | null = await this.waitNetworkConfigBounded();') &&
-    extSource.includes("this.publishStatusForUi(status, 'unknown', true)") &&
+    extSource.includes("this.publishStatusForUi(status, 'unknown', true, force)") &&
     extSource.includes('this.publishEngineStateReport();'));
   check('P11 the force-cancel window: 2 s delay, toggle gated on it, tap aborts the ' +
     'transition instead of starting a new connect',

@@ -1992,6 +1992,11 @@ impl WgDevice {
         };
         let replaced = self.peers[idx].carrier.is_some();
         self.peers[idx].carrier = Some(carrier);
+        // 0.0.34 (peer-status lag REPORT §5 F1): `carrier_attached` (per peer
+        // in `wg_peers`) and the actual relay lane the UI joins by public key
+        // (`peer_relays`) both change here — the attach is an edge (upstream
+        // `UpdatePeerRelayedState`, `peer/status.go:531`).
+        crate::status_events::edge("carrier-attach");
         // 2026-10-12（diag/0027 item 3）：载体切换行是**证据**（每对端每次
         // 切换一行），走 phone log 的小额优先预算，不再与 ICE 风暴争普通预算。
         emit_evidence(&carrier_attach_line(
@@ -2018,6 +2023,10 @@ impl WgDevice {
             // the bearer source resets with the carrier: the next dispatch
             // (direct OR a re-attached carrier) counts as a fresh transition
             self.peers[idx].on_carrier = false;
+            // 0.0.34 (peer-status lag REPORT §5 F1): the lane really went away
+            // (`carrier_attached` false, `peer_relays` loses the entry, and the
+            // peer has no path unless ICE re-nominates) — one edge.
+            crate::status_events::edge("carrier-detach");
             emit_evidence(&carrier_detach_line(pub_key_b64));
             true
         } else {
@@ -2027,10 +2036,18 @@ impl WgDevice {
 
     /// N13-D2 — detach every peer's relay carrier (bulk teardown).
     pub fn remove_all_carriers(&mut self) {
+        let mut detached = false;
         for peer in self.peers.iter_mut() {
             if peer.carrier.take().is_some() {
                 peer.on_carrier = false;
+                detached = true;
             }
+        }
+        if detached {
+            // 0.0.34 (peer-status lag REPORT §5 F1): the bulk teardown changes
+            // every detached peer's facts at once — ONE edge for the whole
+            // event (a per-peer burst would coalesce anyway).
+            crate::status_events::edge("carrier-detach");
         }
         emit("N13_WG|carrier-detach-all");
     }
@@ -2280,6 +2297,11 @@ impl WgDevice {
                 self.peers[idx].expired = false;
                 self.peers[idx].session_established_ms = now_ms;
                 self.peers[idx].first_init_ms = None; // campaign done
+                // 0.0.34 (peer-status lag REPORT §5 F1): the FIRST establishment
+                // and the post-expiry re-establishment both flip the rendered
+                // `session_established`/`expired` facts (and `online`), so both
+                // raise exactly ONE edge — the same action set, the same edge.
+                crate::status_events::edge("session-established");
                 emit_evidence(&session_established_line(&self.peers[idx].key_b64));
                 // managed-route overlay: a live session re-ranks this peer in
                 // every HA set it belongs to (may switch nets onto it)
@@ -2452,6 +2474,12 @@ impl WgDevice {
                     >= cfg.session_max_ms
             {
                 self.peers[idx].expired = true;
+                // 0.0.34 (peer-status lag REPORT §5 F1): `expired` is rendered
+                // (`online` = established && !expired, `tunnel_ready`) — the
+                // expiry instant is the edge. F5 (the 540 s `online` predicate
+                // itself) is a SEPARATE, product-owned fix and is untouched
+                // here: this edge only makes the existing fact leave at once.
+                crate::status_events::edge("session-expired");
                 emit_evidence(&session_expired_line(&self.peers[idx].key_b64));
                 // managed-route overlay: the peer just failed — fail its nets
                 // over to another HA candidate (if any)
@@ -2602,6 +2630,11 @@ impl WgDevice {
             if self.peers[idx].on_carrier {
                 self.peers[idx].on_carrier = false;
                 self.stats.direct_restores += 1;
+                // 0.0.34 (peer-status lag REPORT §5 F1): carrier → direct is
+                // exactly the 直连/中继 label flip the report measured at ~102
+                // edges/hour on the phone (N13_WG|carrier->direct) — the ONE
+                // transition the peer page must never render seconds late.
+                crate::status_events::edge("carrier->direct");
                 emit_evidence(&carrier_to_direct_line(&self.peers[idx].key_b64));
             }
             let ep = self.peers[idx].endpoint.expect("endpoint checked above");
@@ -2611,6 +2644,9 @@ impl WgDevice {
         if !self.peers[idx].on_carrier {
             self.peers[idx].on_carrier = true;
             self.stats.carrier_takeovers += 1;
+            // 0.0.34 (peer-status lag REPORT §5 F1): direct → carrier, the
+            // mirror edge of the one above (N13_WG|direct->carrier).
+            crate::status_events::edge("direct->carrier");
             emit_evidence(&direct_to_carrier_line(&self.peers[idx].key_b64));
         }
         let Some(carrier) = self.peers[idx].carrier.clone() else {
@@ -5684,6 +5720,105 @@ mod transfer_tests {
         );
     }
 
+    /// 0.0.34（peer-status lag REPORT §5 F1）：载体事实（attach / detach /
+    /// direct→carrier / carrier→direct）各抬**恰好一次**状态边沿；同一承载
+    /// 上继续发数据（纯计数器 + `on_carrier` 不变）**一次都不抬**。
+    ///
+    /// 断言用 `status_events` 的**线程本地点数**：lib 测试二进制并行跑，只有
+    /// 本线程驱动的迁移能被精确计数（见该模块的测试说明）。
+    #[test]
+    fn carrier_facts_raise_exactly_one_edge_and_repeat_traffic_none() {
+        use crate::status_events;
+        let (_sa, ka) = identity(0x71);
+        let (_sb, kb) = identity(0x72);
+        let mut a = Dev::new(0x71, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x72, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut [&mut a, &mut b], 0, 1, &mut now);
+        assert!(a.peer(&kb).session_established, "fixture: session live");
+
+        // A pure pump tick after the session settled changes no rendered fact
+        // (the handshake age is derived, not a stored transition).
+        let before = status_events::thread_edges();
+        for _ in 0..20 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+        assert_eq!(status_events::thread_edges(), before, "a settled pump tick is not an edge");
+
+        // carrier attach: `carrier_attached` + the per-peer relay lane table.
+        let before = status_events::thread_edges();
+        a.dev.recycle_endpoint(&kb);
+        a.dev.set_carrier(&kb, TestCarrier::new(true)).expect("attach");
+        assert_eq!(status_events::thread_edges(), before + 1, "attach ⇒ exactly one edge");
+        assert_eq!(status_events::thread_last_reason(), "carrier-attach");
+
+        // carrier detach: the lane is gone again.
+        let before = status_events::thread_edges();
+        assert!(a.dev.remove_carrier(&kb), "the lane really was attached");
+        assert_eq!(status_events::thread_edges(), before + 1, "detach ⇒ exactly one edge");
+        assert_eq!(status_events::thread_last_reason(), "carrier-detach");
+        // ... and a detach with nothing attached is not an edge at all.
+        let before = status_events::thread_edges();
+        assert!(!a.dev.remove_carrier(&kb));
+        assert_eq!(status_events::thread_edges(), before, "no carrier, no transition");
+
+        // direct → carrier: the first outbound frame while the endpoint is gone.
+        a.dev.set_carrier(&kb, TestCarrier::new(true)).expect("re-attach");
+        let before = status_events::thread_edges();
+        a.write_frame(&frame(ADDR_A, ADDR_B, &[0x31; 32]));
+        a.step(now);
+        assert_eq!(status_events::thread_edges(), before + 1, "direct→carrier exactly once");
+        assert_eq!(status_events::thread_last_reason(), "direct->carrier");
+        assert!(a.peer(&kb).on_carrier, "the bearer really switched");
+
+        // More traffic on the SAME bearer: counters advance, the fact does not.
+        let before = status_events::thread_edges();
+        for _ in 0..10 {
+            now += 10;
+            a.write_frame(&frame(ADDR_A, ADDR_B, &[0x32; 32]));
+            a.step(now);
+        }
+        assert_eq!(status_events::thread_edges(), before, "the same bearer is not an edge again");
+
+        // carrier → direct: an ICE endpoint lands and the handshake that landing
+        // starts (plus the next data frame) ride it — ONE edge for the whole
+        // transition, however many datagrams it takes.
+        let before = status_events::thread_edges();
+        a.dev.set_endpoint(&kb, [127, 0, 0, 1], b.port(), now).expect("endpoint lands");
+        a.write_frame(&frame(ADDR_A, ADDR_B, &[0x33; 32]));
+        a.step(now);
+        assert_eq!(status_events::thread_edges(), before + 1, "carrier→direct exactly once");
+        assert_eq!(status_events::thread_last_reason(), "carrier->direct");
+        assert!(!a.peer(&kb).on_carrier, "back on the ICE path");
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：`remove_all_carriers`（批量拆除）
+    /// 不管拆掉几个 peer 都只抬**一次**（容量 1 的合并语义），没有载体可拆时
+    /// 一次都不抬。
+    #[test]
+    fn bulk_carrier_teardown_coalesces_into_one_edge() {
+        use crate::status_events;
+        let (_sa, ka) = identity(0x73);
+        let (_sb, kb) = identity(0x74);
+        let mut a = Dev::new(0x73, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x74, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut [&mut a, &mut b], 0, 1, &mut now);
+
+        let before = status_events::thread_edges();
+        a.dev.remove_all_carriers();
+        assert_eq!(status_events::thread_edges(), before, "nothing attached ⇒ no edge");
+
+        a.dev.set_carrier(&kb, TestCarrier::new(true)).expect("attach");
+        let before = status_events::thread_edges();
+        a.dev.remove_all_carriers();
+        assert_eq!(status_events::thread_edges(), before + 1, "the bulk teardown is ONE event");
+        assert_eq!(status_events::thread_last_reason(), "carrier-detach");
+        assert!(!a.peer(&kb).carrier_attached, "the lane really went away");
+    }
+
     /// Counter lifecycle: a surviving key keeps its tunnel AND its counters
     /// across `set_peers` snapshots; a replaced key (removed, then re-added)
     /// starts from zero.
@@ -6134,6 +6269,65 @@ mod session_expiry_tests {
             1,
             "wg_sessions counts the recovered peer and only it"
         );
+    }
+
+    /// 0.0.34（peer-status lag REPORT §5 F1）：`expired` 翻转与过期后的
+    /// **重建**各抬**恰好一次**边沿（两个不同的 reason），而中间那些只让计数
+    /// 器前进的 tick 一次都不抬 —— 这正是"边沿而不是定时器"的判据。
+    ///
+    /// 断言用 `status_events` 的线程本地点数（lib 测试二进制并行跑）。
+    #[test]
+    fn expiry_and_its_recovery_raise_one_edge_each_and_pure_ticks_none() {
+        use crate::status_events;
+        let (_sa, ka) = identity(0x5A);
+        let (_sb, kb) = identity(0x6A);
+        let mut a = Dev::new(0x5A, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x6A, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut a, &mut b, &mut now);
+
+        // ① expiry: one edge, at the instant the policy window closes.
+        let anchor = a.peer_mut(&kb).session_established_ms;
+        let expiry = anchor + SESSION_MAX_MS;
+        let recover_now = expiry + 5_000;
+        a.peer_mut(&kb).hs_override = Some(((recover_now - anchor) / 1000) as i64);
+        let before = status_events::thread_edges();
+        a.dev.tick(expiry);
+        assert!(a.peer_mut(&kb).expired, "the policy window closed");
+        assert_eq!(status_events::thread_edges(), before + 1, "expiry ⇒ exactly one edge");
+        assert_eq!(status_events::thread_last_reason(), "session-expired");
+
+        // ② an expired peer idling: the campaign ticks, the rendered fact does
+        //    not move (the old handshake's age is not a recovery).
+        let before = status_events::thread_edges();
+        for step in 1..=10u64 {
+            now = expiry + step * 5;
+            a.dev.tick(now);
+        }
+        assert!(a.peer_mut(&kb).expired, "still expired");
+        assert_eq!(status_events::thread_edges(), before, "an expired peer idling is not an edge");
+
+        // ③ recovery through a GENUINE new handshake: the second distinct edge.
+        assert!(b.dev.initiate_handshake(0, recover_now), "B's fresh initiation went out");
+        a.peer_mut(&kb).hs_override = Some(0);
+        let before = status_events::thread_edges();
+        assert!(a.dev.service_udp(recover_now) >= 1, "A ingests the new handshake");
+        assert!(
+            a.peer_mut(&kb).session_established && !a.peer_mut(&kb).expired,
+            "the post-expiry handshake re-established the session"
+        );
+        assert_eq!(status_events::thread_edges(), before + 1, "recovery ⇒ exactly one edge");
+        assert_eq!(status_events::thread_last_reason(), "session-established");
+
+        // ④ pure counters afterwards: pump passes / handshake counters advance
+        //    with no rendered transition.
+        let before = status_events::thread_edges();
+        for _ in 0..20 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+        assert_eq!(status_events::thread_edges(), before, "counters are not edges");
     }
 
     /// (d) A live (non-expired) session receiving a fresh handshake is a normal

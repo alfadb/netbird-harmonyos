@@ -307,6 +307,14 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     // append-only — every pre-existing name keeps its position and its created
     // function object).
     reg!("alloc_stats", napi_alloc_stats);
+    // 0.0.34 peer-status lag fix (device report §5 F1): the edge-triggered
+    // status publication surface — the subscribe/unsubscribe pair owning the
+    // crate's SECOND threadsafe function, plus the cheap revision getter.
+    // Appended at the TAIL of the registration list (append-only: every
+    // pre-existing name keeps its position and its created function object).
+    reg!("connector_status_subscribe", napi_connector_status_subscribe);
+    reg!("connector_status_unsubscribe", napi_connector_status_unsubscribe);
+    reg!("connector_status_revision", napi_connector_status_revision);
     exports
 }
 
@@ -859,6 +867,9 @@ mod tests {
             "connector_routes",
             "connector_route_selection_set",
             "alloc_stats",
+            "connector_status_subscribe",
+            "connector_status_unsubscribe",
+            "connector_status_revision",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -869,16 +880,23 @@ mod tests {
             assert_eq!(call.2, fake, "{} value must be the created function object", name);
         }
 
-        // Append-only surface (increments 131/132 + the additive heap readout):
-        // the route pair and then `alloc_stats` are the LAST registrations, in
-        // that order, and every export name is registered exactly once — no
-        // pre-existing name lost its position or its created function object to
-        // the new binding.
+        // Append-only surface (increments 131/132 + the additive heap readout,
+        // then the 0.0.34 status-edge trio): the route pair, `alloc_stats` and
+        // the status surface are the LAST registrations, in that order, and
+        // every export name is registered exactly once — no pre-existing name
+        // lost its position or its created function object to the new binding.
         let names: Vec<&str> = calls.iter().map(|(_, name, _)| name.as_str()).collect();
         assert_eq!(
-            names[names.len() - 3..].to_vec(),
-            vec!["connector_routes", "connector_route_selection_set", "alloc_stats"],
-            "the route surface, then the heap readout, must stay appended at the registration tail"
+            names[names.len() - 6..].to_vec(),
+            vec![
+                "connector_routes",
+                "connector_route_selection_set",
+                "alloc_stats",
+                "connector_status_subscribe",
+                "connector_status_unsubscribe",
+                "connector_status_revision",
+            ],
+            "the route surface, the heap readout and the status-edge trio must stay appended at the registration tail"
         );
         let mut seen = std::collections::HashSet::new();
         for name in &names {
@@ -1311,6 +1329,106 @@ mod tests {
         assert_eq!(poller.await.expect("poller task"), dialed);
         assert_eq!(tsfn_calls().len(), 1, "no wake after unsubscribe");
     }
+
+    // -----------------------------------------------------------------------
+    // the status-edge wake (0.0.34 peer-status lag fix, F1)
+    //
+    // The TRANSPORT is pinned here end to end (subscribe creates ONE threadsafe
+    // function; a real edge reaches the ArkTS callback with ZERO arguments; the
+    // delivery consumes the coalescing token, so the next edge wakes again;
+    // unsubscribe detaches the hook and releases the handle in abort mode). The
+    // CAPACITY-1 COALESCING itself ("N edges ⇒ exactly one pending wake") is
+    // pinned in `crate::status_events::tests`, where the installed hook does not
+    // deliver — the host stub below dispatches `call_js` INLINE, i.e. it models
+    // an ArkTS loop that is never busy, which is the one case in which a burst
+    // legitimately produces one wake per edge.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_wake_subscribes_wakes_with_no_payload_and_unsubscribes() {
+        use super::host_stubs::{js_calls, live_tsfns, tsfn_calls, tsfn_releases};
+        // ONE process-wide wake installation, shared with the socket-supply
+        // wake test and with every fact-site test in this binary: serialize.
+        let _serial = crate::status_events::wake_test_lock();
+        reset();
+        let env = 0x1 as NapiEnv;
+
+        // (a) no ArkTS callback: an ANSWERED refusal — never a throw, never a
+        // half-installed subscription.
+        let refused = unsafe { napi_connector_status_subscribe(env, 0xC1 as NapiCallbackInfo) };
+        assert!(created_string(refused as usize).expect("refusal reply")
+            .contains("callback-required"));
+        assert_eq!(live_tsfns(), 0);
+
+        // (b) the ArkTS callback: exactly one threadsafe function.
+        set_call_args(0xC2, &[0x4321]);
+        let ok = unsafe { napi_connector_status_subscribe(env, 0xC2 as NapiCallbackInfo) };
+        assert_eq!(created_string(ok as usize).expect("subscribe reply"), "{\"ok\":true}");
+        assert_eq!(live_tsfns(), 1);
+
+        // (c) a real edge reaches the JS callback with ZERO arguments, exactly
+        // once. The token is PROCESS-wide (as in production), so a concurrent
+        // test's edge may legitimately own it microseconds before ours: re-arm
+        // and retry — this asserts the plumbing, not the scheduler.
+        let mut woke = false;
+        for _ in 0..256 {
+            crate::status_events::wake_consumed();
+            let before = tsfn_calls().len();
+            crate::status_events::edge("napi-status-test");
+            let raised = tsfn_calls().len() - before;
+            if raised == 1 {
+                woke = true;
+                break;
+            }
+            assert_eq!(raised, 0, "capacity-1: one edge can never raise two wakes");
+        }
+        assert!(woke, "no wake in 256 attempts — the status wake is latched off");
+        let calls = tsfn_calls();
+        assert_eq!(calls.len(), 1, "exactly one wake for one edge");
+        assert_eq!(calls[0].1, 0, "the wake carries no data");
+        assert_eq!(js_calls(), vec![(0x7000, 0x4321, 0)],
+            "the ArkTS callback is called with ZERO arguments");
+
+        // (d) unsubscribe: hook detached, handle released in abort mode; the
+        // reply is idempotent and says so.
+        let gone = unsafe { napi_connector_status_unsubscribe(env, 0xC3 as NapiCallbackInfo) };
+        assert_eq!(created_string(gone as usize).expect("unsubscribe reply"), "{\"ok\":true}");
+        assert_eq!(live_tsfns(), 0, "the handle was released");
+        assert_eq!(tsfn_releases(), vec![(calls[0].0, 1)]);
+        let again = unsafe { napi_connector_status_unsubscribe(env, 0xC4 as NapiCallbackInfo) };
+        assert!(created_string(again as usize).expect("second unsubscribe reply")
+            .contains("\"subscribed\":false"), "idempotent, and it says so");
+        let after = tsfn_calls().len();
+        crate::status_events::edge("napi-status-after-unsubscribe");
+        assert_eq!(tsfn_calls().len(), after, "no wake after unsubscribe");
+    }
+
+    #[test]
+    fn status_revision_getter_is_the_cheap_monotonic_change_detector() {
+        use super::host_stubs::created_string;
+        let env = 0x1 as NapiEnv;
+        let read = |env: NapiEnv| -> u64 {
+            let doc = unsafe {
+                created_string(napi_connector_status_revision(env, core::ptr::null_mut()) as usize)
+            }
+            .expect("revision reply");
+            // the flat one-field document, parsed the same way the shell reads it
+            let at = doc.find("\"revision\":").expect("revision field") + 11;
+            let rest = &doc[at..];
+            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            rest[..end].parse().expect("revision is a number")
+        };
+        // No connector is installed here at all: the getter answers from the
+        // process-monotonic counter — no slot, no lock, no document.
+        let snapshot = crate::status_events::revision();
+        let before = read(env);
+        assert!(before >= snapshot, "the getter reports the live revision ({before} >= {snapshot})");
+        crate::status_events::edge("napi-revision-test");
+        let after = read(env);
+        assert!(after > before, "monotonic: an edge moved the revision forward ({before} -> {after})");
+        // ... and it is a pure read: nothing between two reads moves it back.
+        assert!(read(env) >= after);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1507,6 +1625,15 @@ unsafe extern "C" fn supply_wake_call_js(
     _context: *mut c_void,
     _data: *mut c_void,
 ) {
+    wake_call_js_no_args(env, js_callback, "socket-supply");
+}
+
+/// The shared body of both wake call_js hooks (socket supply and the 0.0.34
+/// status edge): call the shell's callback with ZERO arguments. A throw inside
+/// the shell's callback can only fail this call; it must never abort the wake
+/// machinery — the socket-supply safety-net poll / the retained 5 s status
+/// heartbeat still covers the wake — so it is reported and dropped.
+unsafe fn wake_call_js_no_args(env: NapiEnv, js_callback: NapiValue, label: &str) {
     if env.is_null() || js_callback.is_null() {
         return;
     }
@@ -1515,12 +1642,9 @@ unsafe extern "C" fn supply_wake_call_js(
         return;
     }
     let mut ignored: NapiValue = core::ptr::null_mut();
-    // A throw inside the shell's callback can only fail this call; it must never
-    // abort the wake machinery — the shell's slow safety-net poll still services
-    // the queue, so it is reported and dropped.
     let rc = napi_call_function(env, undefined, js_callback, 0, core::ptr::null_mut(), &mut ignored);
     if rc != 0 {
-        crate::hilog::emit(&format!("socket-supply: wake callback rc={rc}"));
+        crate::hilog::emit(&format!("{label}: wake callback rc={rc}"));
     }
 }
 
@@ -1632,6 +1756,151 @@ unsafe extern "C" fn napi_socket_supply_shutdown(env: NapiEnv, _info: NapiCallba
 unsafe extern "C" fn napi_socket_supply_dns_servers(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::socket_supply::set_dns_servers_json(&a.string_at(0)))
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.34 (peer-status lag REPORT §5 F1): the status-edge wake
+//
+// The crate's SECOND threadsafe function, in the SAME shape as the socket-supply
+// wake above (created from the ArkTS callback, invoked with ZERO arguments from
+// whichever core thread saw the edge, released in abort mode at teardown) —
+// because that shape is the one already measured in-tree for this runtime.
+//
+// What differs is the COALESCING: the socket-supply wake is one wake per
+// request (the shell drains a queue), while a status edge is a "the rendered
+// state changed, republish" notification and upstream raises exactly ONE
+// pending wake per burst (`peer/notifier.go:205-213`, a capacity-1 channel
+// send with `default:`). The capacity-1 token therefore lives in
+// `crate::status_events` — `status_wake` below is only the transport, called
+// at most once per pending token — and the token is consumed HERE, at the
+// delivery point (the runtime accepted the call and is about to run the
+// callback), which is exactly where upstream's deliverer goroutine receives
+// from its channel before it calls `OnPeersListChanged` (`:215-233`).
+//
+// Ownership/teardown: identical to the supply wake. Only the handle is stored
+// (the threadsafe function keeps the ArkTS callback alive); `STATUS_WAKE` is
+// held across `napi_call_threadsafe_function` / `napi_release_threadsafe_function`;
+// unsubscribe detaches the hook BEFORE taking the handle, so no wake can enter
+// a released handle.
+// ---------------------------------------------------------------------------
+
+struct StatusWake(*mut c_void);
+unsafe impl Send for StatusWake {}
+static STATUS_WAKE: Mutex<Option<StatusWake>> = Mutex::new(None);
+
+unsafe extern "C" fn status_wake_call_js(
+    env: NapiEnv,
+    js_callback: NapiValue,
+    _context: *mut c_void,
+    _data: *mut c_void,
+) {
+    // The pending token is consumed at the DELIVERY point, BEFORE the shell's
+    // callback runs: edges raised during that callback then raise a fresh wake
+    // (delivered after it returns), and edges raised before it are already part
+    // of the state the callback is about to read — nothing is lost.
+    crate::status_events::wake_consumed();
+    wake_call_js_no_args(env, js_callback, "status-edge");
+}
+
+/// The wake installed into `crate::status_events`: called from whichever core
+/// thread saw the edge, never from the ArkTS thread. NON-BLOCKING — a busy
+/// ArkTS thread must never stall a data-plane thread that just observed a real
+/// transition. `true` = handed to the runtime; `false` = refused (no handle,
+/// or a closing runtime), and `status_events::edge` then releases the
+/// coalescing token so the next edge tries again.
+fn status_wake() -> bool {
+    let guard = STATUS_WAKE.lock().expect("status wake");
+    let Some(wake) = guard.as_ref() else { return false };
+    let rc = unsafe {
+        napi_call_threadsafe_function(wake.0, core::ptr::null_mut(), NAPI_TSFN_NONBLOCKING)
+    };
+    if rc != 0 {
+        crate::hilog::emit(&format!("status-edge: wake rejected rc={rc}"));
+        return false;
+    }
+    true
+}
+
+fn release_status_wake(wake: StatusWake) {
+    let rc = unsafe { napi_release_threadsafe_function(wake.0, NAPI_TSFN_ABORT) };
+    if rc != 0 {
+        crate::hilog::emit(&format!("status-edge: wake release rc={rc}"));
+    }
+}
+
+/// `connector_status_subscribe(callback) => '{"ok":true}'` — install the
+/// ArkTS edge wake (the shell calls this once per live watcher). An existing
+/// subscription is replaced and released, so a restarted shell can subscribe
+/// again without leaking the previous callback. Failures are answered, never
+/// thrown: this is a LATENCY optimization — the retained 5 s heartbeat
+/// publication keeps the document fresh without it.
+unsafe extern "C" fn napi_connector_status_subscribe(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    if a.argc == 0 || a.argv[0].is_null() {
+        return ret_json(env, "{\"ok\":false,\"error\":\"callback-required\"}".into());
+    }
+    let label = b"status-edge-wake\0";
+    let mut name: NapiValue = core::ptr::null_mut();
+    if napi_create_string_utf8(env, label.as_ptr(), label.len() - 1, &mut name) != 0 {
+        return ret_json(env, "{\"ok\":false,\"error\":\"resource-name-failed\"}".into());
+    }
+    let mut handle: *mut c_void = core::ptr::null_mut();
+    let rc = napi_create_threadsafe_function(
+        env,
+        a.argv[0],
+        core::ptr::null_mut(),
+        name,
+        // unbounded queue: the capacity-1 COALESCING is core-side (the pending
+        // token in `status_events`), so at most one wake is ever in flight and
+        // bounding this queue could only add a drop path of its own.
+        0,
+        // initial_thread_count = 1: the ArkTS thread that created it (same as
+        // the supply wake); the many core threads are callers, not owners.
+        1,
+        core::ptr::null_mut(),
+        None,
+        core::ptr::null_mut(),
+        Some(status_wake_call_js),
+        &mut handle,
+    );
+    if rc != 0 || handle.is_null() {
+        return ret_json(env, "{\"ok\":false,\"error\":\"threadsafe-function-failed\"}".into());
+    }
+    let previous = STATUS_WAKE.lock().expect("status wake").replace(StatusWake(handle));
+    if let Some(previous) = previous {
+        release_status_wake(previous);
+    }
+    crate::status_events::set_wake(Some(Arc::new(status_wake)));
+    ret_json(env, "{\"ok\":true}".into())
+}
+
+/// `connector_status_unsubscribe() => '{"ok":true[,"subscribed":false]}'` —
+/// shell teardown: stop waking, then release the callback. The hook is
+/// detached BEFORE the handle is taken (and holding the same mutex), so no
+/// wake can enter a released handle.
+unsafe extern "C" fn napi_connector_status_unsubscribe(
+    env: NapiEnv,
+    _info: NapiCallbackInfo,
+) -> NapiValue {
+    crate::status_events::set_wake(None);
+    let taken = STATUS_WAKE.lock().expect("status wake").take();
+    match taken {
+        Some(wake) => {
+            release_status_wake(wake);
+            ret_json(env, "{\"ok\":true}".into())
+        }
+        None => ret_json(env, "{\"ok\":true,\"subscribed\":false}".into()),
+    }
+}
+
+/// `connector_status_revision() => '{"revision":N}'` — the CHEAP change
+/// detector (see `crate::connector::connector_status_revision_json`): one
+/// atomic load, no document, no lock, no connector slot.
+unsafe extern "C" fn napi_connector_status_revision(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_status_revision_json())
 }
 
 // N7: shell-side feed of the PROTECTED WG outer UDP socket (wg_fwd_open +

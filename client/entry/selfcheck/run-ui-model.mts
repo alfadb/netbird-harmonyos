@@ -716,6 +716,60 @@ try {
     !('ice' in JSON.parse(JSON.stringify(
       m.buildUiStatusDocument(status, iceNet, 'ui-24', 1))).peers[0]));
 
+  // ---- 0.0.34 stale ICE sample ⇒ 未知 (peer-status lag REPORT §5 F4) -------
+  // The core already marks a served-from-cache sample (`ice_snapshot_stale` +
+  // `ice_snapshot_age_ms`); before 0.0.34 the UI rendered those stale numbers as
+  // the CURRENT selection. Beyond one publication period they are 未知.
+  check('ice staleness: a fresh sample (or no marks at all) is NOT unknown',
+    !m.iceSnapshotIsUnknown(false, 0) && !m.iceSnapshotIsUnknown(false, 999999) &&
+    !m.iceSnapshotIsUnknown(undefined, undefined) && !m.iceSnapshotIsUnknown(undefined, 12000));
+  check('ice staleness: only a STALE mark can be unknown',
+    m.iceSnapshotIsUnknown(true, 5000) && m.iceSnapshotIsUnknown(true, 12000));
+  check('ice staleness: a stale sample under the one-period box is still shown',
+    !m.iceSnapshotIsUnknown(true, 0) && !m.iceSnapshotIsUnknown(true, 4999));
+  check('ice staleness: a stale sample with no measurable age is UNKNOWN',
+    m.iceSnapshotIsUnknown(true, null) && m.iceSnapshotIsUnknown(true, undefined) &&
+    m.iceSnapshotIsUnknown(true, NaN));
+  check('ice staleness: the box is one publication period',
+    m.ICE_SNAPSHOT_UNKNOWN_AGE_MS === 5000 &&
+    !m.iceSnapshotIsUnknown(true, m.ICE_SNAPSHOT_UNKNOWN_AGE_MS - 1) &&
+    m.iceSnapshotIsUnknown(true, m.ICE_SNAPSHOT_UNKNOWN_AGE_MS));
+  const staleIce = m.mergePeers(iceNet, iceWg, null, icePeers, true);
+  check('ice staleness: a stale sample leaves EVERY peer ICE 未知 (key omitted)',
+    staleIce[0].ice === undefined && staleIce[1].ice === undefined &&
+    staleIce[2].ice === undefined &&
+    !('ice' in JSON.parse(JSON.stringify(staleIce))[0]) &&
+    !('ice' in JSON.parse(JSON.stringify(staleIce))[1]));
+  check('ice staleness: it never touches the connection/online facts (F5 is separate)',
+    staleIce[0].connection === iced[0].connection &&
+    staleIce[1].connection === iced[1].connection &&
+    staleIce[2].online === iced[2].online &&
+    staleIce[0].endpoint === iced[0].endpoint);
+  const staleDoc = m.buildUiStatusDocument(
+    { ...status, ice_peers: icePeers, ice_snapshot_stale: true, ice_snapshot_age_ms: 9000 },
+    iceNet, 'ui-25', 1);
+  const freshDoc = m.buildUiStatusDocument(
+    { ...status, ice_peers: icePeers, ice_snapshot_stale: true, ice_snapshot_age_ms: 10 },
+    iceNet, 'ui-26', 1);
+  check('ice staleness: the status marks decide it end to end (doc level)',
+    staleDoc.peers[0].ice === undefined && freshDoc.peers[0].ice.state === 'connected' &&
+    !('ice' in JSON.parse(JSON.stringify(staleDoc)).peers[0]));
+
+  // ---- 0.0.34 the core's edge revision rides the published document --------
+  const revDoc = m.buildUiStatusDocument({ ...status, status_revision: 41 },
+    iceNet, 'ui-27', 1);
+  const noRevDoc = m.buildUiStatusDocument(status, iceNet, 'ui-28', 1);
+  check('revision: the core status_revision is published verbatim as the tail field',
+    revDoc.status_revision === 41 &&
+    JSON.stringify(revDoc).indexOf('"status_revision":41') >= 0 &&
+    JSON.stringify(revDoc).endsWith('}'));
+  check('revision: absent / malformed core revisions are OMITTED, never a fake 0',
+    noRevDoc.status_revision === undefined &&
+    !('status_revision' in JSON.parse(JSON.stringify(noRevDoc))) &&
+    m.buildUiStatusDocument({ ...status, status_revision: -1 },
+      iceNet, 'ui-29', 1).status_revision === undefined);
+
+
   // ---- 2026-10-07 core uptime stamps (verified shape: Unix SECONDS | null) --
   const uptimeDoc = m.buildUiStatusDocument({ ...byteStatus, started_at_unix: 1799999000,
     last_update_unix: 1800000000 }, byteNet, 'ui-17', 1);

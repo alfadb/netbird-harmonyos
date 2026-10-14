@@ -285,6 +285,10 @@ const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // 0.0.34 peer-status lag fix (REPORT §5 F1/F4): the publish-debounce policy
+  // the REAL extension now imports by value — zero imports, no erased type
+  // crossing the value import, staged byte-identically, no shim.
+  'NetBirdStatusPolicy',
   // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdUiModel',
