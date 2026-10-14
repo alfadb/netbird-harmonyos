@@ -572,8 +572,8 @@ export const PEER_ROW_NAME_CHAR_VP: number = 7;
 /** The floor line 1's name column must clear: a real 28-character fqdn at 14 vp. */
 export const PEER_ROW_NAME_MIN_WIDTH_VP: number =
   PEER_ROW_FQDN_CHARS * PEER_ROW_NAME_CHAR_VP;
-/** The search field's own cap (vp): a full-width box in a narrow list is noise. */
-export const PEER_SEARCH_MAX_WIDTH_VP: number = 320;
+// 0.0.41 (I6) §3: PEER_SEARCH_MAX_WIDTH_VP (320) is RETIRED. The search field is
+// the list card's own width now (peerListCardWidthVp below) — see that function.
 
 /** The peer list column's cap (vp) for a window width — one per rail tier. */
 export function peerListNavBarCapVp(windowVp: number): number {
@@ -636,14 +636,31 @@ export function peerRowCondensed(windowVp: number): boolean {
 }
 
 /**
- * The width (vp) one peer row's TEXT has: the list column minus the page padding,
- * the list card padding and — 0.0.40 (I5) §3 — the selected row's own left marker,
- * which every row reserves (transparent when unselected, so selecting a peer does
- * not shift the text by 3 vp). Line 2 (the NetBird IP) owns this full width, so
+ * The peer LIST CARD's width (vp): the list column minus the page padding — the
+ * width the card's own `.width('100%')` resolves to inside the padded column.
+ *
+ * 0.0.41 (I6) §3 made this the ONE number behind two things that used to disagree:
+ * the row-text budget below was always measured from it, while the search field
+ * was additionally capped at a PEER_SEARCH_MAX_WIDTH_VP of 320 — in the owner's
+ * 0.0.40 frame the field therefore ended ~34 vp short of the card on EACH side
+ * ("搜索框比下面的对端列表窄"). The cap is gone and both callers read this
+ * function, so the field and the list have the same left and right edge by
+ * construction rather than by arithmetic that happens to agree.
+ */
+export function peerListCardWidthVp(navBarWidthVp: number): number {
+  const full: number = navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP;
+  return full > 0 ? full : 0;
+}
+
+/**
+ * The width (vp) one peer row's TEXT has: the list card's width minus the card's
+ * own padding and — 0.0.40 (I5) §3 — the selected row's own left marker, which
+ * every row reserves (transparent when unselected, so selecting a peer does not
+ * shift the text by 3 vp). Line 2 (the NetBird IP) owns this full width, so
  * `>= PEER_ROW_IP_MIN_WIDTH_VP` is exactly "the IP never wraps".
  */
 export function peerRowTextWidthVp(navBarWidthVp: number): number {
-  return navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP - 2 * PEER_ROW_LIST_PADDING_VP -
+  return peerListCardWidthVp(navBarWidthVp) - 2 * PEER_ROW_LIST_PADDING_VP -
     PEER_ROW_SELECT_BAR_VP;
 }
 
@@ -665,20 +682,6 @@ export function peerRowNameWidthVp(navBarWidthVp: number, windowVp: number): num
 /** The name column's width (vp) for a window width — the composed form. */
 export function peerRowNameWidthFor(windowVp: number): number {
   return peerRowNameWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
-}
-
-/**
- * The search field's width (vp): the list column minus the page padding, capped
- * at `PEER_SEARCH_MAX_WIDTH_VP`. The page renders nothing at all when there is
- * no peer to search (see Index.peerListBody) — a search box over an empty list is
- * the one thing it can never be useful for.
- */
-export function peerSearchWidthVp(navBarWidthVp: number): number {
-  const full: number = navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP;
-  if (!(full > 0)) {
-    return 0;
-  }
-  return full < PEER_SEARCH_MAX_WIDTH_VP ? full : PEER_SEARCH_MAX_WIDTH_VP;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +824,50 @@ export function railConnectionMaxHeightVp(railHeightVp: number): number {
  * 整行至少 48 vp", i.e. the same pointer floor the destination rows carry.
  */
 export const RAIL_ENTRY_MIN_HEIGHT_VP: number = 48;
+
+// ---------------------------------------------------------------------------
+// 0.0.41 (I6) §1 — THE RAIL'S VERTICAL RHYTHM: top-anchored, no centring spacer
+// ---------------------------------------------------------------------------
+// The product owner's 0.0.40 frame measured the rail as ~360 px from the window's
+// top edge to the NetBird wordmark and ~340 px between the status card and the
+// 对端 row, with only ~60 px under 设置 — i.e. more than half the column was
+// empty and the rail's controls were spread over the full height.
+//
+// The cause was I4's centring: the identity block sat between two EQUAL
+// layoutWeight(1) spacers with the destination block pinned to the bottom, so all
+// of the rail's slack collected ABOVE the wordmark (and half of the remainder
+// under the card). The block is TOP-ANCHORED now — no spacer exists at all — and
+// the destination block follows the connection block directly, one seam and one
+// block padding below it. The slack that is left over in a tall window belongs
+// BELOW the nav, which is where a sidebar's free space reads as free space
+// instead of as a hole between two groups.
+//
+// The alternative the brief also allows (nav pinned to the bottom with ~24 vp
+// under it) is deliberately NOT taken: it is the I2 shape whose middle void the
+// I4 review named ("到下方导航分隔线之间仍有明显空白"), and it would put the two
+// destinations ~200 vp away from the 连接 command they belong to.
+//
+// A SHORT window is unchanged and still safe: the connection region keeps its
+// absolute ceiling (railConnectionMaxHeightVp = rail height − the bottom region),
+// so the region's own Scroll gives way and the destination block is never pushed
+// out or clipped. Top-anchoring does not touch that arithmetic — it only removes
+// the spacers that were spending the slack.
+/** The wordmark's own top margin inside the rail's page padding (vp, 8 vp grid). */
+export const RAIL_WORDMARK_MARGIN_VP: number = 8;
+/**
+ * The rail's TOP GAP (vp): from the rail's top edge to the wordmark's top edge —
+ * the page padding plus the wordmark's own margin, 16 + 8 = 24. This is the
+ * "consistent page padding (~24 vp)" the owner asked for, expressed as the sum
+ * the page actually lays out rather than as a number in a comment.
+ */
+export const RAIL_TOP_GAP_VP: number = RAIL_PAGE_PADDING_VP + RAIL_WORDMARK_MARGIN_VP;
+/**
+ * The gap (vp) between the connection card's bottom edge and the first
+ * destination row's top edge in the top-anchored rail: the 1 vp region seam plus
+ * the destination block's own top padding. 1 + 8 = 9.
+ */
+export const RAIL_DESTINATION_GAP_VP: number =
+  RAIL_SEAM_WIDTH_VP + RAIL_DESTINATIONS_PAD_TOP_VP;
 
 // ---------------------------------------------------------------------------
 // 0.0.39 (I4) — the 连接概览 pane (the review's §1.4 content spec)

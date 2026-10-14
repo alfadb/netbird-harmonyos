@@ -177,11 +177,12 @@ import {
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
   peerDetailSectionOf, peerFqdnDuplicatesTitle, PEER_ROW_LIST_PADDING_VP,
   PEER_ROW_MIN_HEIGHT_VP, PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
-  peerListNavBarWidthFor, peerRowCondensed, peerSearchWidthVp, RAIL_CARD_PADDING_VP,
+  peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, RAIL_CARD_PADDING_VP,
   RAIL_DESTINATIONS_PAD_BOTTOM_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
   RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
+  RAIL_WORDMARK_MARGIN_VP,
   railConnectionMaxHeightVp, railTrafficVisible,
   railWidthFor, SECTION_CHEVRON_SLOT_VP, SECTION_HEADER_GAP_VP,
   settingsContentMaxWidthVp, splitPaneWidthVp,
@@ -1137,6 +1138,21 @@ struct Index {
   // "no destination" means). @State because it paints: hoverEffect gives the
   // framework's own highlight, and this drives the row's surface tint as well.
   @State hoveredDestination: number = 0;
+  // 0.0.41 (I6) §2 — the HOVERED peer row, by public key ('' = none). The owner's
+  // 0.0.40 frame showed a list row that "looked selected" while the pane said 连接
+  // 概览, i.e. with NO peer selected; the finding behind it is that hover had no
+  // treatment of its own — the row carried only the framework's generic
+  // hoverEffect tint, which is not distinguishable in intent from a selection.
+  // Hover gets its own, deliberately lighter role tint now (nb_row_hover_background)
+  // and this @State is what paints it; the SELECTION's 3 vp marker and
+  // nb_row_selected_background stay bound to peerRowSelected() alone.
+  //
+  // The key, not the object: the 1 s reader replaces peers[] wholesale, so a stored
+  // UiPeerEntry would point at the previous document. This state is NOT part of
+  // peerRowKey (a hover is not a rendered FIELD of the row — the background is an
+  // attribute expression that reads this @State directly, exactly like the status
+  // dots that read stateColor()).
+  @State hoveredPeerKey: string = '';
   // The wide pane's route stacks: ONE per destination (k3 correction 4 / §E R6),
   // so the mode/hideNavBar of a live Navigation is never flipped and the back
   // authority can consult only the VISIBLE destination's stack. 设置 is empty in
@@ -2577,6 +2593,17 @@ struct Index {
   private peerRowSelected(peer: UiPeerEntry): boolean {
     const selected: UiPeerEntry | null = this.selectedPeer;
     return selected !== null && selected.pub_key === peer.pub_key;
+  }
+
+  /**
+   * 0.0.41 (I6) §2: is the pointer over THIS row? Identity is again the public key,
+   * and the answer feeds the row's hover tint ONLY — never the 3 vp marker and
+   * never nb_row_selected_background, which peerRowSelected() owns exclusively. A
+   * selected row is never re-tinted by hover: the row's background asks the
+   * selection first (see peerRow's .backgroundColor).
+   */
+  private peerRowHovered(peer: UiPeerEntry): boolean {
+    return this.hoveredPeerKey.length > 0 && this.hoveredPeerKey === peer.pub_key;
   }
 
   // 主题 (2026-10-09): the three-state peer status mapped to the SHARED
@@ -4339,7 +4366,11 @@ struct Index {
           .width('100%')
           .textAlign(TextAlign.Start)
           .padding({ left: RAIL_CARD_PADDING_VP })
-          .margin({ top: 8 })
+          // 0.0.41 (I6) §1: the 8 is now the module's RAIL_WORDMARK_MARGIN_VP, so
+          // the rail's top gap is the sum the selfcheck asserts (RAIL_TOP_GAP_VP =
+          // page padding 16 + this 8 = 24 vp) and not a literal that can drift from
+          // the number the acceptance measurement names.
+          .margin({ top: RAIL_WORDMARK_MARGIN_VP })
         if (!this.configured) {
           Column({ space: 8 }) {
             Text('尚未配置服务器')
@@ -4763,17 +4794,41 @@ struct Index {
     // replaces the whole peers[] on every applied document and ArkUI reuses a row
     // whose key did not change, so a selection that is not in the key would keep
     // its node and never repaint.
+    //
+    // 0.0.41 (I6) §2 — HOVER IS NOW ITS OWN, WEAKER TREATMENT, WITH NO MARKER. The
+    // owner read the 0.0.40 frame as "the first row looks selected while the pane
+    // shows 连接概览"; the frame's row backgrounds are within JPEG noise of the card
+    // fill and the row's only edges are the card's own stroke, so nothing was
+    // actually painted — but the ambiguity is real as long as hover has no defined
+    // treatment. So:
+    //   * the 3 vp bar and nb_row_selected_background (the STRONGER tint) are
+    //     produced by peerRowSelected(peer) and by nothing else;
+    //   * hover is a neutral lift (nb_row_hover_background) with no bar at all, and
+    //     it is the LOWER priority of the two — a selected row that the pointer
+    //     happens to be over keeps the selection's surface.
+    // The framework's own hoverEffect tint is dropped here on purpose: it is an
+    // unspecified overlay and would stack on top of the role tint, so "the hover
+    // colour" would be two colours in one attribute.
     .border({
       width: { left: PEER_ROW_SELECT_BAR_VP },
       color: this.peerRowSelected(peer) ? $r('app.color.nb_primary') : Color.Transparent
     })
     .backgroundColor(this.peerRowSelected(peer)
-      ? $r('app.color.nb_row_selected_background') : Color.Transparent)
-    // 0.0.37 (I2): pointer affordances on the PC. hoverEffect.Highlight is the
-    // framework's own hover tint (no per-row @State, so the ForEach key/reuse
-    // contract of 0.0.35 is untouched); focusable makes the row reachable in the
-    // keyboard tab order. No custom cursor: `mouseStyle` is not in the public API.
-    .hoverEffect(HoverEffect.Highlight)
+      ? $r('app.color.nb_row_selected_background')
+      : this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background') : Color.Transparent)
+    // 0.0.37 (I2): pointer affordances on the PC; focusable makes the row reachable
+    // in the keyboard tab order. No custom cursor: `mouseStyle` is not in the public
+    // API.
+    .onHover((isHover: boolean): void => {
+      // Only clears when THIS row is the one currently tinted: a leave event that
+      // arrives after the next row's enter event must not clear that row (the same
+      // rule the rail's destination rows follow).
+      if (isHover) {
+        this.hoveredPeerKey = peer.pub_key;
+      } else if (this.hoveredPeerKey === peer.pub_key) {
+        this.hoveredPeerKey = '';
+      }
+    })
     .focusable(true)
     .onClick(() => {
       this.selectedPeer = peer;
@@ -5033,9 +5088,10 @@ struct Index {
         // 0.0.38 (I3) F: the search field exists only when there is something to
         // search. Over an empty list it took a whole row of the narrow column to
         // offer a filter for nothing; the empty blocks below already carry the ONE
-        // action each state has. Its width is the list column minus the page
-        // padding, capped (peerSearchWidthVp), and on the narrow branch it stays
-        // today's full width.
+        // action each state has. 0.0.41 (I6) §3: its width is the peer list CARD's
+        // own width (peerSearchWidth → peerListCardWidthVp) — the field's left and
+        // right edges are the list's, and the narrow branch keeps today's
+        // full width ('100%').
         if (this.peersList().length > 0) {
           TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
             .fontSize(TYPE_BODY_VP)
@@ -6518,14 +6574,20 @@ struct Index {
 
   /**
    * 0.0.38 (I3) F: the search field's width. Narrow branch: today's full width.
-   * Wide branch: the list column minus the page padding, capped — never a
-   * full-row box in a column that is deliberately narrow.
+   * Wide branch: the peer list CARD's own width — the same number the row-text
+   * budget is measured from, so the field and the list below it share their left
+   * and right edge by construction.
+   *
+   * 0.0.41 (I6) §3: the wide branch used to be capped at 320 vp
+   * (PEER_SEARCH_MAX_WIDTH_VP), which the owner's 0.0.40 frame measured as the
+   * field ending ~34 vp short of the list on EACH side. That cap is retired; the
+   * field is the card's width, with the same radius (12) and height (42) it had.
    */
   private peerSearchWidth(): Length {
     if (!this.wideLayout()) {
       return '100%';
     }
-    return peerSearchWidthVp(this.peerListNavBarWidth());
+    return peerListCardWidthVp(this.peerListNavBarWidth());
   }
 
   /**
@@ -6796,39 +6858,43 @@ struct Index {
   connectionRail() {
     Column() {
       // TODAY'S 主页 body, re-parented unchanged. 0.0.38 (I3) E made it CONTENT
-      // height here (homeBodyHeight() → 'auto'), not a weighted filler, so the
-      // navigation group follows the card immediately instead of sitting at the
-      // bottom of a stretched column.
+      // height here (homeBodyHeight() → 'auto'), not a weighted filler.
       //
-      // 0.0.39 (I4) P1.8 (the review's §1.2 option a, verbatim): the identity block
-      // is CENTRED vertically in the space above the navigation block and the
-      // navigation block stays at the bottom of the rail, wrapped between two EQUAL
-      // layoutWeight(1) spacers. I3's nav-up fix removed the I2 gap but moved the
-      // whole void below the nav; the spacers put the rail's slack around the block
-      // it belongs to, which is what "the dead middle third disappears" means here.
+      // 0.0.41 (I6) §1 — TOP-ANCHORED. I4 (0.0.39) P1.8 wrapped this block between
+      // two EQUAL layoutWeight(1) spacers and pinned the destination block to the
+      // bottom, which centred the identity block in the slack ABOVE the nav. The
+      // product owner measured that shape on 0.0.40: ~360 px from the window's top
+      // to the wordmark and ~340 px between the status card and the 对端 row, i.e.
+      // more than half the rail's height spent on empty space. Both spacers are
+      // GONE: the column starts with the page padding (the wordmark's top edge is
+      // RAIL_TOP_GAP_VP = 24 vp below the rail's top) and the destination block
+      // follows the connection block immediately, one seam + its own top padding
+      // under it (RAIL_DESTINATION_GAP_VP = 9 vp). What slack remains belongs below
+      // the nav; nothing floats in the middle any more.
+      //
+      // The alternative in the brief (nav pinned to the bottom, ~24 vp under it)
+      // is NOT taken: that is the I2 shape whose middle void the I4 review named,
+      // and it would put the two destinations ~200 vp away from the connect
+      // command they belong to. See RAIL_TOP_GAP_VP's comment in the module.
+      //
+      // A SHORT window does not regress: the ceiling below is measured against the
+      // RAIL's height (railConnectionMaxHeight → railConnectionMaxHeightVp), not
+      // against a leftover, so the connection region's own Scroll gives way and
+      // the destination block keeps its 121 vp. Removing the spacers does not touch
+      // that arithmetic — they were only spending the slack.
       //
       // The identity block stays a DIRECT child of the rail: it was a percentage cap
       // in I4, and a percentage resolves against the PARENT's height — nested one
       // level deeper it resolved against the leftover space instead and the block's
       // own Scroll clipped the 详细状态 entry (19:45 device capture). It is now an
-      // absolute ceiling measured against the rail (railConnectionMaxHeight →
-      // railConnectionMaxHeightVp), which is the same reason it must stay here: the
-      // ceiling is expressed in the RAIL's height. What the ceiling guarantees is
-      // that the bottom region keeps its space — a short window scrolls the
-      // connection block (it keeps its own Scroll) instead of pushing that region
-      // out of the bottom.
-      Column()
-        .width('100%')
-        .layoutWeight(1)
+      // absolute ceiling measured against the rail, which is the same reason it must
+      // stay here: the ceiling is expressed in the RAIL's height.
       Column() {
         this.homeTab()
       }
       .width('100%')
       .height('auto')
       .constraintSize({ maxHeight: this.railConnectionMaxHeight() })
-      Column()
-        .width('100%')
-        .layoutWeight(1)
       // Region boundary (0.0.37): the connection block above is the app's live
       // state and scrolls on its own; the navigation block below never moves. The
       // 1 vp role stroke is what makes the two regions read as two groups instead
@@ -6860,11 +6926,14 @@ struct Index {
 
   @Builder
   railDestinations() {
-    // The rail's NAVIGATION BLOCK. Placed directly under the connection block (the
-    // bottom of the rail), which is the deliberate relationship: the connection
-    // surface owns the top of the column — it is the app's identity and the one
-    // thing that must never scroll away — while the first-level destinations keep
-    // a stable, thumb-reachable position under the 1 vp boundary above.
+    // The rail's NAVIGATION BLOCK. Placed directly under the connection block,
+    // which is the deliberate relationship: the connection surface owns the top of
+    // the column — it is the app's identity and the one thing that must never
+    // scroll away — while the first-level destinations keep a stable position under
+    // the 1 vp boundary above. 0.0.41 (I6) §1 restored that immediacy: the two
+    // centring spacers I4 had wrapped around the identity block are gone, so the
+    // block is 9 vp (RAIL_DESTINATION_GAP_VP) under the connection card instead of
+    // the owner-measured ~340 px.
     //
     // 0.0.40 (I5) §6 (review §6, agreed with the product owner before this run):
     // the 导航 CAPTION IS GONE. It named a group of exactly two rows and cost a

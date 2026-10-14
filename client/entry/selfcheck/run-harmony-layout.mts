@@ -267,8 +267,11 @@ try {
     PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
     !PAGE.includes("Text('导航')") && PAGE.includes('PANE_DEST_PEERS') &&
     PAGE.includes('PANE_DEST_SETTINGS'));
+  // 0.0.41 (I6) DELIBERATE UPDATE: the count is 3 — the two rail destination rows
+  // plus, new in I6 §2, the peer row's own hover tint (the row used to carry only
+  // the framework's hoverEffect, which is the ambiguity the owner's frame exposed).
   check('rail: pointer + keyboard affordances on the PC (hover, focus, tab order, Enter)',
-    (PAGE.match(/\.onHover\(/g) ?? []).length === 2 &&
+    (PAGE.match(/\.onHover\(/g) ?? []).length === 3 &&
     (PAGE.match(/\.tabIndex\(/g) ?? []).length === 2 &&
     PAGE.includes('.hoverEffect(HoverEffect.Highlight)') &&
     PAGE.includes('private isActivationKey(event: KeyEvent): boolean') &&
@@ -549,10 +552,29 @@ try {
       }
       return true;
     })());
-  check('peer search: capped, never wider than the column, degenerate width is 0',
-    m.PEER_SEARCH_MAX_WIDTH_VP === 320 && m.peerSearchWidthVp(480) === 320 &&
-    m.peerSearchWidthVp(280) === 248 && m.peerSearchWidthVp(0) === 0 &&
-    m.peerSearchWidthVp(Number.NaN) === 0);
+  // 0.0.41 (I6) §3 — the search field is the LIST's width, not a capped box. The
+  // retired cap (PEER_SEARCH_MAX_WIDTH_VP = 320) is what the owner's 0.0.40 frame
+  // measured as ~34 vp of missing width on EACH side of the field. The property now
+  // is identity: the field's width IS the list card's width, at every window of the
+  // shell, and that same card width is what the row-text budget is measured from —
+  // so "the field and the list share their left/right edge" is the arithmetic of
+  // one function, not of two numbers that happen to agree.
+  check('I6 §3: the search field IS the list card\'s width, at every window of the shell',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
+        const nb: number = m.peerListNavBarWidthFor(w);
+        if (m.peerListCardWidthVp(nb) !== nb - 2 * m.RAIL_PAGE_PADDING_VP) { return false; }
+        if (m.peerListCardWidthVp(nb) !==
+          m.peerRowTextWidthVp(nb) + 2 * m.PEER_ROW_LIST_PADDING_VP +
+            m.PEER_ROW_SELECT_BAR_VP) { return false; }
+      }
+      return true;
+    })());
+  check('I6 §3: the retired search cap is gone and the degenerate width is 0',
+    m.PEER_SEARCH_MAX_WIDTH_VP === undefined &&
+    m.peerListCardWidthVp(480) === 448 && m.peerListCardWidthVp(280) === 248 &&
+    m.peerListCardWidthVp(0) === 0 && m.peerListCardWidthVp(-8) === 0 &&
+    m.peerListCardWidthVp(Number.NaN) === 0);
 
   // -------------------------------------------------------------------------
   // 15. 0.0.39 (I4) P0.4 — THE 连接概览 PANE's ROW POLICY (which rows EXIST)
@@ -867,7 +889,15 @@ try {
       return card.indexOf('if (this.diagnosticsNoteOpen) {') > 0 &&
         card.indexOf('if (this.diagnosticsNoteOpen) {') < card.indexOf('滚动保留：');
     })());
-  check('E: the rail centres the identity block between two spacers, nav at the bottom',
+  // 0.0.41 (I6) §1 DELIBERATE UPDATE: the CENTRING is retired. I4's two equal
+  // layoutWeight(1) spacers pinned the nav block to the bottom and centred the
+  // identity block in the slack between them — the shape the product owner measured
+  // on 0.0.40 as ~360 px from the window's top to the wordmark and ~340 px from the
+  // status card to the 对端 row. What this check must keep is everything that was
+  // never about centring: the identity block is a DIRECT child of the rail (so its
+  // ceiling is expressed in the RAIL's height, not in a leftover), it keeps that
+  // absolute ceiling, and the nav block follows it.
+  check('E (I6): the identity block is a direct child of the rail, nav right below it',
     PAGE.includes('private homeBodyHeight(): Length {') &&
     PAGE.includes("return this.wideLayout() ? 'auto' : '100%';") &&
     PAGE.includes('.height(this.homeBodyHeight())') &&
@@ -875,18 +905,12 @@ try {
     (() => {
       const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
         PAGE.indexOf('railDestinations() {'));
-      // 0.0.39 (I4): the review's §1.2 option (a) — TWO equal layoutWeight(1)
-      // spacers around the identity block, which keeps the block a DIRECT child of
-      // the rail so RAIL_CONNECTION_MAX_HEIGHT_PCT resolves against the RAIL. Nested
-      // inside a weighted wrapper it resolved against the leftover space and the
-      // block's Scroll clipped the 详细状态 entry (19:45 device capture).
-      const spacers = rail.match(/Column\(\)\s*\n?\s*\.width\('100%'\)\s*\n?\s*\.layoutWeight\(1\)/g) ?? [];
+      // no spacer left: the attribute cannot be on any line of the rail any more
+      const spacers = rail.match(/^\s*\.layoutWeight\(1\)/gm) ?? [];
       const nested = /Column\(\)\s*\{\s*Column\(\)/;
       return rail.includes('.height(\'auto\')') &&
         rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
-        spacers.length === 2 && !nested.test(rail) &&
-        rail.indexOf('.layoutWeight(1)') < rail.indexOf('this.homeTab()') &&
-        rail.lastIndexOf('.layoutWeight(1)') > rail.indexOf('this.homeTab()') &&
+        spacers.length === 0 && !nested.test(rail) &&
         rail.indexOf('this.homeTab()') < rail.indexOf('this.railDestinations()');
     })());
   check('E: the 详细状态 row is a proper entry (short subtitle + chevron, no 路… artefact)',
@@ -1045,13 +1069,21 @@ try {
       status: 'connected' }) ===
     ui.peerRowKey({ pub_key: 'K', name: 'n', ip: 'i', online: true, connection: 'direct',
       status: 'connected' }, false));
+  // 0.0.41 (I6) §2 DELIBERATE UPDATE: the row's background now has THREE branches
+  // (selected tint / hover tint / transparent) instead of two, because hover got a
+  // role of its own. The property this check exists to protect is unchanged — the
+  // tint is produced by the OBSERVED SELECTION, first — and it now also pins the
+  // ORDER (the selection is asked before the hover) that makes a selected row keep
+  // its selection surface while the pointer is over it.
   check('I5 §3: the row paints the marker + the tint from the observed selection',
     PAGE.includes('private peerRowSelected(peer: UiPeerEntry): boolean {') &&
     PAGE.includes('return selected !== null && selected.pub_key === peer.pub_key;') &&
     PAGE.includes('width: { left: PEER_ROW_SELECT_BAR_VP },') &&
     PAGE.includes("this.peerRowSelected(peer) ? $r('app.color.nb_primary') : Color.Transparent") &&
     PAGE.includes('.backgroundColor(this.peerRowSelected(peer)') &&
-    PAGE.includes("? $r('app.color.nb_row_selected_background') : Color.Transparent)") &&
+    PAGE.includes("? $r('app.color.nb_row_selected_background')") &&
+    PAGE.indexOf("? $r('app.color.nb_row_selected_background')") <
+      PAGE.indexOf(": this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background')") &&
     // …and the key carries it, so the framework cannot reuse the row that was just
     // deselected
     PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))'));
@@ -1132,6 +1164,87 @@ try {
       return summaries.length > 0 && summaries.every((s: string) => !/ ·'$/.test(s)) &&
         texts.every((s: string) => !/ ·'\)$/.test(s));
     })());
+
+  // -------------------------------------------------------------------------
+  // 20. 0.0.41 (I6) — THE PRODUCT OWNER'S THREE FINDINGS
+  // -------------------------------------------------------------------------
+
+  // §1 — THE RAIL'S VERTICAL RHYTHM. The owner's 0.0.40 frame measured ~360 px
+  // from the window's top to the wordmark and ~340 px between the status card and
+  // the 对端 row: I4's two EQUAL layoutWeight(1) spacers were centring the identity
+  // block in the slack above the nav block. The geometry is expressible — the rail
+  // starts at a known 24 vp top gap and the destination block is one seam + its own
+  // padding under the card — and the page must carry no spacer at all.
+  check('I6 §1: the rail is top-anchored at a 24 vp page padding (16 + the wordmark\'s 8)',
+    m.RAIL_PAGE_PADDING_VP === 16 && m.RAIL_WORDMARK_MARGIN_VP === 8 &&
+    m.RAIL_TOP_GAP_VP === 24 &&
+    PAGE.includes('.margin({ top: RAIL_WORDMARK_MARGIN_VP })') &&
+    PAGE.includes('RAIL_WORDMARK_MARGIN_VP,'));
+  check('I6 §1: the nav block follows the connection card directly (seam + 8 vp pad)',
+    m.RAIL_DESTINATION_GAP_VP === 9 &&
+    m.RAIL_DESTINATION_GAP_VP === m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP &&
+    PAGE.includes('RAIL_DESTINATION_GAP_VP'));
+  check('I6 §1: NO centring spacer is left in the rail (the I4 shape is gone)',
+    (() => {
+      const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
+        PAGE.indexOf('railDestinations() {'));
+      // lines, not substrings: the rail's own comment still NAMES the retired
+      // spacers (layoutWeight(1)) and that is documentation, not layout.
+      return rail.length > 0 && !/^\s*\.layoutWeight\(/m.test(rail) &&
+        !/^\s*\.justifyContent\(FlexAlign\.Center\)/m.test(rail) &&
+        // …and the connection region is still the ceilinged, scrolling block, so a
+        // short window scrolls it instead of pushing the destinations out
+        rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
+        rail.includes('this.homeTab()') &&
+        rail.indexOf('this.homeTab()') < rail.indexOf('this.railDestinations()');
+    })());
+  check('I6 §1: a short window still reserves the whole bottom region (unchanged ceiling)',
+    m.railConnectionMaxHeightVp(833) === 833 - m.RAIL_DESTINATIONS_HEIGHT_VP &&
+    m.RAIL_DESTINATIONS_HEIGHT_VP === 121 &&
+    m.railConnectionMaxHeightVp(361) === m.RAIL_CONNECTION_MIN_VP);
+
+  // §2 — HOVER vs SELECTION. The pinning the brief asks for is a NEGATIVE property
+  // of the marker: the 3 vp bar's colour expression may read the SELECTION and
+  // nothing else, so no hover state can ever paint it.
+  check('I6 §2: the 3 vp marker is bound to the SELECTION only (hover cannot paint it)',
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      const borderAt = row.indexOf('.border({');
+      const marker = row.slice(borderAt, row.indexOf('.backgroundColor(', borderAt));
+      const bgAt = row.indexOf('.backgroundColor(', borderAt);
+      const background = row.slice(bgAt, row.indexOf('.onHover(', bgAt));
+      return borderAt > 0 && marker.length > 0 && background.length > 0 &&
+        // the marker: the reserved 3 vp edge, its colour = selection, nothing else
+        marker.includes('width: { left: PEER_ROW_SELECT_BAR_VP },') &&
+        marker.includes("this.peerRowSelected(peer) ? $r('app.color.nb_primary')") &&
+        !/hover/i.test(marker) &&
+        // the surface: selection first, hover second, transparent last
+        background.includes('this.peerRowSelected(peer)') &&
+        background.includes("$r('app.color.nb_row_selected_background')") &&
+        background.includes('this.peerRowHovered(peer)') &&
+        background.includes("$r('app.color.nb_row_hover_background')") &&
+        background.indexOf('peerRowSelected') < background.indexOf('peerRowHovered');
+    })());
+  check('I6 §2: the hover tint is its own role, driven by a live @State and no framework overlay',
+    PAGE.includes('@State hoveredPeerKey: string = \'\';') &&
+    PAGE.includes('private peerRowHovered(peer: UiPeerEntry): boolean {') &&
+    PAGE.includes('return this.hoveredPeerKey.length > 0 && this.hoveredPeerKey === peer.pub_key;') &&
+    PAGE.includes('this.hoveredPeerKey = peer.pub_key;') &&
+    PAGE.includes("} else if (this.hoveredPeerKey === peer.pub_key) {") &&
+    // the peer row keeps no hoverEffect: one hover language, not two stacked ones
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      // the ATTRIBUTE, on its own line — the row's comment explains that the
+      // framework overlay was dropped, which is not the attribute coming back.
+      return !/^\s*\.hoverEffect\(/m.test(row);
+    })());
+  check('I6 §2: the hover state is NOT in the row key (it is an attribute, not a field)',
+    // peerRowKey still takes exactly the selection flag: a hover that joined the key
+    // would rebuild both rows on every pointer move.
+    PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))') &&
+    !PAGE.includes('peerRowKey(peer, this.peerRowHovered'));
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);

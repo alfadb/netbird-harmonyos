@@ -97,6 +97,13 @@ const CONTRACT: Array<[string, string, string]> = [
   // white card, so a selected row is visible without the 直连/中继 chip's own info
   // tint becoming indistinguishable from the row it sits on.
   ['nb_row_selected_background', '#E4EDF5', '#263D4D'],
+  // 0.0.41 (I6) §2: the HOVERED peer row's tint, and deliberately a DIFFERENT role
+  // from the selected one — the owner's 0.0.40 frame could not be told apart from a
+  // selection. Hover is the weaker, neutral lift toward the foreground (light
+  // #F2F5F7 on the white card, dark #2A3138 on #1B242C); the selection keeps the
+  // stronger, blue-carrying tint AND the 3 vp primary marker, which hover never
+  // renders (see the layout selfcheck's negative property).
+  ['nb_row_hover_background', '#F2F5F7', '#2A3138'],
   ['nb_on_status', '#FFFFFF', '#0B1218'],
   ['nb_window_status_bar_background', '#F2F6F8', '#10171D'],
   ['nb_window_navigation_bar_background', '#F2F6F8', '#10171D'],
@@ -125,6 +132,34 @@ const baseNames = [...base.keys()].sort().join(',');
 const darkNames = [...dark.keys()].sort().join(',');
 check('base and dark palettes declare the same resource-name set (no mode-only name)',
   baseNames === darkNames);
+
+// 1b. 0.0.41 (I6) §2 — the row's TWO surface tints. They have to be different
+//     roles in both modes (the owner's 0.0.40 frame could not tell the row's
+//     treatment from a selection) and the SELECTION has to be the STRONGER of the
+//     two against the card, so a hover can never out-rank the row whose detail is
+//     open. "Stronger" is the sum of the per-channel distance from the card fill,
+//     which is what makes the tint visible at all.
+function channels(hex: string): number[] {
+  const v = hex.replace('#', '');
+  return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16),
+    parseInt(v.slice(4, 6), 16)];
+}
+function liftFromCard(cardHex: string, tintHex: string): number {
+  const c = channels(cardHex);
+  const t = channels(tintHex);
+  return Math.abs(t[0] - c[0]) + Math.abs(t[1] - c[1]) + Math.abs(t[2] - c[2]);
+}
+const hoverLight = base.get('nb_row_hover_background') as string;
+const hoverDark = dark.get('nb_row_hover_background') as string;
+const selectedLight = base.get('nb_row_selected_background') as string;
+const selectedDark = dark.get('nb_row_selected_background') as string;
+check('I6 §2: hover and selection are DIFFERENT roles, and the selection is the stronger tint',
+  hoverLight !== selectedLight && hoverDark !== selectedDark &&
+  // hover is a visible lift over the card in both modes (a hover that paints
+  // nothing is what the owner's frame showed)
+  liftFromCard('#FFFFFF', hoverLight) > 0 && liftFromCard('#1B242C', hoverDark) > 0 &&
+  liftFromCard('#FFFFFF', selectedLight) > liftFromCard('#FFFFFF', hoverLight) &&
+  liftFromCard('#1B242C', selectedDark) > liftFromCard('#1B242C', hoverDark));
 
 // 2. Mandatory role pairs: a filled role and the ink that sits ON it must both
 //    exist in each palette — that is what makes the explicit on-role ink

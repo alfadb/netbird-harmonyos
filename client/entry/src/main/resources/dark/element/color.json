@@ -85,6 +85,10 @@
       "value": "#263D4D"
     },
     {
+      "name": "nb_row_hover_background",
+      "value": "#2A3138"
+    },
+    {
       "name": "nb_on_status",
       "value": "#0B1218"
     },
