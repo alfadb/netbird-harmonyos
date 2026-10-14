@@ -532,6 +532,12 @@ try {
     // 2026-10-13 device report §D: the effective tunnel MTU and its provenance
     // (default vs network-map), once per config build.
     ['vpn_tunnel_mtu', ['stage', 'mtu', 'source']],
+    // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the extension's
+    // publication stamp + the core's edge revision + the two peer counts the F5
+    // label change moves — one record per REAL write (the debounce above folds
+    // the unchanged heartbeat ticks away, so this never becomes a 5 s timer).
+    ['vpn_status_publish', ['detail', 'updated_at_ms', 'status_revision',
+      'peers_online', 'peers_relay']],
     ['native_resource_sample', ['stage', 'seq', 'conn_present', 'conn_gen', 'conn_running',
       'conn_state', 'conn_starts', 'conn_stops', 'ice_available', 'ice_sessions', 'ice_live',
       'ice_stopped', 'ice_fds', 'icesock_ready', 'icesock_queued', 'icesock_taken',
@@ -872,8 +878,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 18 reviewed names / 23 helper calls',
-    milestones.length === 18 && extText.split('this.diagMilestone(').length === 24);
+  check('the wired milestone surface is exactly the 19 reviewed names / 24 helper calls',
+    milestones.length === 19 && extText.split('this.diagMilestone(').length === 25);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

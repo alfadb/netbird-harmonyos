@@ -902,6 +902,13 @@ struct Index {
   // the extension publishes on edges + a 5 s heartbeat) costs one file read and
   // nothing else.
   private appliedStatusStamp: string = '';
+  // 0.0.34 peer-status lag fix (REPORT §3.5, read-side埋点): the last document
+  // this page really APPLIED (its write stamp and the core's edge revision) and
+  // the latch that keeps the "no live document" read from logging once per 1 s
+  // tick. Both feed the single `ui_status_read` record below.
+  private lastAppliedUpdatedAtMs: number = -1;
+  private lastAppliedStatusRevision: number = -1;
+  private statusReadStaleLogged: boolean = false;
   @State requestSent: boolean = false;
   @State stopSent: boolean = false;
   // 2026-10-13 PC 托盘（0.0.29）: one explicit quit at a time. Not @State — it
@@ -1258,6 +1265,57 @@ struct Index {
     event('ui_resume_check', fields);
   }
 
+  // 0.0.34 peer-status lag fix (device report `peer-status-lag/REPORT.md` §3.5,
+  // the READ side of the two埋点): the page is the only reader of the status
+  // document, so the record is emitted from the read itself. It is deliberately
+  // NOT one line per 1 s tick (that would be ~3600 records/hour of "nothing
+  // changed" and would drown the log's bounded budget): a record goes out
+  //   (a) whenever a tick really RE-DERIVES the page (`derived=true`, carrying
+  //       the document's write stamp, the core's edge revision and the age the
+  //       document already had at that instant) — this rate is the writer's own
+  //       (core edges + the 5 s heartbeat), because an unchanged document is
+  //       skipped above; and
+  //   (b) once per episode in which the read yields NO live document
+  //       (`derived=false`; the stamp/age then describe the last document the
+  //       page did apply, −1 when there was none) — latched, so a multi-second
+  //       stall or a suspended extension costs exactly one record.
+  // Together with `vpn_status_publish` this answers "core edge → first
+  // ui_status_read < 2 s" from the log instead of from two fixed timers.
+  private diagStatusReadApplied(live: PublishedStatus, nowMs: number): void {
+    this.statusReadStaleLogged = false;
+    const updatedAtMs: number = live.updated_at_ms;
+    const revision: number = typeof live.status_revision === 'number' &&
+      Number.isFinite(live.status_revision) ? live.status_revision : -1;
+    this.lastAppliedUpdatedAtMs = updatedAtMs;
+    this.lastAppliedStatusRevision = revision;
+    this.diagStatusRead(updatedAtMs, revision,
+      nowMs - updatedAtMs >= 0 ? nowMs - updatedAtMs : -1, true);
+  }
+
+  private diagStatusReadNoDocument(nowMs: number): void {
+    if (this.statusReadStaleLogged) {
+      return;
+    }
+    this.statusReadStaleLogged = true;
+    this.diagStatusRead(this.lastAppliedUpdatedAtMs, this.lastAppliedStatusRevision,
+      this.lastAppliedUpdatedAtMs >= 0 && nowMs - this.lastAppliedUpdatedAtMs >= 0
+        ? nowMs - this.lastAppliedUpdatedAtMs : -1, false);
+  }
+
+  // One reader record. `age_ms` is the document's age at the read instant
+  // (−1 = unknown: no live document was ever applied); every value is a bounded
+  // scalar from this page's own bookkeeping, never a document body.
+  private diagStatusRead(updatedAtMs: number, revision: number, ageMs: number,
+    derived: boolean): void {
+    const readFields: DiagFields = {
+      'updated_at_ms': updatedAtMs,
+      'status_revision': revision,
+      'age_ms': ageMs,
+      'derived': derived
+    };
+    event('ui_status_read', readFields);
+  }
+
   private pollConnectorStatusPass(): void {
     // 0.0.21（挂起长窗口后的恢复复查）：这一拍距上一拍多久？间隔异常大 = 这个进程有一段时间
     // 根本没在跑（平台挂起了整个 UI 进程），于是这一拍就是"恢复后的第一次复查"。记录一条
@@ -1296,8 +1354,11 @@ struct Index {
     // an empty slot and show a dead "disconnected" state). A document older
     // than two publish ticks counts as NOT running (B.3) — the page then
     // shows 未连接 instead of passing off a stale snapshot as live state.
+    // The gate takes this tick's own instant (`nowMs`, already read above for
+    // the keep-alive gap), so the freshness verdict and the `ui_status_read`
+    // age below measure the same clock.
     const status: PublishedStatus | null = currentPublishedStatus(
-      readPublishedStatus(getContext(this).filesDir), Date.now());
+      readPublishedStatus(getContext(this).filesDir), nowMs);
     // 0.0.20 判据②放宽: a kill event naming the pid that wrote the open marker
     // proves the extension is gone, so there is nothing left to wait for — the
     // document simply has not aged out of its freshness window yet (~10 s). When
@@ -1321,6 +1382,10 @@ struct Index {
     // document" must reach the policy as the fact it is).
     this.syncKeepAlive(live);
     if (live === null) {
+      // 0.0.34 peer-status lag fix (REPORT §3.5): this read produced NO live
+      // document (stale beyond the two-publish-tick gate, or the extension was
+      // proven dead) — one record per episode, never one per 1 s tick.
+      this.diagStatusReadNoDocument(nowMs);
       if (this.observedPublishedStatus) {
         // the document disappeared = the extension is gone (stopped or
         // destroyed): release the request latches for an explicit retry
@@ -1379,6 +1444,12 @@ struct Index {
       return;
     }
     this.appliedStatusStamp = nextStamp;
+    // 0.0.34 peer-status lag fix (REPORT §3.5 + §6.8): the page really
+    // re-derived this document — one `ui_status_read` record carrying the stamp
+    // it applied and how old that document already was at this instant. The
+    // rate is the writer's own (edges + the 5 s heartbeat), because the skip
+    // branch above returns for every unchanged tick.
+    this.diagStatusReadApplied(live, nowMs);
     this.lastLiveState = live.state;
     if (vpnActiveState(live.state)) {
       this.requestSent = true;

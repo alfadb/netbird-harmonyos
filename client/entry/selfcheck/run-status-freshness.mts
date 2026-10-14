@@ -150,6 +150,49 @@ try {
     connector.includes("connector_status_unsubscribe") &&
     connector.includes("connector_status_revision") &&
     connector.includes('export function connectorStatusRevision(): number'));
+  // -------------------------------------------------------------------------
+  // 0.0.34 F5 — the two埋点 that measure the latency end to end (REPORT §3.5)
+  // -------------------------------------------------------------------------
+  check('wiring: the publish site records every REAL write, right after it',
+    ext.indexOf('this.diagStatusPublish(doc);') >
+      ext.indexOf('fs.writeSync(file.fd, JSON.stringify(doc));') &&
+    ext.indexOf('this.diagStatusPublish(doc);') <
+      ext.indexOf('this.lastStatusChangeKey = changeKey;') &&
+    // the debounce gate is what keeps the record off the unchanged heartbeat,
+    // so the call must sit BEHIND it (same as the write itself)
+    ext.indexOf('this.diagStatusPublish(doc);') >
+      ext.indexOf('if (!force && !shouldPublishStatus({') &&
+    ext.includes("this.diagMilestone('vpn_status_publish', publishFields);"));
+  check('wiring: the publish record carries the stamp, revision and the two peer counts',
+    ext.includes("'detail': 'VPN_STATUS_PUBLISH'") &&
+    ext.includes("'updated_at_ms': doc.updated_at_ms") &&
+    ext.includes("'status_revision': typeof doc.status_revision === 'number'") &&
+    ext.includes("'peers_online': online") &&
+    ext.includes("'peers_relay': relay") &&
+    ext.includes('peers[i].online === true') &&
+    ext.includes("peers[i].connection === 'relay'"));
+  check('wiring: the reader records a RE-DERIVE, never one record per 1 s tick',
+    page.includes("event('ui_status_read', readFields);") &&
+    page.includes('this.diagStatusReadApplied(live, nowMs);') &&
+    page.indexOf('this.diagStatusReadApplied(live, nowMs);') >
+      page.indexOf('this.appliedStatusStamp = nextStamp;') &&
+    page.indexOf('this.diagStatusReadApplied(live, nowMs);') <
+      page.indexOf('this.lastLiveState = live.state;') &&
+    // the skip branch returns BEFORE the record, so an unchanged document can
+    // never produce a record
+    page.indexOf('shouldReapplyPublishedStatus(this.appliedStatusStamp, nextStamp)') <
+      page.indexOf('this.diagStatusReadApplied(live, nowMs);'));
+  check('wiring: the reader record carries stamp, revision, age and the derived flag',
+    page.includes("'updated_at_ms': updatedAtMs") &&
+    page.includes("'status_revision': revision") &&
+    page.includes("'age_ms': ageMs") &&
+    page.includes("'derived': derived"));
+  check('wiring: the no-live-document read is latched to one record per episode',
+    page.includes('private statusReadStaleLogged: boolean = false;') &&
+    page.includes('this.diagStatusReadNoDocument(nowMs);') &&
+    page.includes('if (this.statusReadStaleLogged) {') &&
+    page.indexOf('this.diagStatusReadNoDocument(nowMs);') <
+      page.indexOf('if (this.observedPublishedStatus) {'));
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

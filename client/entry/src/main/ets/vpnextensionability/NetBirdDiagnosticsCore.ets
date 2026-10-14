@@ -473,7 +473,17 @@ export const PUBLIC_FIELD_KEYS: string[] = [
   // tunnel MTU submitted to the platform) and `source` (its provenance:
   // default vs network-map). All three are bounded, non-secret tokens/numbers;
   // the set stays closed.
-  'purpose', 'mtu', 'source'
+  'purpose', 'mtu', 'source',
+  // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the two ends of
+  // the cross-process status latency — `vpn_status_publish` (the extension's
+  // write: the document's stamp, the core's edge revision and the two peer
+  // counts the F5 label change moves) and `ui_status_read` (the page's read:
+  // the same stamp/revision, the document's age at that instant, and whether
+  // the read re-derived). All six keys below are bounded scalars — a monotonic
+  // epoch-ms stamp, a small counter, a millisecond age and a boolean — and the
+  // set stays closed.
+  'updated_at_ms', 'status_revision', 'peers_online', 'peers_relay',
+  'age_ms', 'derived'
 ];
 
 // Public keys plus the runtime's own keys (memory readings, the every-10th

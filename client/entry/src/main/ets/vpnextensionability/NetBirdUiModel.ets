@@ -49,8 +49,9 @@ export interface UiPeerIceEndpoint {
 //   - `ice` present, endpoints set    -> that pair was really selected.
 // The last case is NOT a statement about the current connection: a
 // `disconnected` peer retains its selected pair (see `reachable`), and the
-// endpoint presence never overrides the WG-session verdict in
-// `UiPeerEntry.connection` / `online`.
+// endpoint presence alone never overrides the transport verdict behind
+// `UiPeerEntry.online` — `reachable` (Connected ∧ landed) is what counts there
+// (0.0.34 F5, peerConnectedFromTransport).
 export interface UiPeerIceDetail {
   // 'idle' | 'gathering' | 'checking' | 'connected' | 'disconnected' | 'failed'
   state: string;
@@ -81,19 +82,28 @@ export interface UiPeerEntry {
   fqdn: string | null;
   // first /32 vpn address with the suffix stripped ('' when none)
   ip: string;
-  // WG session established and not expired
+  // 0.0.34 peer-status lag fix (REPORT §5 F5): the peer's CONNECTION is up,
+  // derived like upstream's own conn status — the relay carrier attached OR
+  // the ICE session Connected-and-landed (conn.go:819-825 `evalStatus`) — and
+  // never claimed while management itself lists the peer under offlinePeers
+  // (engine.go:1894-1909). The WG session is only a contributing fact: it can
+  // hold this label up solely when the core delivered no ICE verdict for the
+  // peer at all, so a stale `session_established` no longer carries 已连接
+  // through the 540 s expired window (wg_device.rs:240).
   online: boolean;
-  // 'direct' | 'relay' | 'unknown'
+  // 'direct' | 'relay' | 'unknown' — the bearer `online` above rides
   connection: string;
   // seconds since the last WireGuard handshake, null when no session yet
   last_handshake_s: number | null;
   // 2026-10-06 peer-online semantics: management's own online verdict
   // (remotePeers = true, offlinePeers = false). A peer can be
-  // management-online while this device has no WG session with it yet.
+  // management-online while this device has no working transport to it yet.
   mgmt_online: boolean;
-  // 2026-10-06 three-state peer status: 'connected' (local WG session),
-  // 'idle' (management-online, no local session — 空闲, NOT offline),
-  // 'offline' (management lists it under offlinePeers).
+  // 2026-10-06 three-state peer status; 0.0.34 F5 = official semantics:
+  // 'connected' (connection up — see `online`), 'idle' (management has not
+  // called the peer offline and no working transport was observed — 空闲,
+  // NOT 离线), 'offline' (management lists it under offlinePeers, upstream
+  // `engine.go:1894-1909` = StatusIdle, never Connected).
   status: string;
   // ---- 2026-10-07 client-detail increment (all optional, see the block
   //      comment below) ----
@@ -151,9 +161,11 @@ export interface UiPeerEntry {
   // — dropped by JSON.stringify) whenever the core did not deliver a readable
   // detail for THIS peer; the UI then renders ICE 未知. A present detail with
   // null endpoints means "no pair selected yet". Endpoint presence is NOT a
-  // connection verdict: `connection`/`online`/`status` above stay sourced from
-  // the WG session view, and a `disconnected` peer keeps its retained pair
-  // with reachable=false.
+  // connection verdict on its own, but since 0.0.34 F5 this detail IS the
+  // primary source for `online`/`status` (upstream's conn status rides ICE and
+  // relay, conn.go:819-825): `reachable` (Connected ∧ landed) means the
+  // connection is up, `disconnected`/`failed` means it is known gone, and a
+  // `disconnected` peer keeps its retained pair with reachable=false.
   ice?: UiPeerIceDetail;
 }
 
@@ -615,19 +627,64 @@ export function peerConnection(entry: WgPeerStatusEntry | undefined): string {
   return 'unknown';
 }
 
-// The peer's three-state status (2026-10-06, official-client semantics):
-// 'connected' when THIS device has a live WG session with the peer;
-// 'idle' when management lists the peer as online (remotePeers) but no
-// local session exists yet — 空闲, deliberately NOT 离线 (a peer can be
-// reachable for others while our phone simply has no traffic/session with
-// it); 'offline' only when management itself moved the peer to
-// offlinePeers. `mgmtOnline` missing (older core/document) is read as
+// 0.0.34 peer-status lag fix (device report `peer-status-lag/REPORT.md` §5 F5):
+// the connection fact behind the primary label, taken from the ICE/relay
+// transport exactly like upstream's conn status — NOT from the WG session's
+// 540 s `expired` window (`wg_device.rs:240`), which let a silently vanished
+// peer read 已连接 for up to ~9 minutes.
+//
+// Upstream `conn.evalStatus` (client/internal/peer/conn.go:819-825):
+//   statusRelay == Connected || statusICE == Connected  -> StatusConnected
+//   otherwise                                           -> StatusConnecting
+// and the same two transports are what `evalConnStatus` (conn.go:1050-1083)
+// classifies: no working transport is `ConnStatusDisconnected` (conn.go:1081)
+// — the fact that must never render as 已连接.
+//
+// Branch -> upstream line:
+//   - `carrierAttached`   conn.go:820/:851 (`statusRelay == Connected`; the
+//     core's own `connStatusInputs` mapping names the WG seam's carrier attach
+//     as this repo's counterpart, peer_conn.rs:2630);
+//   - `ice.reachable`     conn.go:820/:1073 (`statusICE == Connected`) plus the
+//     endpoint landing this core requires before a selected pair can really
+//     carry traffic (`reachable` = Connected ∧ endpoint applied,
+//     peer_conn.rs:1448);
+//   - any OTHER delivered ICE verdict never yields connected, however fresh the
+//     WG session flag is: `checking`/`gathering` = upstream InProgress
+//     (conn.go:1066 `iceRunning := … in.iceInProgress`, case :1072 — whose
+//     label is Connecting), `disconnected`/`failed` = upstream Disconnected
+//     (conn.go:776-783 `setStatusToDisconnected`, :1081);
+//   - no ICE verdict delivered for this peer at all (no orchestrator, or the
+//     F4 stale sample published as 未知) -> the WG session is the ONLY fact
+//     left and may confirm the connection (`wgSessionLive`). That is the whole
+//     "contributing fact" half: the session is never the sole source while the
+//     core did deliver an ICE verdict, so it cannot outlive a known-gone path.
+export function peerConnectedFromTransport(ice: UiPeerIceDetail | undefined,
+  carrierAttached: boolean, wgSessionLive: boolean): boolean {
+  if (carrierAttached) {
+    return true;
+  }
+  if (ice !== undefined) {
+    return ice.reachable === true;
+  }
+  return wgSessionLive;
+}
+
+// The peer's three-state status (2026-10-06; 0.0.34 F5 official semantics):
+// 'offline' ONLY when management itself moved the peer to offlinePeers —
+// upstream hands every offline peer `ConnStatus: StatusIdle`
+// (client/internal/engine.go:1894-1909) and the official UI renders that as
+// Idle (Status.java:46-55), so such a peer is never "Connected" and
+// management's verdict outranks any local transport fact; 'connected' when the
+// connection is up (peerConnectedFromTransport, upstream conn.go:819-825);
+// 'idle' otherwise — 空闲, deliberately NOT 离线: a management-online peer with
+// no working transport (or simply no traffic, the WG session expiry alone) is
+// not an offline peer. `mgmtOnline` missing (older core/document) is read as
 // management-online, never a silent 离线.
 export function peerStatusOf(online: boolean, mgmtOnline: boolean): string {
-  if (online) {
-    return 'connected';
+  if (mgmtOnline === false) {
+    return 'offline';
   }
-  return mgmtOnline ? 'idle' : 'offline';
+  return online ? 'connected' : 'idle';
 }
 
 // Merge the network map's peer list with the WG per-peer session view into
@@ -641,15 +698,21 @@ export function peerStatusOf(online: boolean, mgmtOnline: boolean): string {
 // peer, public-key sorted): it is joined onto the SAME peers by public key.
 // A null/absent table, a peer with no entry in a delivered table, or an entry
 // that cannot be read leaves that peer's `ice` ABSENT — ICE 未知, never a
-// fabricated state/endpoint/role. Nothing here feeds `connection`/`online`:
-// endpoint presence is not a connection verdict.
+// fabricated state/endpoint/role.
 //
 // 0.0.34 (peer-status lag REPORT §5 F4): `iceUnknown` (see
 // iceSnapshotIsUnknown) says the whole ICE sample is too old to describe NOW —
 // then EVERY peer's `ice` stays ABSENT (未知) instead of publishing a stale
-// selection as the current one. It does not touch `connection`/`online`, which
-// are WG-session facts (and the F5 label predicate is a separate, product-owned
-// change).
+// selection as the current one.
+//
+// 0.0.34 (§5 F5): that same delivered ICE detail is now the PRIMARY input of
+// the `online`/`status` label (peerConnectedFromTransport) together with the
+// relay carrier attach, mirroring upstream's conn status (conn.go:819-825,
+// :1050-1083); the WG session survives only as the contributing fact used when
+// no ICE verdict was delivered at all. A peer whose ICE is known gone
+// (`disconnected`/`failed`) and whose relay carrier is not attached therefore
+// reads 空闲/离线 — never 已连接 — from the first 100 ms pump tick on, instead
+// of waiting out the 540 s WG session window.
 export function mergePeers(network: CoreNetworkConfig | null,
   wgPeers: WgPeerStatusEntry[] | undefined,
   peerRelays?: CorePeerRelayEntry[] | null,
@@ -720,9 +783,23 @@ export function mergePeers(network: CoreNetworkConfig | null,
       wg.last_handshake_s !== null && wg.last_handshake_s >= 0) {
       handshake = wg.last_handshake_s;
     }
-    const online: boolean = wg !== undefined && wg.session_established === true &&
-      wg.expired !== true;
+    // 0.0.34 F5: this peer's OWN ICE detail (a stale sample is the honest 未知
+    // above, so it testifies neither way) and the two transport facts upstream's
+    // conn status is built from.
+    const ice: UiPeerIceDetail | undefined = iceDetails.get(peer.pub_key);
+    // upstream `relayConnected` = `statusRelay == Connected` (conn.go:820,
+    // :851); the core's mapping table names the WG seam's carrier attach as this
+    // repo's counterpart (peer_conn.rs:2630).
+    const carrierAttached: boolean = wg !== undefined && wg !== null &&
+      wg.carrier_attached === true;
+    const wgLive: boolean = wg !== undefined && wg !== null &&
+      wg.session_established === true && wg.expired !== true;
     const mgmtOnline: boolean = peer.mgmt_online !== false;
+    // The connection fact (upstream conn.go:819-825) combined with management's
+    // own verdict: an offlinePeers peer never reads as up (engine.go:1894-1909),
+    // so `online` and `status === 'connected'` can never disagree.
+    const connected: boolean = peerConnectedFromTransport(ice, carrierAttached, wgLive);
+    const online: boolean = connected && mgmtOnline;
     // The WG-view half: present only when the core's wg_peers carried this
     // key. carrier_known gates every flag below — a map-only peer must not
     // read as a confirmed direct/off-carrier peer.
@@ -770,7 +847,7 @@ export function mergePeers(network: CoreNetworkConfig | null,
       // undefined when this peer has no readable ICE detail: JSON.stringify
       // drops the member, so the published peer carries no `ice` key at all
       // and the UI renders ICE 未知 instead of a fabricated state.
-      ice: iceDetails.get(peer.pub_key)
+      ice: ice
     };
     merged.push(entry);
   }

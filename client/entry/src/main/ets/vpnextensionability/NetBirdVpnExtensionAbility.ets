@@ -7489,6 +7489,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
+      this.diagStatusPublish(doc);
       this.lastStatusChangeKey = changeKey;
       this.lastStatusPublishMs = nowMs;
       const uiSignature: string = `${doc.state}|${doc.address !== null}|` +
@@ -7517,6 +7518,44 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
       }
     }
+  }
+
+  // 0.0.34 peer-status lag fix (device report `peer-status-lag/REPORT.md` §3.5
+  // + §6.8, the two埋点 that turn the 0–7 s derivation into a measurement):
+  // ONE record per REAL publication — the debounce above already folds the
+  // unchanged heartbeat ticks away, so this rate is (core edges + 5 s
+  // heartbeat), never a timer of its own. It carries the document's own write
+  // stamp and edge revision plus the two peer counts the F5 label change
+  // moves, so the NEXT capture can put `N13_WG|…|peer=` edge wall_ms next to
+  // the first publication of a moved revision without inferring anything from
+  // two fixed timers (`detail` mirrors the HiLog marker token, the same
+  // convention as diagLifecycleMarker).
+  private diagStatusPublish(doc: UiStatusDocument): void {
+    // typed by inference from the document itself — the peer-entry interface is
+    // NOT imported as a value (an erased name may only cross a `import type`
+    // line, the rule this file's header states).
+    const peers = doc.peers !== undefined && doc.peers !== null ? doc.peers : [];
+    let online: number = 0;
+    let relay: number = 0;
+    for (let i = 0; i < peers.length; i++) {
+      // `online` is the F5 connection fact (ICE/relay), `connection === 'relay'`
+      // the bearer the row renders — the two counts the label change moves.
+      if (peers[i].online === true) {
+        online += 1;
+      }
+      if (peers[i].connection === 'relay') {
+        relay += 1;
+      }
+    }
+    const publishFields: DiagFields = {
+      'detail': 'VPN_STATUS_PUBLISH',
+      'updated_at_ms': doc.updated_at_ms,
+      'status_revision': typeof doc.status_revision === 'number' &&
+        Number.isFinite(doc.status_revision) ? doc.status_revision : -1,
+      'peers_online': online,
+      'peers_relay': relay
+    };
+    this.diagMilestone('vpn_status_publish', publishFields);
   }
 
   // 2026-10-07 route-catalog publication: mirror the native `connector_routes`

@@ -91,13 +91,18 @@ try {
     peers: [{ pub_key: '' }, { pub_key: 'KEYA', fqdn: 'x', vpn_addresses: [] }]
   }, [])[0].pub_key === 'KEYA');
 
-  // ---- 2026-10-06 peer three-state (management online vs local session) ----
-  check('peerStatusOf: connected wins over mgmt state',
-    m.peerStatusOf(true, true) === 'connected' &&
-    m.peerStatusOf(true, false) === 'connected');
-  check('peerStatusOf: mgmt-online without a session is idle, NOT offline',
+  // ---- 2026-10-06 peer three-state; 0.0.34 F5 official semantics ----------
+  // `online` is now the CONNECTION fact (ICE/relay), not the WG session flag,
+  // and management's offlinePeers verdict outranks it: upstream hands every
+  // offline peer `ConnStatus: StatusIdle` (engine.go:1894-1909), so such a peer
+  // is never Connected.
+  check('peerStatusOf: a live connection is connected while management agrees',
+    m.peerStatusOf(true, true) === 'connected');
+  check('peerStatusOf: management offline wins over a live transport fact',
+    m.peerStatusOf(true, false) === 'offline');
+  check('peerStatusOf: mgmt-online without a working transport is idle, NOT offline',
     m.peerStatusOf(false, true) === 'idle');
-  check('peerStatusOf: mgmt-offline is offline',
+  check('peerStatusOf: mgmt-offline without a transport is offline',
     m.peerStatusOf(false, false) === 'offline');
   check('merge: remote peer without session is idle',
     merged[2].status === 'idle' && merged[2].mgmt_online === true);
@@ -592,7 +597,7 @@ try {
     { pub_key_b64: 'KEYA', session_established: true, expired: false,
       endpoint: '203.0.113.9:40000', last_handshake_s: 3 },
     { pub_key_b64: 'KEYB', session_established: true, expired: false,
-      on_carrier: true, last_handshake_s: 4 }
+      on_carrier: true, carrier_attached: true, last_handshake_s: 4 }
     // KEYC: no local WG session — its ICE detail must not label the connection
   ];
   const icePeers = [
@@ -740,10 +745,15 @@ try {
     staleIce[2].ice === undefined &&
     !('ice' in JSON.parse(JSON.stringify(staleIce))[0]) &&
     !('ice' in JSON.parse(JSON.stringify(staleIce))[1]));
-  check('ice staleness: it never touches the connection/online facts (F5 is separate)',
+  // 0.0.34 F5 changed this relation on purpose (see the F5 block below): the
+  // ICE detail is now the primary input of `online`/`status`, so a sample the
+  // core itself marks unknown leaves the label to the WG session — the only
+  // remaining fact for that peer — instead of inventing a transport verdict.
+  check('ice staleness: an unknown sample leaves the label to the WG session fact',
+    staleIce[0].online === true && staleIce[1].online === true &&
     staleIce[0].connection === iced[0].connection &&
     staleIce[1].connection === iced[1].connection &&
-    staleIce[2].online === iced[2].online &&
+    staleIce[2].online === iced[2].online && staleIce[2].online === false &&
     staleIce[0].endpoint === iced[0].endpoint);
   const staleDoc = m.buildUiStatusDocument(
     { ...status, ice_peers: icePeers, ice_snapshot_stale: true, ice_snapshot_age_ms: 9000 },
@@ -754,6 +764,102 @@ try {
   check('ice staleness: the status marks decide it end to end (doc level)',
     staleDoc.peers[0].ice === undefined && freshDoc.peers[0].ice.state === 'connected' &&
     !('ice' in JSON.parse(JSON.stringify(staleDoc)).peers[0]));
+
+  // ---- 0.0.34 F5: the primary label follows upstream's conn status ---------
+  // Upstream drives the peer label from the ICE/relay transports
+  // (conn.go:819-825 `evalStatus`: relay Connected || ICE Connected ->
+  // StatusConnected), and management's offlinePeers get `ConnStatus: StatusIdle`
+  // (engine.go:1894-1909) so they are never Connected. Our WG session flag can
+  // linger 540 s (wg_device.rs:240) after the peer silently vanished, so it must
+  // never be the sole source of 已连接 while an ICE verdict was delivered.
+  const f5Net = {
+    available: true,
+    address: '10.64.0.7',
+    peers: [
+      { pub_key: 'KV', fqdn: 'gone.netbird.cloud', vpn_addresses: ['10.30.30.9/32'] },
+      { pub_key: 'KI', fqdn: 'idle.netbird.cloud', vpn_addresses: ['10.30.30.10/32'] },
+      { pub_key: 'KO', fqdn: 'off.netbird.cloud', vpn_addresses: ['10.30.30.11/32'],
+        mgmt_online: false },
+      { pub_key: 'KR', fqdn: 'relayed.netbird.cloud', vpn_addresses: ['10.30.30.12/32'] }
+    ]
+  };
+  const f5Wg = [
+    // the vanished peer: the session flag still says established (it lags the
+    // ICE verdict by up to the 540 s window), the endpoint is already recycled
+    { pub_key_b64: 'KV', session_established: true, expired: false,
+      last_handshake_s: 640 },
+    // the relay-carried peer: carrier attached, ICE down — a working transport
+    { pub_key_b64: 'KR', session_established: true, expired: false,
+      on_carrier: true, carrier_attached: true, last_handshake_s: 2 },
+    // management says offline while the local session flag is still set
+    { pub_key_b64: 'KO', session_established: true, expired: false,
+      on_carrier: true, carrier_attached: true, last_handshake_s: 1 }
+    // KI: no WG view at all — management-online, nothing local
+  ];
+  const f5Ice = [
+    { pub_key: 'KV', state: 'failed', controlling: true, selected_local: null,
+      selected_remote: null, endpoint_applied: false, reachable: false,
+      last_error: { class: 'timeout', status: 0 } },
+    { pub_key: 'KR', state: 'failed', controlling: false, selected_local: null,
+      selected_remote: null, endpoint_applied: false, reachable: false,
+      last_error: null },
+    { pub_key: 'KO', state: 'connected', controlling: true,
+      selected_local: { type: 'host', address: '192.168.1.5', port: 51820 },
+      selected_remote: { type: 'host', address: '192.168.1.9', port: 51820 },
+      endpoint_applied: true, reachable: true, last_error: null }
+  ];
+  const f5 = m.mergePeers(f5Net, f5Wg, null, f5Ice);
+  check('F5: a vanished peer (stale session + ICE failed + relay detached) is NOT 已连接',
+    f5[0].online === false && f5[0].status === 'idle' &&
+    f5[0].connection === 'unknown' && f5[0].ice.state === 'failed' &&
+    f5[0].last_handshake_s === 640);
+  check('F5: an idle management-online peer is 空闲, never 离线',
+    f5[1].online === false && f5[1].status === 'idle' &&
+    f5[1].mgmt_online === true && f5[1].ice === undefined);
+  check('F5: mgmt_online=false never reads 已连接 (upstream offlinePeers = StatusIdle)',
+    f5[2].status === 'offline' && f5[2].online === false &&
+    f5[2].ice.state === 'connected' && f5[2].mgmt_online === false);
+  check('F5: relay carrier attached keeps the peer 已连接 with ICE down',
+    f5[3].online === true && f5[3].status === 'connected' &&
+    f5[3].connection === 'relay');
+  const f5Ice2 = [
+    { pub_key: 'KV', state: 'disconnected', controlling: true, selected_local: null,
+      selected_remote: null, endpoint_applied: false, reachable: false,
+      last_error: null },
+    { pub_key: 'KR', state: 'checking', controlling: true,
+      selected_local: { type: 'host', address: '192.168.1.5', port: 51820 },
+      selected_remote: { type: 'host', address: '192.168.1.9', port: 51820 },
+      endpoint_applied: true, reachable: false, last_error: null },
+    { pub_key: 'KO', state: 'connected', controlling: true, selected_local: null,
+      selected_remote: null, endpoint_applied: true, reachable: true, last_error: null }
+  ];
+  const f5b = m.mergePeers(f5Net, f5Wg, null, f5Ice2);
+  check('F5: ICE disconnected (still within the session window) is NOT 已连接',
+    f5b[0].online === false && f5b[0].status === 'idle');
+  check('F5: an in-progress ICE verdict (upstream InProgress = Connecting) is NOT 已连接',
+    f5b[1].online === false && f5b[1].status === 'idle');
+  check('F5: the label and the status can never disagree',
+    f5.every((p: { online: boolean; status: string }) =>
+      p.online === (p.status === 'connected')));
+  // the derivation itself, one branch per upstream line (see NetBirdUiModel)
+  const f5IceDetail = (state: string, reachable: boolean): object =>
+    ({ state: state, controlling: null, selected_local: null, selected_remote: null,
+      endpoint_applied: reachable, reachable: reachable, last_error_class: null });
+  const deriv = (ice: object | undefined, relayAttached: boolean, wgLive: boolean): boolean =>
+    m.peerConnectedFromTransport(ice as never, relayAttached, wgLive);
+  check('F5 derivation: no ICE verdict leaves the WG session as the contributing fact',
+    deriv(undefined, false, true) === true && deriv(undefined, false, false) === false);
+  check('F5 derivation: a delivered ICE verdict overrides the session flag both ways',
+    deriv(f5IceDetail('failed', false), false, true) === false &&
+    deriv(f5IceDetail('disconnected', false), false, true) === false &&
+    deriv(f5IceDetail('gathering', false), false, true) === false &&
+    deriv(f5IceDetail('checking', false), false, true) === false &&
+    deriv(f5IceDetail('connected', true), false, false) === true);
+  check('F5 derivation: a selected pair that never landed is not a path',
+    deriv(f5IceDetail('connected', false), false, true) === false);
+  check('F5 derivation: the relay carrier is a working transport on its own',
+    deriv(f5IceDetail('failed', false), true, true) === true &&
+    deriv(undefined, true, false) === true);
 
   // ---- 0.0.34 the core's edge revision rides the published document --------
   const revDoc = m.buildUiStatusDocument({ ...status, status_revision: 41 },
