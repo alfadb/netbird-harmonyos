@@ -6,6 +6,7 @@ import util from '@ohos.util';
 import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
 import common from '@ohos.app.ability.common';
+import window from '@ohos.window';
 import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
   removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus, shouldReapplyPublishedStatus, statusDocumentStamp }
@@ -151,6 +152,21 @@ import { TRAY_MENU_CONNECT, TRAY_MENU_DISCONNECT }
 import { setTrayActionListener, updateTrayState } from '../tray/NetBirdTrayService';
 import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
   from '../tray/NetBirdQuitFlow';
+// 0.0.36 响应式外壳 (DESIGN-HARMONY I1): the breakpoint classifier, the pane
+// decision and the split branch's width budget are a PURE module — the host check
+// selfcheck/run-harmony-layout.mts imports it byte-identical and pins every
+// boundary. This page only feeds it the window's width (vp) and renders the branch
+// it names; it never re-derives a threshold here.
+import { MIN_CONTENT_WIDTH_VP, NAV_BAR_WIDTH_VP, RAIL_WIDTH_VP, paneLayoutOf }
+  from './NetBirdHarmonyLayout';
+
+// 0.0.36: the wide pane's two routes. The pane's BASE route is a real
+// NavDestination (the "no peer selected" page), because split mode shows an EMPTY
+// content area when the routing stack is empty ("分栏模式在默认情况下，栈中没有页面时
+// 内容区展示空白", Navigation分栏开发) — the list must stay mounted AND the content
+// area must say what to do.
+const PEER_PANE_HOME_ROUTE: string = 'peerPaneHome';
+const PEER_DETAIL_ROUTE: string = 'peerDetail';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -935,6 +951,21 @@ struct Index {
   @State selectedPeer: UiPeerEntry | null = null;
   @State peerQuery: string = '';
   @State showDiagnostics: boolean = false;
+  // 0.0.36 响应式外壳: the window's width in vp is the ONLY input of the layout
+  // decision (paneLayoutOf). Seeded from the main window in aboutToAppear so the
+  // first frame is already classified, then kept current by the root container's
+  // onAreaChange — a 2in1 freeform drag is one of the four documented breakpoint
+  // triggers, so it needs no separate code path. The DEVICE type is never consulted
+  // for layout (see NetBirdHarmonyLayout's header): a resized desktop window walks
+  // through every tier.
+  @State widthVp: number = 0;
+  // The wide pane's route stacks: ONE per destination (k3 correction 4 / §E R6),
+  // so the mode/hideNavBar of a live Navigation is never flipped and the back
+  // authority can consult only the VISIBLE destination's stack. 设置 is empty in
+  // this increment; its stack exists so I3 pushes the sub-views (详细状态 /
+  // 路由选择) onto it instead of flipping page-level flags.
+  private peersNavStack: NavPathStack = new NavPathStack();
+  private settingsNavStack: NavPathStack = new NavPathStack();
   @State versionName: string = '';
   @State versionCode: number = -1;
   // 详细状态页 section toggles (all open by default: the detailed screen is
@@ -1137,6 +1168,9 @@ struct Index {
 
   aboutToAppear(): void {
     this.refreshSetupState();
+    // 0.0.36: seed the layout's only input before the first frame (fail-soft: the
+    // first onAreaChange corrects a failed seed one frame later).
+    this.seedWidthVp();
     // First open without credentials: guide straight to configuration
     // (设置 tab owns the first-run form since phase 1).
     if (!this.configured) {
@@ -4216,12 +4250,32 @@ struct Index {
     .padding({ top: 12, bottom: 12 })
     .onClick(() => {
       this.selectedPeer = peer;
+      // 0.0.36 wide branch: the detail is a NavDestination in the pane's content
+      // area, so the list keeps its node and its scroll position. On the narrow
+      // branch this is a no-op and today's page swap (the selectedPeer branch of
+      // peersTab) is byte-for-byte what it was. The row itself renders exactly the
+      // same fields as before — no column was added.
+      if (paneLayoutOf(this.widthVp) === 'split' && this.activeTab === 1) {
+        this.openPeerDetailRoute();
+      }
     })
   }
 
   @Builder
   peersTab() {
     if (this.selectedPeer !== null) {
+      this.peerDetailBody()
+    } else {
+      this.peerListBody()
+    }
+  }
+
+  // 0.0.36: TODAY'S 对端详情 body, relocated into its own builder. The narrow branch
+  // reaches it through peersTab() above (same branch, same order, so the narrow
+  // render is unchanged), and the wide branch reaches the SAME builder from the
+  // pane's peerDetail NavDestination — one source of truth, no copy to drift.
+  @Builder
+  peerDetailBody() {
       // 对端详情：展示可得的全部字段。
       Column({ space: 8 }) {
         Row({ space: 12 }) {
@@ -4283,7 +4337,16 @@ struct Index {
       .height('100%')
       .padding(20)
       .backgroundColor($r('app.color.nb_page_background'))
-    } else {
+  }
+
+  // 0.0.36: TODAY'S 对端列表 body (header + search + list), relocated verbatim. The
+  // wide branch renders it as the pane Navigation's navBar — a Navigation's own
+  // children ARE its navBar content ("新闻主页内容会放到左侧NavBar中",
+  // Navigation分栏开发) — and the narrow branch renders it as peersTab()'s other
+  // branch. The list, its ForEach key (peerRowKey) and the row are the same bytes
+  // on both branches, which is what keeps run-peer-list-render.mts green unedited.
+  @Builder
+  peerListBody() {
       Column({ space: 12 }) {
         Row({ space: 10 }) {
           Text('对端')
@@ -4343,7 +4406,6 @@ struct Index {
       .height('100%')
       .padding(20)
       .backgroundColor($r('app.color.nb_page_background'))
-    }
   }
 
   // ---- 设置 -------------------------------------------------------------------
@@ -5500,6 +5562,17 @@ struct Index {
       this.cancelConfigurationEdit();
       return true;
     }
+    // 0.0.36 (k3 correction 4 / §E R6): on the wide branch the visible pane's
+    // routing stack is the FIRST authority. It is consulted HERE — behind the
+    // account/editor actions above (they own the whole window) and in front of the
+    // page-level closes below — so the 返回 button inside the pane's detail body,
+    // the system back key and the Esc key all take this one path, and the stack can
+    // never be popped by one mechanism while another still thinks a page is open.
+    // Nothing to close in the pane (e.g. the 对端 list with no peer selected) falls
+    // through to the page's own rules unchanged.
+    if (this.closeWidePaneRoute()) {
+      return true;
+    }
     if (action === 'close-diagnostics') {
       this.showDiagnostics = false;
       this.activeTab = this.detailStatusOriginTab;
@@ -5521,6 +5594,348 @@ struct Index {
 
   onBackPress(): boolean {
     return this.closeVisibleSubflow();
+  }
+
+  // ---- lg+ 两栏外壳 (0.0.36, DESIGN-HARMONY I1) --------------------------------
+  //
+  // A RE-PARENTING, not a rewrite: connectionRail() renders TODAY'S homeTab() body,
+  // the 对端 pane's navBar renders TODAY'S peersTab() list body and its content area
+  // renders TODAY'S peersTab() detail body, and the 设置 pane renders TODAY'S
+  // settingsTab() body. The narrow branch (build()'s else, the Tabs with
+  // barPosition End and the three bodies) is untouched — run-peer-list-render.mts
+  // passes UNEDITED, which is the mechanical proof of that.
+  //
+  // WIDTH BUDGET (NetBirdHarmonyLayout): the rail is 240 vp and the pane's own
+  // Navigation splits at a hard >= 600 vp (NavigationMode.Auto), so a 840 vp window
+  // leaves the pane exactly 600 vp = navBarWidth 240 + minContentWidth 360 and the
+  // split is live from the very bottom of the lg tier. That is the k3 1.3
+  // correction: with the design's original 320/320/360 the pane would need 1000 vp
+  // and the bottom ~fifth of lg (plus some tablet-landscape windows) would run
+  // Stack-in-pane, blanking the list on a row tap — the exact defect this shell
+  // exists to kill. For the same reason the pane carries NO outer horizontal
+  // margin: 24 vp of margin would move the requirement to 864 vp.
+
+  // The root container's width observer, shared by both branches: the mounted root
+  // reports the page's area in vp, so a 2in1 freeform drag re-classifies the shell
+  // frame by frame (a documented breakpoint trigger — no extra code path).
+  private onRootAreaChange(newArea: Area): void {
+    const width: number = newArea.width as number;
+    if (width > 0 && width !== this.widthVp) {
+      this.widthVp = width;
+      // A window that just became wide enough shows the pane: make sure its route
+      // stack is in a defined state before anything renders from it.
+      this.syncWidePaneBaseRoutes();
+    }
+  }
+
+  // The FIRST frame is already classified: the main window's current width in px,
+  // converted with the display density. Fail-soft by construction — if the window
+  // or the display API is unavailable, onAreaChange corrects the classification one
+  // frame later (one mis-classified frame, never a crash and never a stuck layout).
+  private seedWidthVp(): void {
+    try {
+      const host: common.Context | undefined = this.getUIContext().getHostContext();
+      if (host === undefined) {
+        return;
+      }
+      window.getLastWindow(host).then((mainWindow: window.Window): void => {
+        const widthPx: number = mainWindow.getWindowProperties().windowRect.width;
+        const widthVp: number = this.getUIContext().px2vp(widthPx);
+        if (widthVp > 0) {
+          this.widthVp = widthVp;
+          this.syncWidePaneBaseRoutes();
+        }
+      }).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'UI_WIDTH_SEED_FAILED|%{public}s', error.message);
+      });
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'UI_WIDTH_SEED_SKIPPED|%{public}s', (error as Error).message);
+    }
+  }
+
+  // 对端 pane: keep its route stack in step with what is on screen. Split mode shows
+  // an EMPTY content area when the stack is empty, so the stack always carries the
+  // pane's BASE route (the "no peer selected" page); a peer that was selected while
+  // the narrow branch was showing keeps the same detail after the crossing, and a
+  // detail closed on the narrow branch is dropped here rather than replayed.
+  private syncWidePaneBaseRoutes(): void {
+    if (paneLayoutOf(this.widthVp) !== 'split' || this.activeTab !== 1) {
+      return;
+    }
+    if (this.peersNavStack.size() === 0) {
+      this.peersNavStack.pushPath({ name: PEER_PANE_HOME_ROUTE });
+    }
+    const detailOpen: boolean = this.peersNavStack.size() > 1;
+    if (this.selectedPeer !== null && !detailOpen) {
+      this.peersNavStack.pushPath({ name: PEER_DETAIL_ROUTE });
+    } else if (this.selectedPeer === null && detailOpen) {
+      this.peersNavStack.pop();
+    }
+  }
+
+  // The rail's two destination items. The state rule (k3 correction 2): 主页 is the
+  // rail ITSELF — the connection block above is always visible — so the rail has
+  // exactly two selectable items, and activeTab === 0 means "no item selected, the
+  // pane shows the hint". activeTab is never mutated by a width crossing, so a
+  // window that narrows again puts 主页 back exactly as the user left it.
+  //
+  // The destination semantics are the narrow bar's: leaving 对端 drops the
+  // drill-down (`if (index !== 1) { this.selectedPeer = null; }` in the Tabs
+  // onChange below), entering it starts at the list. That keeps activeTab's meaning
+  // identical at every width — no state remap.
+  private selectWideDestination(index: number): void {
+    if (index === this.activeTab) {
+      return;
+    }
+    this.activeTab = index;
+    this.selectedPeer = null;
+    this.peersNavStack.clear();
+    this.syncWidePaneBaseRoutes();
+  }
+
+  // A row tap on the wide branch pushes the detail into the pane's content area —
+  // the list keeps its node and its scroll position. On the narrow branch nothing
+  // is pushed and today's page swap stays exactly as it was (see peerRow's onClick).
+  private openPeerDetailRoute(): void {
+    if (this.peersNavStack.size() === 0) {
+      this.peersNavStack.pushPath({ name: PEER_PANE_HOME_ROUTE });
+    }
+    if (this.peersNavStack.size() === 1) {
+      this.peersNavStack.pushPath({ name: PEER_DETAIL_ROUTE });
+      return;
+    }
+    // A second row tap swaps the open detail in place: the stack stays one level
+    // deep, so one back is always "back to the list view".
+    this.peersNavStack.replacePath({ name: PEER_DETAIL_ROUTE });
+  }
+
+  // k3 correction 4 / §E R6 — the wide branch's ONE back authority, reached from
+  // closeVisibleSubflow() and therefore from the detail's 返回 button, the system
+  // back key and Esc alike. Only the VISIBLE destination's stack is consulted, and
+  // only a real sub-view (an open peer detail) consumes the back: the pane's base
+  // route is not a sub-view, so with no peer selected the decision falls through to
+  // the page's own rules — exactly like back on the narrow 对端 list, which exits
+  // normally. The settings stack is empty in this increment; the rule lives here so
+  // that I3's 设置 sub-views are governed by the same single authority.
+  private closeWidePaneRoute(): boolean {
+    if (paneLayoutOf(this.widthVp) !== 'split') {
+      return false;
+    }
+    if (this.activeTab === 1 && this.selectedPeer !== null && this.peersNavStack.size() > 0) {
+      this.peersNavStack.pop();
+      this.selectedPeer = null;
+      return true;
+    }
+    if (this.activeTab === 2 && this.settingsNavStack.size() > 0) {
+      this.settingsNavStack.pop();
+      return true;
+    }
+    return false;
+  }
+
+  @Builder
+  wideShell() {
+    Row() {
+      this.connectionRail()
+      this.contentPane()
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.nb_page_background'))
+    .onAreaChange((_oldArea: Area, newArea: Area): void => {
+      this.onRootAreaChange(newArea);
+    })
+  }
+
+  @Builder
+  connectionRail() {
+    Column() {
+      // TODAY'S 主页 body, re-parented unchanged. homeTab() keeps its own Scroll
+      // (height 100%), so it gets a weighted wrapper: inside this Column its 100%
+      // would otherwise take the whole rail and push the destination rows out.
+      Column() {
+        this.homeTab()
+      }
+      .width('100%')
+      .layoutWeight(1)
+      // k3 correction 1: the destination switcher lives HERE, in the rail — never as
+      // a horizontal tab strip above the pane's content. Two 48 vp rows (the touch
+      // target standard) rather than Tabs.vertical: two items need no index binding,
+      // and the vertical Tabs height budget (design §E R8/R9) is not a risk worth
+      // taking for two rows.
+      this.railDestinations()
+    }
+    .width(RAIL_WIDTH_VP)
+    .height('100%')
+    .backgroundColor($r('app.color.nb_page_background'))
+  }
+
+  @Builder
+  railDestinations() {
+    Column({ space: 4 }) {
+      // Written INLINE, not as a @Builder(index, label): a @Builder with two or more
+      // by-value parameters never refreshes in ArkUI (the 0.0.35 statusDot defect),
+      // and both rows' appearance is a function of this.activeTab.
+      Row() {
+        Text('对端')
+          .fontSize(16)
+          .fontColor(this.activeTab === 1 ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .height(48)
+      .padding({ left: 16, right: 16 })
+      .borderRadius(12)
+      .backgroundColor(this.activeTab === 1
+        ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
+      .onClick((): void => {
+        this.selectWideDestination(1);
+      })
+      Row() {
+        Text('设置')
+          .fontSize(16)
+          .fontColor(this.activeTab === 2 ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .height(48)
+      .padding({ left: 16, right: 16 })
+      .borderRadius(12)
+      .backgroundColor(this.activeTab === 2
+        ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
+      .onClick((): void => {
+        this.selectWideDestination(2);
+      })
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 4, bottom: 12 })
+  }
+
+  @Builder
+  contentPane() {
+    Column() {
+      // k3 correction 4 / §E R6: one container PER destination, each with its own
+      // NavPathStack — a live Navigation's mode/hideNavBar is never flipped between
+      // destinations, and two destinations' routes never share one stack.
+      if (this.activeTab === 1) {
+        this.peersPane()
+      } else if (this.activeTab === 2) {
+        this.settingsPane()
+      } else {
+        // activeTab === 0: 主页 IS the rail, so the pane has nothing of its own to
+        // show. A neutral hint — and activeTab is NOT mutated (k3 correction 2), so
+        // crossing back to a narrow window restores 主页 exactly.
+        this.wideHintPane()
+      }
+    }
+    .layoutWeight(1)
+    .height('100%')
+    .backgroundColor($r('app.color.nb_page_background'))
+  }
+
+  @Builder
+  peersPane() {
+    // The Navigation's own children ARE its navBar content ("新闻主页内容会放到左侧
+    // NavBar中", Navigation分栏开发), so TODAY'S list body becomes the fixed pane and
+    // the pushed NavDestination is the detail: the list stays mounted with its
+    // scroll position while the detail is open.
+    //
+    // mode(Auto), not Split: the framework's own >= 600 vp rule then governs the
+    // pane, so if our classifier and the framework ever disagree inside the lg tier
+    // the pane degrades to today's list-then-detail behaviour instead of showing a
+    // broken split.
+    Navigation(this.peersNavStack) {
+      this.peerListBody()
+    }
+    .navDestination(this.peerPaneDestination)
+    .mode(NavigationMode.Auto)
+    .navBarWidth(NAV_BAR_WIDTH_VP)
+    .minContentWidth(MIN_CONTENT_WIDTH_VP)
+    .hideTitleBar(true)
+    .width('100%')
+    .height('100%')
+  }
+
+  // The pane's pushed pages. ONE parameter, not two: the official example's shape
+  // (`@Builder PageMap(name: string)`, .navDestination(this.PageMap)), and a
+  // @Builder whose parameters are all by-value does not refresh when they change.
+  @Builder
+  peerPaneDestination(name: string) {
+    if (name === PEER_DETAIL_ROUTE) {
+      NavDestination() {
+        this.peerDetailBody()
+      }
+      .hideTitleBar(true)
+      .backgroundColor($r('app.color.nb_page_background'))
+    } else if (name === PEER_PANE_HOME_ROUTE) {
+      NavDestination() {
+        this.widePeerHint()
+      }
+      .hideTitleBar(true)
+      .backgroundColor($r('app.color.nb_page_background'))
+    }
+  }
+
+  @Builder
+  settingsPane() {
+    // 设置 is ONE column inside the pane. mode(Stack) is what makes it full width —
+    // under mode(Auto) a 600 vp pane would split it into a 240 vp navBar plus an
+    // empty content area.
+    //
+    // hideNavBar is deliberately FALSE here, against the design's original wording:
+    // with hideNavBar(true) a Navigation hides this page and shows the top
+    // NavDestination instead ("if the navigation destination page is in the routing
+    // stack, it is moved to the top of the stack and displayed. Otherwise, a blank
+    // page is displayed." — navigation.d.ts hideNavBar), and this increment pushes
+    // nothing onto the settings stack, so the pane would be blank. mode(Stack)
+    // already delivers the full-width single column I3 needs; writing it explicitly
+    // makes the decision greppable.
+    Navigation(this.settingsNavStack) {
+      this.settingsTab()
+    }
+    .mode(NavigationMode.Stack)
+    .hideNavBar(false)
+    .hideTitleBar(true)
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.nb_page_background'))
+  }
+
+  @Builder
+  wideHintPane() {
+    Column({ space: 10 }) {
+      Text('选择左侧的「对端」或「设置」')
+        .fontSize(16)
+        .fontColor($r('app.color.nb_text_secondary'))
+      Text('连接状态与开关始终显示在左栏。')
+        .fontSize(14)
+        .fontColor($r('app.color.nb_text_muted'))
+    }
+    .width('100%')
+    .height('100%')
+    .padding(24)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor($r('app.color.nb_page_background'))
+  }
+
+  @Builder
+  widePeerHint() {
+    Column({ space: 10 }) {
+      Text('选择一个对端查看详情')
+        .fontSize(16)
+        .fontColor($r('app.color.nb_text_secondary'))
+      Text('列表会保持显示，点击左侧的任意对端即可查看详情。')
+        .fontSize(14)
+        .fontColor($r('app.color.nb_text_muted'))
+        .textAlign(TextAlign.Center)
+    }
+    .width('100%')
+    .height('100%')
+    .padding(24)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .backgroundColor($r('app.color.nb_page_background'))
   }
 
   // ---- 后台保活（实验，方案 A）-------------------------------------------------
@@ -5578,6 +5993,12 @@ struct Index {
         }
       })
     } else {
+      // 0.0.36 responsive shell: ONE width classifier decides which container
+      // renders the destinations. lg/xl (>= 840 vp) get the rail + pane; everything
+      // below, including a narrow 2in1 window, gets TODAY'S shell unchanged.
+      if (paneLayoutOf(this.widthVp) === 'split') {
+        this.wideShell()
+      } else {
       Column() {
         Tabs({ barPosition: BarPosition.End, index: this.activeTab }) {
         TabContent() {
@@ -5609,6 +6030,12 @@ struct Index {
       }
       .width('100%')
       .height('100%')
+      // The narrow branch reports the same page width as the wide Row, so the two
+      // branches are symmetric: whichever one is mounted keeps the classifier fed.
+      .onAreaChange((_oldArea: Area, newArea: Area): void => {
+        this.onRootAreaChange(newArea);
+      })
+      }
     }
   }
 }

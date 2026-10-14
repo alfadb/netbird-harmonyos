@@ -21,6 +21,19 @@
         startWindowIcon: '$media:app_icon',
         startWindowBackground: '$color:start_window_background',
         exported: true,
+        // 0.0.36 自由窗口尺寸下限 (DESIGN-HARMONY §C.4 / 一多技术白皮书 5.1): the 2in1
+        // window cannot be dragged below 520 x 480 vp or into an absurdly thin
+        // ratio, so the smallest allowed window is always the narrow (phone) branch
+        // and a freeform drag can never reach a width where the chosen layout is
+        // wrong. Keys verified against the local build schema before writing:
+        // sdk/default/openharmony/toolchains/modulecheck/module.json →
+        // properties.module.properties.abilities.items.properties.minWindowWidth
+        // (integer), .minWindowHeight (integer), .minWindowRatio (number, >= 0);
+        // units are vp per AbilityInfo.WindowSize (api/bundleManager/AbilityInfo.d.ts).
+        // hvigor validates this file against that schema on every build.
+        minWindowWidth: 520,
+        minWindowHeight: 480,
+        minWindowRatio: 0.4,
         // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：这个 UIAbility 会申请一个
         // DATA_TRANSFER 长时任务（鸿蒙没有 VPN 类型的长时任务，借用「数据传输」是平台
         // 上唯一可用的保活手段；另一款鸿蒙 VPN 客户端也是这么借的）。业务类型与用途不
