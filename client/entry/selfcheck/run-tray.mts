@@ -380,9 +380,9 @@ check('0.0.32: a refused showAbility on the reopen path is contained, never thro
     return open.indexOf('try {') >= 0 && open.indexOf('catch (error)') >= 0 &&
       (open.match(/\.catch\(\(error: Error\)/g) ?? []).length === 2;
   })());
-check('the version is 33 / 0.0.33 in both profiles',
-  /versionCode: 33/.test(BUILD_PROFILE) && /versionName: '0\.0\.33'/.test(BUILD_PROFILE) &&
-  /versionCode: 33/.test(APP_JSON5) && /versionName: '0\.0\.33'/.test(APP_JSON5));
+check('the version is 34 / 0.0.34 in both profiles',
+  /versionCode: 34/.test(BUILD_PROFILE) && /versionName: '0\.0\.34'/.test(BUILD_PROFILE) &&
+  /versionCode: 34/.test(APP_JSON5) && /versionName: '0\.0\.34'/.test(APP_JSON5));
 check('0.0.31: the system tray 退出 takes the SAME full-quit path (veto once, then quit)',
   ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
   ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&
