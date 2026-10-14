@@ -1,21 +1,28 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later
  * Copyright (C) 2026 NetBird HarmonyOS contributors
  */
-// 2026-10-13 显式退出（0.0.29）→ 统一退出（0.0.31）—— the ONE exit flow, shared by
-// every exit path this app can act on. All of them run the SAME teardown, in the
-// SAME order:
+// 2026-10-13 显式退出（0.0.29）→ 统一退出（0.0.31）→ 唯一的托盘退出入口（0.0.33）
+// —— the ONE exit flow, shared by every exit path this app can act on. All of them
+// run the SAME teardown, in the SAME order:
 //
 //     arm the flag → requestStop (disconnect) → grace → stopKeepAlive
 //     → remove tray → terminateSelf()
 //
-// THE THREE ENTRY POINTS (one flow, one order, one reason token each):
-//   * the tray menu's 退出 row → the page → requestQuit(QUIT_REASON_TRAY);
+// THE TWO ENTRY POINTS (one flow, one order, one reason token each):
 //   * 设置 → 应用 → 退出应用 → requestQuit(QUIT_REASON_SETTINGS);
 //   * the SYSTEM-GENERATED tray 退出 (and any other dock/system termination
 //     request) → EntryAbility.onPrepareToTerminate(), which must answer
 //     SYNCHRONOUSLY: it cancels the request ONCE (shouldVetoSystemExit below,
 //     the bounded safeguard) and calls requestQuit(QUIT_REASON_SYSTEM) — the
 //     flow's own terminateSelf() is then the app's exit.
+//
+// 0.0.33: the tray menu's own 退出 row is GONE, and the system row is the only
+// quit entry there. The official guide 《应用接入状态栏》 (开发步骤 6) states
+// 「无论是否配置右键菜单，系统均会自动生成一个"退出"的菜单选项，该选项不支持应用
+// 自定义。」 — so the row is the platform's, not ours to add or remove, and
+// 0.0.29–0.0.32's own row was simply a duplicate beside it on the PC. Nothing
+// about the teardown changed: the system row still runs THIS flow through
+// onPrepareToTerminate → requestQuit(QUIT_REASON_SYSTEM).
 //
 // WHY THERE IS NO "exit but keep the tunnel" ANY MORE (product decision,
 // 0.0.31): HarmonyOS couples the VPN's lifetime to the launching app — the
@@ -35,9 +42,9 @@
 //     }
 //
 // 0.0.29/0.0.30 had TWO exits: this flow, and a plain system exit that left the
-// :vpn extension (and a live tunnel) behind. 0.0.31 has one. The tray menu
-// reflects it: upstream's tray.go has exactly one Quit row and so does ours
-// (退出).
+// :vpn extension (and a live tunnel) behind. 0.0.31 has one. Our tray menu no
+// longer carries a Quit row of its own (0.0.33): the platform's mandatory,
+// non-customisable 退出 row is the menu's quit entry, and it runs THIS flow.
 //
 // THE ONE PATH THE APP CANNOT ACT ON, stated honestly: a force-stop, an OOM
 // kill, a device shutdown or any platform process kill never reaches a callback
@@ -78,8 +85,9 @@ interface BusinessFailure extends Error {
 }
 
 // The entry points' reason tokens, a closed set of OUR OWN — never platform or
-// user text.
-export const QUIT_REASON_TRAY: string = 'tray-quit';
+// user text. 0.0.33 dropped the tray row's own token together with the row: the
+// system 退出 does not come from our menu, it comes from onPrepareToTerminate,
+// and it is QUIT_REASON_SYSTEM.
 export const QUIT_REASON_SETTINGS: string = 'settings-quit';
 export const QUIT_REASON_SYSTEM: string = 'system-quit';
 

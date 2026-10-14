@@ -1,11 +1,13 @@
-// 2026-10-13 PC 托盘（0.0.29）— host-side checks.
+// 2026-10-13 PC 托盘（0.0.29）；2026-10-14 去掉重复的退出行（0.0.33）— host-side checks.
 //
 // Three parts, all against shipped sources, no device, no build, no compiler:
 //   A. the PURE model (tray/NetBirdTrayModel.ets), imported BYTE-IDENTICAL (the
 //      same trick run-keep-alive.mts uses): the state vocabulary mapping, the
 //      hover tip and its 128-char bound, the icon variant, the state-dependent
-//      menu (and the fact that Connect and Disconnect are never in it together),
-//      the menu signature, the closed menu-code set and the two gates.
+//      menu (Connect and Disconnect never in it together, and since 0.0.33 NO
+//      quit row of ours — the official guide 《应用接入状态栏》 开发步骤 6 has the
+//      system generate the mandatory, non-customisable 退出 row), the menu
+//      signature, the closed menu-code set and the two gates.
 //   B. the WIRING of the tray: the platform module is the ONLY importer of
 //      @kit.DeskTopExtensionKit, it is reached ONLY through a dynamic import
 //      (so a phone never evaluates it), the six platform calls and both
@@ -20,7 +22,8 @@
 //      rows into the SAME requestStart/requestStop it already had and registers its
 //      requestStop as the flow's disconnect step, the Settings entry runs the same
 //      flow, and 0.0.31's unified exit reaches the flow from
-//      EntryAbility.onPrepareToTerminate too (the system-generated tray 退出);
+//      EntryAbility.onPrepareToTerminate too (the system-generated tray 退出 —
+//      since 0.0.33 the tray's ONLY quit entry);
 //      0.0.32 adds the reopen primitive to 打开主窗口 / the left click: the
 //      context's showAbility() (the twin of the X's hideAbility) runs FIRST and
 //      the hot start stays as the second, unchanged route.
@@ -99,10 +102,10 @@ try {
   const m: any = await import(pathToFileURL(fixture).href);
 
   // -- the closed sets --------------------------------------------------------
-  const codes = [m.TRAY_MENU_CONNECT, m.TRAY_MENU_DISCONNECT, m.TRAY_MENU_OPEN, m.TRAY_MENU_QUIT];
-  check('the four menu codes are non-empty and globally unique (error 1010710007)',
+  const codes = [m.TRAY_MENU_CONNECT, m.TRAY_MENU_DISCONNECT, m.TRAY_MENU_OPEN];
+  check('the three menu codes are non-empty and globally unique (error 1010710007)',
     codes.every((code: string): boolean => typeof code === 'string' && code.length > 0) &&
-    new Set<string>(codes).size === 4);
+    new Set<string>(codes).size === 3);
   check('only OUR codes are known: anything else is refused, not acted on',
     codes.every((code: string): boolean => m.trayMenuCodeKnown(code) === true) &&
     m.trayMenuCodeKnown('') === false && m.trayMenuCodeKnown('leftClick') === false &&
@@ -151,23 +154,39 @@ try {
       codesInMenu.indexOf(expected) >= 0 &&
       !(codesInMenu.indexOf(m.TRAY_MENU_CONNECT) >= 0 &&
         codesInMenu.indexOf(m.TRAY_MENU_DISCONNECT) >= 0) &&
-      codesInMenu.indexOf(m.TRAY_MENU_OPEN) >= 0 &&
-      codesInMenu.indexOf(m.TRAY_MENU_QUIT) >= 0,
+      codesInMenu.indexOf(m.TRAY_MENU_OPEN) >= 0,
       JSON.stringify(codesInMenu));
   }
+  check('0.0.33: NO quit row of ours in any state — exactly 连接|断开 / 打开主窗口',
+    ['已连接', '连接中…', '正在断开…', '未连接', '需要登录', ''].every(
+      (text: string): boolean => {
+        const rows = rowsOf(text);
+        return rows.length === 2 &&
+          rows[0].menuCode !== 'nb_tray_quit' && rows[1].menuCode === m.TRAY_MENU_OPEN &&
+          rows.every((row: any): boolean => row.title !== '退出');
+      }) &&
+    MODEL_TEXT.indexOf("'nb_tray_quit'") < 0 &&
+    MODEL_TEXT.indexOf('TRAY_TITLE_QUIT') < 0 &&
+    MODEL_TEXT.indexOf('TRAY_MENU_QUIT') < 0,
+    JSON.stringify(rowsOf('未连接')));
+  check('0.0.33: the model names the platform\'s own 退出 as the menu\'s only quit row ' +
+    '(官方指南《应用接入状态栏》开发步骤 6)',
+    MODEL_TEXT.indexOf('应用接入状态栏') >= 0 &&
+    MODEL_TEXT.indexOf('系统均会自动生成一个"退出"的菜单选项') >= 0 &&
+    MODEL_TEXT.indexOf('不支持应用自定义') >= 0 &&
+    MODEL_TEXT.indexOf('onPrepareToTerminate') >= 0 &&
+    MODEL_TEXT.indexOf('requestQuit(QUIT_REASON_SYSTEM)') >= 0);
   check('every state\'s menu stays inside the platform\'s 20 level-1 items',
     ['已连接', '连接中…', '需要登录', '未连接'].every((text: string): boolean =>
       rowsOf(text).length <= 20));
-  check('the menu is grouped (upstream\'s separators around actions / Open / Quit)',
-    m.trayMenuGroups('未连接').length === 3 &&
+  check('the menu is grouped (upstream\'s separators around actions / Open)',
+    m.trayMenuGroups('未连接').length === 2 &&
     m.trayMenuGroups('未连接')[0].length === 1 &&
-    m.trayMenuGroups('未连接')[1][0].menuCode === m.TRAY_MENU_OPEN &&
-    m.trayMenuGroups('未连接')[2][0].menuCode === m.TRAY_MENU_QUIT);
-  check('row titles are the upstream menu labels (0.0.31: ONE quit row, 退出)',
+    m.trayMenuGroups('未连接')[1][0].menuCode === m.TRAY_MENU_OPEN);
+  check('row titles are the upstream menu labels (0.0.33: no quit row of ours)',
     rowsOf('未连接')[0].title === '连接' &&
+    rowsOf('已连接')[0].title === '断开' &&
     rowsOf('已连接')[1].title === '打开主窗口' &&
-    rowsOf('已连接')[2].title === '退出' &&
-    MODEL_TEXT.indexOf('TRAY_TITLE_QUIT: string = \'退出\'') >= 0 &&
     MODEL_TEXT.indexOf('退出并断开') < 0);
   check('the menu signature is stable per state and changes across the boundary',
     m.trayMenuSignature('已连接') === m.trayMenuSignature('连接中…') &&
@@ -286,10 +305,15 @@ check('the tray\'s action rows ride the page\'s OWN connect/stop paths',
   trayAction.indexOf('TRAY_MENU_DISCONNECT') >= 0 &&
   trayAction.indexOf('TRAY_MENU_DISCONNECT') < trayAction.indexOf('this.requestStop();') &&
   !trayAction.includes('vpnExtension.'));
-check('退出 runs the shared quit flow, 打开主窗口 does not reach the page',
-  trayAction.indexOf('TRAY_MENU_QUIT') >= 0 &&
-  trayAction.indexOf('this.beginExplicitQuit(QUIT_REASON_TRAY);') >
-    trayAction.indexOf('TRAY_MENU_QUIT') && !trayAction.includes('TRAY_MENU_OPEN'));
+check('0.0.33: the page\'s tray routing has NO quit arm — the system row is the only ' +
+  'tray quit, and 打开主窗口 does not reach the page either',
+  trayAction.indexOf('TRAY_MENU_QUIT') < 0 &&
+  trayAction.indexOf('QUIT_REASON_TRAY') < 0 &&
+  trayAction.indexOf('beginExplicitQuit') < 0 &&
+  !trayAction.includes('TRAY_MENU_OPEN') &&
+  PAGE.indexOf('TRAY_MENU_QUIT') < 0 &&
+  QUIT_TEXT.indexOf('QUIT_REASON_TRAY') < 0 &&
+  PAGE.indexOf('QUIT_REASON_TRAY') < 0);
 check('the Settings entry runs the SAME flow (设置 → 应用 → 退出应用)',
   PAGE.indexOf("Text('退出应用（断开 VPN）')") >= 0 &&
   PAGE.indexOf('this.beginExplicitQuit(QUIT_REASON_SETTINGS);') >= 0);
@@ -356,9 +380,9 @@ check('0.0.32: a refused showAbility on the reopen path is contained, never thro
     return open.indexOf('try {') >= 0 && open.indexOf('catch (error)') >= 0 &&
       (open.match(/\.catch\(\(error: Error\)/g) ?? []).length === 2;
   })());
-check('the version is 32 / 0.0.32 in both profiles',
-  /versionCode: 32/.test(BUILD_PROFILE) && /versionName: '0\.0\.32'/.test(BUILD_PROFILE) &&
-  /versionCode: 32/.test(APP_JSON5) && /versionName: '0\.0\.32'/.test(APP_JSON5));
+check('the version is 33 / 0.0.33 in both profiles',
+  /versionCode: 33/.test(BUILD_PROFILE) && /versionName: '0\.0\.33'/.test(BUILD_PROFILE) &&
+  /versionCode: 33/.test(APP_JSON5) && /versionName: '0\.0\.33'/.test(APP_JSON5));
 check('0.0.31: the system tray 退出 takes the SAME full-quit path (veto once, then quit)',
   ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
   ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&

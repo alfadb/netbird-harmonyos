@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
-// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）—— PURE LOGIC only.
+// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）；2026-10-14 去掉重复的
+// 退出行（0.0.33）—— PURE LOGIC only.
 //
 // WHAT THIS FILE IS: every tray decision that can be made without a device —
 // what the right-click menu contains for a given connection state, what the
@@ -28,7 +29,7 @@
 //
 // HarmonyOS gives the same four surfaces (see the tray API verification note,
 // TRAY-API-VERIFY.md §1.2): a status-bar icon with a left-click EVENT, a
-// right-click menu, a hover tip, and the app's own state. Three differences are
+// right-click menu, a hover tip, and the app's own state. Four differences are
 // structural and are encoded here rather than worked around:
 //
 //   1. A menu item CANNOT be hidden (statusBarManager.StatusBarMenuItem has no
@@ -46,6 +47,16 @@
 //      未连接). This module never invents a second vocabulary — it only maps the
 //      page's label onto a tray token, and an unrecognised label is treated as
 //      the honest default (未连接).
+//   4. The QUIT row is not ours to configure. The official guide
+//      《应用接入状态栏》 (开发步骤 6) states that the system generates a 退出
+//      menu option no matter what the app configures, and that the option
+//      「不支持应用自定义」. Upstream's own Quit row has no counterpart we may
+//      add: 0.0.29–0.0.32 added one anyway and the PC showed TWO 退出 rows, so
+//      0.0.33 removes ours (see trayMenuGroups()). The system row's exit path
+//      is the one the app already honours — onPrepareToTerminate →
+//      requestQuit(QUIT_REASON_SYSTEM) in tray/NetBirdQuitFlow.ets, i.e. the
+//      FULL teardown (disconnect → stop keep-alive → remove tray → exit), not a
+//      bare process kill.
 
 // The menu codes delivered by statusBarManager's 'rightMenuClick' event. Each
 // code is globally unique within the menu (error 1010710007) and is our own
@@ -53,16 +64,16 @@
 export const TRAY_MENU_CONNECT: string = 'nb_tray_connect';
 export const TRAY_MENU_DISCONNECT: string = 'nb_tray_disconnect';
 export const TRAY_MENU_OPEN: string = 'nb_tray_open';
-export const TRAY_MENU_QUIT: string = 'nb_tray_quit';
 
-// The row titles: upstream's tray.menu.connect / .disconnect / .open / .quit.
-// 0.0.31: the Quit row is 退出 — the plain label upstream uses, because quitting
-// now ALWAYS disconnects first (there is no "keep the tunnel" variant left to
-// distinguish it from; see tray/NetBirdQuitFlow.ets).
+// The row titles: upstream's tray.menu.connect / .disconnect / .open.
+//
+// 0.0.33: there is NO quit row of ours — see trayMenuGroups() below and the
+// official doc's step 6 finding quoted there (the system generates the 退出 row
+// itself, mandatorily and non-customisably, and until 0.0.32 ours was a second,
+// duplicate row beside it).
 export const TRAY_TITLE_CONNECT: string = '连接';
 export const TRAY_TITLE_DISCONNECT: string = '断开';
 export const TRAY_TITLE_OPEN: string = '打开主窗口';
-export const TRAY_TITLE_QUIT: string = '退出';
 
 // The state vocabulary of the page (NetBirdUiModel.homeStateText) — the ONLY
 // labels this module recognises. Anything else is 未连接 (never a guess).
@@ -168,8 +179,20 @@ export function trayIconVariant(stateText: string): string {
 // Upstream relayoutMenu(): Connect is hidden while a tunnel runs or is being
 // established, Disconnect is hidden when there is nothing to disconnect. The
 // rows are returned as SEPARATED GROUPS (each group renders as its own section),
-// mirroring upstream's separators around Connect/Disconnect, Open and Quit.
+// mirroring upstream's separators around Connect/Disconnect and Open.
 // Level-1 items stay far below the platform's 20-item limit.
+//
+// 0.0.33 — WHY THERE IS NO QUIT ROW OF OURS ANY MORE. The official guide
+// 《应用接入状态栏》 says it in its 开发步骤 6 (可选, 配置状态栏右键菜单内容信息):
+// 「无论是否配置右键菜单，系统均会自动生成一个"退出"的菜单选项，该选项不支持应用自定义。」
+// So the platform ALREADY puts 退出 in this menu, it is mandatory
+// and cannot be removed or customised — and on the device it arrives at
+// EntryAbility.onPrepareToTerminate(), i.e. the unified quit flow
+// (onPrepareToTerminate → requestQuit(QUIT_REASON_SYSTEM), whose terminateSelf()
+// is the app's actual exit; see tray/NetBirdQuitFlow.ets). Our own 退出 row
+// therefore did nothing but render a SECOND 退出 beside the system one, so
+// 0.0.33 drops it: our rows are exactly 连接 / 断开 / 打开主窗口, and the system
+// row is the only quit entry.
 export function trayMenuGroups(stateText: string): TrayMenuSpec[][] {
   const token: string = trayStateToken(stateText);
   const active: boolean = token === TRAY_STATE_CONNECTED || token === TRAY_STATE_TRANSITION;
@@ -184,17 +207,18 @@ export function trayMenuGroups(stateText: string): TrayMenuSpec[][] {
     actions.push(connect);
   }
   const open: TrayMenuSpec = { title: TRAY_TITLE_OPEN, menuCode: TRAY_MENU_OPEN };
-  const quit: TrayMenuSpec = { title: TRAY_TITLE_QUIT, menuCode: TRAY_MENU_QUIT };
-  const groups: TrayMenuSpec[][] = [actions, [open], [quit]];
+  const groups: TrayMenuSpec[][] = [actions, [open]];
   return groups;
 }
 
 // Is this one of OUR menu codes? The 'rightMenuClick' payload crosses a process
 // boundary, so a code outside this closed set is not an action — it is text we
-// will not act on and will not copy into a record.
+// will not act on and will not copy into a record. (The system's own 退出 row
+// never comes through this event at all: it is a platform termination request
+// delivered to EntryAbility.onPrepareToTerminate, not a menuCode.)
 export function trayMenuCodeKnown(menuCode: string): boolean {
   return menuCode === TRAY_MENU_CONNECT || menuCode === TRAY_MENU_DISCONNECT ||
-    menuCode === TRAY_MENU_OPEN || menuCode === TRAY_MENU_QUIT;
+    menuCode === TRAY_MENU_OPEN;
 }
 
 // A stable string for the CURRENT menu, so the service republishes the menu only

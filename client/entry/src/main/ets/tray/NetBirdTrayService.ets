@@ -16,7 +16,13 @@
 // THE UPSTREAM CONTRACT THIS MIRRORS (client/ui/tray.go,
 // tray_click_windows.go): a persistent icon that shows the connection state, a
 // LEFT click that opens the window, a RIGHT-click menu with Connect /
-// Disconnect / Open / Quit, and Quit that disconnects first. Upstream keeps its
+// Disconnect / Open / Quit, and Quit that disconnects first. Upstream's Quit row
+// has no counterpart we may add here — the official guide 《应用接入状态栏》
+// (开发步骤 6) has the SYSTEM generate that row, mandatory and
+// 「不支持应用自定义」, and it is the menu's only quit entry since 0.0.33 (see
+// tray/NetBirdTrayModel.ets trayMenuGroups()); its exit path is
+// EntryAbility.onPrepareToTerminate → the shared quit flow, so it disconnects
+// first exactly like upstream's row. Upstream keeps its
 // window alive with DisableQuitOnLastWindowClosed and a
 // WindowClosing hook; on HarmonyOS the same "X hides, the app keeps running"
 // behaviour is EntryAbility's windowStageClose interceptor, which since 0.0.32
@@ -70,7 +76,9 @@ const TRAY_RESULT_ERROR: string = 'error';
 const TRAY_RESULT_SKIPPED: string = 'skipped';
 
 // The listener the PAGE owns: it receives the menu code of every action row
-// (Connect / Disconnect / Quit). 打开主窗口 never reaches it — the tray opens the
+// (Connect / Disconnect — the only two action rows since 0.0.33 dropped the
+// duplicate quit row; the system's own 退出 is a termination request, not a
+// menuCode). 打开主窗口 never reaches it — the tray opens the
 // window itself, exactly like the left click.
 export type TrayActionListener = (menuCode: string) => void;
 
@@ -259,8 +267,9 @@ export async function startTray(context: common.UIAbilityContext): Promise<boole
 }
 
 // The page's registration: the tray menu's action rows hand their menu code to
-// this listener, which routes it into the SAME connect/stop/quit paths the
-// page's own buttons use.
+// this listener, which routes it into the SAME connect/stop paths the page's own
+// buttons use. (No quit row to route since 0.0.33: the system's 退出 is the
+// termination request EntryAbility already answers with the shared flow.)
 export function setTrayActionListener(listener: TrayActionListener | undefined): void {
   state.listener = listener;
 }
@@ -354,7 +363,7 @@ function onPlatformEvent(platformEvent: TrayPlatformEvent): void {
   const listener: TrayActionListener | undefined = state.listener;
   if (listener === undefined) {
     // The window (and with it the page) is gone: the tray can still show the
-    // state, but the connect/stop/quit actions belong to the page, so they are
+    // state, but the connect/stop actions belong to the page, so they are
     // honestly reported as not delivered instead of being improvised here.
     record(TRAY_STAGE_MENU, TRAY_RESULT_SKIPPED, 'no-page-listener');
     return;

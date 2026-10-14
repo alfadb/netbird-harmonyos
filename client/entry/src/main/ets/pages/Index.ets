@@ -129,21 +129,25 @@ import { keepAliveTaskPresent, refreshKeepAlive, refreshKeepAliveText,
   stopKeepAlive, takeKeepAliveCancels } from '../vpnextensionability/NetBirdKeepAliveService';
 import { KEEP_ALIVE_DEFAULT_ENABLED, loadKeepAliveEnabled,
   saveKeepAliveEnabled } from '../vpnextensionability/NetBirdKeepAliveStore';
-// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）: the status-bar icon's
-// menu actions and the state it shows. 连接/断开 ride exactly the two methods the
-// page's own toggle uses (requestStart / requestStop) — the tray is a second
-// ENTRY POINT, never a second control path; 打开主窗口 is handled inside the tray
-// service (startAbility); 退出 runs the shared quit flow, which disconnects
-// first, exactly like upstream's tray handleQuit(). This page also OWNS the one
-// vpnExtension stop call site (requestStop) and registers it as the quit flow's
-// disconnect step, so the system-generated tray 退出 (which arrives at
-// EntryAbility.onPrepareToTerminate) tears down the VPN the same way. On a phone
-// none of the tray part is ever live: the service answers false once and its
-// state push is a no-op.
-import { TRAY_MENU_CONNECT, TRAY_MENU_DISCONNECT, TRAY_MENU_QUIT }
+// 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）；2026-10-14 去掉重复的
+// 退出行（0.0.33）: the status-bar icon's menu actions and the state it shows.
+// 连接/断开 ride exactly the two methods the page's own toggle uses
+// (requestStart / requestStop) — the tray is a second ENTRY POINT, never a second
+// control path; 打开主窗口 is handled inside the tray service (startAbility).
+// 0.0.33: there is no 退出 row of OURS any more — the official guide
+// 《应用接入状态栏》 (开发步骤 6) makes the system generate that row itself and it
+// 「不支持应用自定义」, so ours only produced a second 退出 beside it. The system row
+// is therefore the only tray quit entry, and it runs the shared quit flow (which
+// disconnects first, exactly like upstream's tray handleQuit()) because this page
+// OWNS the one vpnExtension stop call site (requestStop) and registers it as the
+// flow's disconnect step: the system row arrives at
+// EntryAbility.onPrepareToTerminate and tears down the VPN the same way. On a
+// phone none of the tray part is ever live: the service answers false once and
+// its state push is a no-op.
+import { TRAY_MENU_CONNECT, TRAY_MENU_DISCONNECT }
   from '../tray/NetBirdTrayModel';
 import { setTrayActionListener, updateTrayState } from '../tray/NetBirdTrayService';
-import { QUIT_REASON_SETTINGS, QUIT_REASON_TRAY, requestQuit, setQuitDisconnect }
+import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
   from '../tray/NetBirdQuitFlow';
 
 const DOMAIN: number = 0x2900;
@@ -3610,6 +3614,13 @@ struct Index {
   // The tray menu's action rows, routed into the SAME calls the page's own
   // controls make. The menu codes are the pure module's closed set; anything else
   // is already refused by the tray service, so the page only has to act.
+  //
+  // 0.0.33: the menu has no 退出 row of ours any more. The official guide
+  // 《应用接入状态栏》 (开发步骤 6) makes the system generate that row itself and it
+  // 「不支持应用自定义」, so the only tray quit entry is the system row — which
+  // never arrives here as a menuCode; it is a platform termination request
+  // answered in EntryAbility.onPrepareToTerminate (→ requestQuit(
+  // QUIT_REASON_SYSTEM)). The two rows below are therefore the complete set.
   private onTrayAction(menuCode: string): void {
     hilog.info(DOMAIN, TAG, 'UI_TRAY_ACTION|bundle=%{public}s|menuCode=%{public}s',
       BUNDLE_NAME, menuCode);
@@ -3623,17 +3634,15 @@ struct Index {
       this.requestStop();
       return;
     }
-    if (menuCode === TRAY_MENU_QUIT) {
-      this.beginExplicitQuit(QUIT_REASON_TRAY);
-    }
     // 打开主窗口 never arrives here: the tray service opens the window itself.
   }
 
-  // The EXPLICIT exit — the tray's 退出 row and 设置 → 应用 → 退出应用. See
-  // ../tray/NetBirdQuitFlow.ets for the upstream contract this mirrors
-  // (client/ui/tray.go handleQuit(): disconnect first by default, then quit) and
-  // for the third entry point that shares it (the system-generated tray 退出, via
-  // EntryAbility.onPrepareToTerminate → requestQuit(QUIT_REASON_SYSTEM)).
+  // The EXPLICIT exit — 设置 → 应用 → 退出应用, and (through the ability) the
+  // system-generated tray 退出. See ../tray/NetBirdQuitFlow.ets for the upstream
+  // contract this mirrors (client/ui/tray.go handleQuit(): disconnect first by
+  // default, then quit) and for the entry point that shares it (the system tray
+  // 退出, via EntryAbility.onPrepareToTerminate →
+  // requestQuit(QUIT_REASON_SYSTEM)).
   private beginExplicitQuit(reason: string): void {
     if (this.quitInFlight) {
       // One quit, no second: a repeated click must not issue a second disconnect.
