@@ -120,7 +120,8 @@ import { KeepAliveCancelEvent, KeepAliveDecision, KeepAliveFacts, KeepAlivePolic
   KEEP_ALIVE_REASON_GRACE, KEEP_ALIVE_REASON_LOGOUT, KEEP_ALIVE_REASON_USER_STOP,
   KEEP_ALIVE_REASON_VPN_ACTIVE, KEEP_ALIVE_RESUME_GAP,
   decideKeepAlive, keepAliveInitialState, keepAliveOnCancelled, keepAliveOnLogout,
-  keepAliveOnRefreshed, keepAliveOnStartResolved, keepAliveOnUserConnect,
+  keepAliveOnRefreshed, keepAliveOnRefreshFailed, keepAliveOnStartResolved,
+  keepAliveOnUserConnect,
   keepAliveOnUserStop, keepAliveUserStopRecent, keepAliveWithTask, keepAlivePollGapMs,
   keepAliveResumedAfterGap,
   shouldRefresh } from '../vpnextensionability/NetBirdKeepAlivePolicy';
@@ -1711,34 +1712,41 @@ struct Index {
     }
     // Held and 30 s have passed: republish the live view (the system cancels a
     // DATA_TRANSFER task whose progress is not updated). The throttle lives in
-    // the pure policy; the adapter never decides on its own. 0.0.20: inside the
-    // reconnect grace there may be NO document to report (the tunnel is down), so
-    // the body is the policy's "正在重新连接…" instead of the frozen last traffic
-    // snapshot — a live view that never changes for minutes would also invite
-    // SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE.
+    // the pure policy; the adapter never decides on its own. 0.0.34: only a
+    // dataTransfer task HAS a live view — on taskKeeping the adapter settles the
+    // attempt without publishing, and a publish the platform refuses advances the
+    // throttle with a bounded backoff instead of being retried every 2 s. 0.0.20:
+    // inside the reconnect grace there may be NO document to report (the tunnel is
+    // down), so the body is the policy's "正在重新连接…" instead of the frozen last
+    // traffic snapshot — a live view that never changes for minutes would also
+    // invite SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE.
     if (shouldRefresh(this.bgKeepAliveState, nowMs)) {
       const host: common.Context | undefined = this.getUIContext().getHostContext();
       if (host === undefined || host === null) {
         return;
       }
+      // 0.0.34: ONE settle exit for both outcomes of a refresh attempt. A publish
+      // the platform ACCEPTED restarts the 30 s throttle; one it REFUSED (or one
+      // the adapter could not attempt at all) advances it with the policy's
+      // bounded backoff — the 0.0.29 defect was that only the success branch
+      // touched the state, so a refused publish was retried on every 2 s tick.
+      const settle = (ok: boolean): void => {
+        this.bgKeepAliveState = ok
+          ? keepAliveOnRefreshed(this.bgKeepAliveState, Date.now())
+          : keepAliveOnRefreshFailed(this.bgKeepAliveState, Date.now());
+      };
       if (status !== null && vpnActiveState(status.state)) {
         refreshKeepAlive(host as common.UIAbilityContext, keepAliveStatusOf(status), revision,
-          KEEP_ALIVE_REASON_VPN_ACTIVE).then((ok: boolean): void => {
-          if (ok) {
-            this.bgKeepAliveState = keepAliveOnRefreshed(this.bgKeepAliveState, Date.now());
-          }
-        }).catch((error: Error): void => {
+          KEEP_ALIVE_REASON_VPN_ACTIVE).then(settle).catch((error: Error): void => {
           this.logKeepAliveFailure(error);
+          settle(false);
         });
       } else if (decision.reason === KEEP_ALIVE_REASON_GRACE) {
         refreshKeepAliveText(host as common.UIAbilityContext,
           KEEP_ALIVE_NOTIFICATION_RECONNECTING, revision,
-          KEEP_ALIVE_REASON_GRACE).then((ok: boolean): void => {
-          if (ok) {
-            this.bgKeepAliveState = keepAliveOnRefreshed(this.bgKeepAliveState, Date.now());
-          }
-        }).catch((error: Error): void => {
+          KEEP_ALIVE_REASON_GRACE).then(settle).catch((error: Error): void => {
           this.logKeepAliveFailure(error);
+          settle(false);
         });
       }
     }

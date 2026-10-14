@@ -104,6 +104,13 @@
 //   backoff             < the backoff the last verdict earned
 
 export const KEEP_ALIVE_REFRESH_MS: number = 30000;
+// 0.0.34（被拒的刷新也要退避）: a REFUSED live-view publish used to leave the
+// throttle exactly where it was, so the page's 2 s tick re-published for ever. The
+// PC capture shows the notification service rejecting the very same publish every
+// 2.0 s (13 ANS lines in 24 s, ≈1800 rejected publishes per hour). A refusal now
+// earns the SAME bounded exponential backoff as a platform verdict —
+// keepAliveBackoffMs below: 30 s / 60 s / 120 s / 240 s, capped at 5 min — and the
+// next ACCEPTED publish restarts the plain 30 s throttle and clears the count.
 // 30 s x 1, 2, 4, 8 ... capped at 5 min. Five verdicts end the session's budget
 // (30 s / 60 s / 120 s / 240 s are the ones that can actually be served).
 export const KEEP_ALIVE_RETRY_BASE_MS: number = 30000;
@@ -199,6 +206,22 @@ export function isKeepAliveMode(mode: string): boolean {
     normalised === KEEP_ALIVE_MODE_DATA_TRANSFER.toLowerCase();
 }
 
+// 0.0.34（实况窗只属于 dataTransfer）: whether a held task of this type OWES the
+// platform the live-view (实况窗) publish. The answer is decided by the platform,
+// not by us: the system-live-view content type may only UPDATE a live view that
+// the system proxy created for a DATA_TRANSFER task (the API 26
+// notificationManager declaration: "a third-party application cannot directly
+// create a notification of this type"), and TASK_KEEPING carries no progress
+// obligation and gets no proxy live view at all. That is the whole of the 0.0.29
+// PC regression: the mode became taskKeeping while the publish stayed a system
+// live view, so every publish was refused (202 / ANS 110002).
+// Only taskKeeping is answered `false`; an unknown or absent mode keeps the
+// historical behaviour (publish), so a phone can never lose its live view over a
+// field the platform did not deliver.
+export function keepAlivePublishesLiveView(mode: string): boolean {
+  return mode.toLowerCase() !== KEEP_ALIVE_MODE_TASK_KEEPING.toLowerCase();
+}
+
 
 // 0.0.21（挂起长窗口后的恢复复查）：两拍之间隔了这么久，只可能意味着这个进程有一段
 // 时间根本没在跑——平台可以挂起整个 UI 进程，0.0.20 的真机数据里这一次是 7362 s（期间
@@ -264,6 +287,13 @@ export interface KeepAlivePolicyState {
   nextRetryAtMs: number;
   lastRefreshMs: number;
   revision: number;
+  // 0.0.34: consecutive live-view publishes the platform REFUSED since the last
+  // accepted one (0 = none), and the moment the next attempt is allowed. While
+  // nextRefreshAtMs is 0 the plain KEEP_ALIVE_REFRESH_MS throttle above governs;
+  // after a refusal it carries the exponential bound instead, which is what keeps
+  // a rejected publish from being retried on every 2 s tick.
+  refreshFailures: number;
+  nextRefreshAtMs: number;
 }
 
 // Everything the decision is allowed to depend on. `nowMs` is passed in (never
@@ -330,13 +360,14 @@ export interface KeepAliveCancelEvent {
 }
 
 export function keepAliveInitialState(): KeepAlivePolicyState {
-  return keepAliveState(false, false, false, false, 0, 0, 0, 0);
+  return keepAliveState(false, false, false, false, 0, 0, 0, 0, 0, 0);
 }
 
 function keepAliveState(taskPresent: boolean, startInFlight: boolean,
   suppressedForSession: boolean, sessionStopped: boolean, cancelCount: number,
   nextRetryAtMs: number, lastRefreshMs: number,
-  revision: number): KeepAlivePolicyState {
+  revision: number, refreshFailures: number,
+  nextRefreshAtMs: number): KeepAlivePolicyState {
   const state: KeepAlivePolicyState = {
     taskPresent: taskPresent,
     startInFlight: startInFlight,
@@ -345,7 +376,9 @@ function keepAliveState(taskPresent: boolean, startInFlight: boolean,
     cancelCount: cancelCount,
     nextRetryAtMs: nextRetryAtMs,
     lastRefreshMs: lastRefreshMs,
-    revision: revision
+    revision: revision,
+    refreshFailures: refreshFailures,
+    nextRefreshAtMs: nextRefreshAtMs
   };
   return state;
 }
@@ -355,7 +388,8 @@ function keepAliveState(taskPresent: boolean, startInFlight: boolean,
 function keepAliveCopy(state: KeepAlivePolicyState): KeepAlivePolicyState {
   return keepAliveState(state.taskPresent, state.startInFlight,
     state.suppressedForSession, state.sessionStopped, state.cancelCount,
-    state.nextRetryAtMs, state.lastRefreshMs, state.revision);
+    state.nextRetryAtMs, state.lastRefreshMs, state.revision,
+    state.refreshFailures, state.nextRefreshAtMs);
 }
 
 function keepAliveDecision(action: string, reason: string,
@@ -509,10 +543,13 @@ export function keepAliveOnStartResolved(state: KeepAlivePolicyState, revision: 
   next.startInFlight = false;
   if (ok) {
     // The adapter publishes one live-view update immediately after the task is
-    // created, so the refresh throttle starts now.
+    // created, so the refresh throttle starts now — and a brand-new task starts
+    // with no refused-publish history.
     next.taskPresent = true;
     next.lastRefreshMs = nowMs;
     next.nextRetryAtMs = 0;
+    next.refreshFailures = 0;
+    next.nextRefreshAtMs = 0;
     return next;
   }
   // A creation that failed is a verdict like a cancellation: it earns the same
@@ -523,11 +560,29 @@ export function keepAliveOnStartResolved(state: KeepAlivePolicyState, revision: 
   return next;
 }
 
-// One live-view update was actually published: restart the 30 s throttle.
+// One live-view update was actually published: restart the 30 s throttle and
+// clear whatever refusal history had accumulated.
 export function keepAliveOnRefreshed(state: KeepAlivePolicyState,
   nowMs: number): KeepAlivePolicyState {
   const next: KeepAlivePolicyState = keepAliveCopy(state);
   next.lastRefreshMs = nowMs;
+  next.nextRefreshAtMs = nowMs + KEEP_ALIVE_REFRESH_MS;
+  next.refreshFailures = 0;
+  return next;
+}
+
+// One live-view publish the platform REFUSED. The 0.0.29 defect lived exactly
+// here: nothing advanced the throttle, so the page's 2 s tick asked again and
+// again (≈1800 rejected publishes per hour on the PC). A refusal now advances it
+// with the SAME bounded exponential backoff a platform verdict earns
+// (30 s / 60 s / 120 s / 240 s, capped at 5 min); it is deliberately NOT a
+// session verdict — a transient refusal (the phone sees one at each
+// suspend→resume boundary) must not spend the request budget.
+export function keepAliveOnRefreshFailed(state: KeepAlivePolicyState,
+  nowMs: number): KeepAlivePolicyState {
+  const next: KeepAlivePolicyState = keepAliveCopy(state);
+  next.refreshFailures = state.refreshFailures + 1;
+  next.nextRefreshAtMs = nowMs + keepAliveBackoffMs(next.refreshFailures);
   return next;
 }
 
@@ -548,6 +603,11 @@ export function shouldRefresh(state: KeepAlivePolicyState, nowMs: number): boole
   if (!state.taskPresent) {
     return false;
   }
+  // A refused publish put its own bound in nextRefreshAtMs (exponential, capped);
+  // until it is reached there is nothing to retry.
+  if (state.nextRefreshAtMs > 0) {
+    return nowMs >= state.nextRefreshAtMs;
+  }
   return state.lastRefreshMs <= 0 || nowMs - state.lastRefreshMs >= KEEP_ALIVE_REFRESH_MS;
 }
 
@@ -561,6 +621,8 @@ export function keepAliveOnUserConnect(state: KeepAlivePolicyState): KeepAlivePo
   next.suppressedForSession = false;
   next.cancelCount = 0;
   next.nextRetryAtMs = 0;
+  next.refreshFailures = 0;
+  next.nextRefreshAtMs = 0;
   next.revision = state.revision + 1;
   return next;
 }
@@ -575,6 +637,8 @@ export function keepAliveOnUserStop(state: KeepAlivePolicyState): KeepAlivePolic
   next.suppressedForSession = false;
   next.cancelCount = 0;
   next.nextRetryAtMs = 0;
+  next.refreshFailures = 0;
+  next.nextRefreshAtMs = 0;
   next.revision = state.revision + 1;
   return next;
 }
@@ -590,6 +654,8 @@ export function keepAliveOnLogout(state: KeepAlivePolicyState): KeepAlivePolicyS
   next.cancelCount = 0;
   next.nextRetryAtMs = 0;
   next.lastRefreshMs = 0;
+  next.refreshFailures = 0;
+  next.nextRefreshAtMs = 0;
   next.revision = state.revision + 1;
   return next;
 }

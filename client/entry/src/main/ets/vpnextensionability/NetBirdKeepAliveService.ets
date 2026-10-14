@@ -27,6 +27,20 @@
 // task is started with the array overload and every update is a
 // notificationManager.publish() with that same id.
 //
+// 0.0.34 (THE MODE DECIDES THE CONTENT): that live-view publish belongs to
+// DATA_TRANSFER ONLY. A third-party app may UPDATE the system live view the
+// platform proxy created for such a task, but it can never CREATE one, and a
+// taskKeeping task (the 2in1 type since 0.0.29) gets no proxy live view at all.
+// 0.0.29→0.0.33 published one anyway, so the notification service refused every
+// publish on the PC (`CheckLocalLiveViewAllowed is false`, ANS 110002 → ArkTS
+// 202) and the page's 2 s tick retried it for ever. publishLiveView() therefore
+// asks the pure policy (keepAlivePublishesLiveView) about the mode of the task
+// IN HAND and publishes only where the platform expects it; in taskKeeping mode
+// the plain notification startBackgroundRunning already put up is the whole
+// notification surface. UI_BG_TASK_STARTED also logs the platform's own
+// slotType/contentType for the task, which is the field that would settle
+// whether a taskKeeping task reports a plain notification (see the 202 report).
+//
 // Adapter's answer — 0.0.20 adds refreshKeepAliveText(): the page republishes the
 // live view with a caller-supplied body while the tunnel is inactive but the
 // reconnect grace still holds the task (the policy's "正在重新连接…").
@@ -65,8 +79,9 @@ import hilog from '@ohos.hilog';
 import { event } from './NetBirdDiagnostics';
 import type { DiagFields } from './NetBirdDiagnostics';
 import { KEEP_ALIVE_MODE_DATA_TRANSFER, KEEP_ALIVE_NOTIFICATION_TITLE,
-  KEEP_ALIVE_RESUME_ACTIVE, isKeepAliveMode, keepAliveModeFor,
-  keepAliveNotificationText, sanitizeSuspendMessage } from './NetBirdKeepAlivePolicy';
+  KEEP_ALIVE_RESUME_ACTIVE, isKeepAliveMode, keepAliveBackoffMs, keepAliveModeFor,
+  keepAliveNotificationText, keepAlivePublishesLiveView, sanitizeSuspendMessage }
+  from './NetBirdKeepAlivePolicy';
 import type { KeepAliveCancelEvent, KeepAliveStatus } from './NetBirdKeepAlivePolicy';
 
 const DOMAIN: number = 0x2900;
@@ -148,6 +163,9 @@ interface KeepAliveServiceState {
   hasTask: boolean;
   notificationId: number;
   continuousTaskId: number;
+  // 0.0.34: the background mode the held task really carries ('' = no task). It is
+  // what decides whether the system live view may be published at all.
+  taskMode: string;
   startInFlight: boolean;
   // Our own stop is in flight: the platform's cancel event for it is not a
   // verdict and must not be buffered for the policy.
@@ -160,6 +178,13 @@ interface KeepAliveServiceState {
   registered: boolean;
   // "Same error, one record per process": the 2 s tick must not repeat itself.
   reported: Set<string>;
+  // 0.0.34: DIAGNOSTICS ONLY — the consecutive refused publishes and the backoff
+  // value last logged. The throttle itself belongs to the pure policy (the page
+  // applies its transitions); these two exist so a failing publish writes ONE
+  // line per backoff-level change instead of one per attempt (the 0.0.29 storm
+  // was ~1800 lines per hour).
+  refreshFailures: number;
+  refreshBackoffLoggedMs: number;
 }
 
 const service: KeepAliveServiceState = {
@@ -167,13 +192,16 @@ const service: KeepAliveServiceState = {
   hasTask: false,
   notificationId: -1,
   continuousTaskId: -1,
+  taskMode: '',
   startInFlight: false,
   stopping: false,
   currentRevision: -1,
   cancels: [],
   cancelCount: 0,
   registered: false,
-  reported: new Set<string>()
+  reported: new Set<string>(),
+  refreshFailures: 0,
+  refreshBackoffLoggedMs: 0
 };
 
 function failureCode(error: Error): number {
@@ -229,6 +257,9 @@ function onContinuousTaskCancel(info: backgroundTaskManager.ContinuousTaskCancel
   service.hasTask = false;
   service.notificationId = -1;
   service.continuousTaskId = -1;
+  service.taskMode = '';
+  service.refreshFailures = 0;
+  service.refreshBackoffLoggedMs = 0;
   service.startInFlight = false;
   service.cancelCount = service.cancelCount + 1;
   // The meaning of this event belongs to the pure policy: buffer it and let the
@@ -417,6 +448,10 @@ async function claimExistingTask(context: common.UIAbilityContext): Promise<bool
       service.hasTask = true;
       service.notificationId = task.notificationId;
       service.continuousTaskId = task.continuousTaskId;
+      // 0.0.34: an ADOPTED task's own type decides the notification surface too —
+      // a taskKeeping task kept across a process restart must not be answered with
+      // a system live view either.
+      service.taskMode = taskMode(task);
       hilog.info(DOMAIN, TAG,
         'UI_BG_TASK_CLAIMED|id=%{public}d|notification=%{public}d|mode=%{public}s',
         task.continuousTaskId, task.notificationId, taskMode(task));
@@ -477,13 +512,28 @@ function isKeepAliveTask(task: backgroundTaskManager.ContinuousTaskInfo): boolea
   return false;
 }
 
-// Publish ONE live-view update with the task's own notification id. Returns true
-// only when the platform accepted it. `body` is built by the CALLER: the page's
-// tick passes the tunnel's own traffic (keepAliveNotificationText over the
-// document it already read) or, inside the 0.0.20 reconnect grace, the policy's
-// "正在重新连接…" — this adapter owns no text of its own.
+// Publish ONE live-view update with the task's own notification id. `body` is
+// built by the CALLER: the page's tick passes the tunnel's own traffic
+// (keepAliveNotificationText over the document it already read) or, inside the
+// 0.0.20 reconnect grace, the policy's "正在重新连接…" — this adapter owns no text
+// of its own.
+//
+// The answer is "is this refresh SETTLED?" — true when the platform accepted the
+// publish OR when this task's mode owes no live view at all (then the caller's
+// throttle is restarted exactly as after a success, because there is nothing left
+// to do); false only when the publish was attempted and REFUSED, which is the one
+// outcome the caller must answer with a backoff.
 async function publishLiveView(context: common.UIAbilityContext, body: string,
   reason: string): Promise<boolean> {
+  // 0.0.34: the mode of the task IN HAND decides whether there is anything to
+  // publish. On taskKeeping (2in1) the system live view cannot exist, so asking
+  // the platform for one is a guaranteed refusal — recorded once per process, and
+  // settled, never a failure to back off from.
+  if (!keepAlivePublishesLiveView(service.taskMode)) {
+    recordTask(KEEP_ALIVE_STAGE_REFRESH, KEEP_ALIVE_RESULT_SKIPPED,
+      `mode-${service.taskMode}`, service.cancelCount);
+    return true;
+  }
   if (service.notificationId < 0) {
     recordTask(KEEP_ALIVE_STAGE_REFRESH, KEEP_ALIVE_RESULT_SKIPPED, 'no-notification-id', 0);
     return false;
@@ -515,11 +565,26 @@ async function publishLiveView(context: common.UIAbilityContext, body: string,
   };
   try {
     await notificationManager.publish(request);
+    // A settled publish clears the refusal history (the diagnostic level line
+    // starts over with it).
+    service.refreshFailures = 0;
+    service.refreshBackoffLoggedMs = 0;
     recordTask(KEEP_ALIVE_STAGE_REFRESH, KEEP_ALIVE_RESULT_OK, reason, service.cancelCount);
     return true;
   } catch (error) {
-    recordTask(KEEP_ALIVE_STAGE_REFRESH, KEEP_ALIVE_RESULT_ERROR, failureToken(error as Error),
-      service.cancelCount);
+    const token: string = failureToken(error as Error);
+    service.refreshFailures = service.refreshFailures + 1;
+    // ONE line per backoff-LEVEL change, never one per attempt: the level is the
+    // keepAliveBackoffMs value, so a long refusal writes at most five lines
+    // (30 s / 60 s / 120 s / 240 s / 5 min cap) until a publish is accepted.
+    const backoffMs: number = keepAliveBackoffMs(service.refreshFailures);
+    if (backoffMs !== service.refreshBackoffLoggedMs) {
+      service.refreshBackoffLoggedMs = backoffMs;
+      hilog.warn(DOMAIN, TAG,
+        'UI_BG_TASK_REFRESH_BACKOFF|reason=%{public}s|failures=%{public}d|backoffMs=%{public}d',
+        token, service.refreshFailures, backoffMs);
+    }
+    recordTask(KEEP_ALIVE_STAGE_REFRESH, KEEP_ALIVE_RESULT_ERROR, token, service.cancelCount);
     return false;
   }
 }
@@ -569,6 +634,7 @@ export async function startKeepAlive(context: common.UIAbilityContext, revision:
     service.hasTask = true;
     service.notificationId = task.notificationId;
     service.continuousTaskId = task.continuousTaskId === undefined ? -1 : task.continuousTaskId;
+    service.taskMode = mode;
     service.startInFlight = false;
     if (startedRevision !== service.currentRevision) {
       // The session changed while the platform was creating the task: withdraw
@@ -578,8 +644,16 @@ export async function startKeepAlive(context: common.UIAbilityContext, revision:
       return false;
     }
     recordTask(KEEP_ALIVE_STAGE_START, KEEP_ALIVE_RESULT_OK, reason, service.cancelCount);
-    hilog.info(DOMAIN, TAG, 'UI_BG_TASK_STARTED|id=%{public}d|notification=%{public}d|mode=%{public}s',
-      service.continuousTaskId, service.notificationId, mode);
+    // 0.0.34: the platform's OWN description of the notification it attached to
+    // this task. `slotType`/`contentType` are what a taskKeeping task reports —
+    // the field that settles whether a plain-content update is possible for it
+    // (the 202 report's open question). -1 = the platform delivered none.
+    const slotType: number = typeof task.slotType === 'number' ? task.slotType : -1;
+    const contentType: number = typeof task.contentType === 'number' ? task.contentType : -1;
+    hilog.info(DOMAIN, TAG,
+      'UI_BG_TASK_STARTED|id=%{public}d|notification=%{public}d|mode=%{public}s' +
+      '|slotType=%{public}d|contentType=%{public}d',
+      service.continuousTaskId, service.notificationId, mode, slotType, contentType);
     // The task exists from here on: a failed live-view update is its own record
     // and never turns this start into a failure.
     await publishLiveView(context, keepAliveNotificationText(status), reason);
@@ -633,6 +707,9 @@ async function releaseTask(context: common.UIAbilityContext): Promise<boolean> {
     service.hasTask = false;
     service.notificationId = -1;
     service.continuousTaskId = -1;
+    service.taskMode = '';
+    service.refreshFailures = 0;
+    service.refreshBackoffLoggedMs = 0;
     return true;
   } catch (error) {
     // The task may already be gone (a system cancellation we have not been told

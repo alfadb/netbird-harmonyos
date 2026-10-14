@@ -24,6 +24,13 @@
 //      tunnel went inactive and the reconnect's gave-up flag as facts, and the
 //      grace republishes the live view with the policy's "正在重新连接…" through
 //      refreshKeepAliveText() (the adapter still owns no text).
+//   0.0.34 adds the third: the notification surface is MODE-AWARE (only a
+//      dataTransfer task has a system live view to update, so a taskKeeping task
+//      is settled without calling publish at all) and a REFUSED publish advances
+//      the throttle with a bounded exponential backoff (30 s / 60 s / 120 s /
+//      240 s, capped at 5 min) instead of being retried on every 2 s tick — the
+//      0.0.29 PC storm. The adapter logs the platform's own slotType/contentType
+//      in UI_BG_TASK_STARTED and ONE backoff line per level change.
 //
 // Run: node client/entry/selfcheck/run-keep-alive.mts
 // Exit 0 = all assertions pass.
@@ -480,6 +487,69 @@ try {
     p.KEEP_ALIVE_REFRESH_MS === 30000 && p.KEEP_ALIVE_MAX_ATTEMPTS === 5 &&
     p.KEEP_ALIVE_RETRY_MAX_MS === 300000 && p.KEEP_ALIVE_RETRY_BASE_MS === 30000);
 
+  // -- 0.0.34: the mode decides whether a live view exists at all ---------------
+  // Only a DATA_TRANSFER task gets the system-proxy live view a third-party app
+  // may update; taskKeeping (the 2in1 type since 0.0.29) has none, so publishing
+  // one is a guaranteed refusal — the 202 storm on the PC.
+  check('only a dataTransfer task owes the platform a system live view',
+    p.keepAlivePublishesLiveView(p.KEEP_ALIVE_MODE_DATA_TRANSFER) === true &&
+    p.keepAlivePublishesLiveView(p.KEEP_ALIVE_MODE_TASK_KEEPING) === false &&
+    p.keepAlivePublishesLiveView('taskKeeping') === false &&
+    p.keepAlivePublishesLiveView('DATATRANSFER') === true,
+    JSON.stringify([p.KEEP_ALIVE_MODE_DATA_TRANSFER, p.KEEP_ALIVE_MODE_TASK_KEEPING]));
+  check('a mode the platform did not deliver keeps the historical behaviour (publish)',
+    p.keepAlivePublishesLiveView('') === true &&
+    p.keepAlivePublishesLiveView('unknown') === true);
+
+  // -- 0.0.34: a REFUSED publish advances the throttle --------------------------
+  // The 0.0.29 defect: `keepAliveOnRefreshed` was the only transition the failure
+  // path could reach, so the throttle never moved and the page's 2 s tick
+  // re-published for ever (PC capture: 13 ANS refusals at exactly 2.0 s intervals).
+  const refuseAt = T0 + 1200 + 2000;
+  const refused1 = p.keepAliveOnRefreshFailed(okState, refuseAt);
+  check('a refused publish is NOT retried on the next 2 s tick',
+    p.shouldRefresh(refused1, refuseAt + 2000) === false &&
+    p.shouldRefresh(refused1, refuseAt + 29999) === false,
+    JSON.stringify(refused1));
+  check('... the first refusal earns the documented 30 s',
+    refused1.refreshFailures === 1 && refused1.nextRefreshAtMs === refuseAt + 30000 &&
+    p.shouldRefresh(refused1, refuseAt + 30000) === true);
+  check('... and advances the throttle, not the last-success stamp',
+    refused1.lastRefreshMs === okState.lastRefreshMs);
+  check('... and is a REFRESH verdict, not a session one (the request budget is untouched)',
+    refused1.cancelCount === okState.cancelCount && refused1.nextRetryAtMs === 0 &&
+    refused1.taskPresent === true);
+  const refused2 = p.keepAliveOnRefreshFailed(refused1, refuseAt + 30000);
+  const refused3 = p.keepAliveOnRefreshFailed(refused2, refuseAt + 30000 + 60000);
+  const refused4 = p.keepAliveOnRefreshFailed(refused3, refuseAt + 30000 + 60000 + 120000);
+  const refused5 = p.keepAliveOnRefreshFailed(refused4, refuseAt + 30000 + 60000 + 120000 + 240000);
+  const refused6 = p.keepAliveOnRefreshFailed(refused5, refuseAt + 1000000);
+  check('the refusal backoff doubles and is capped at the 5 min bound',
+    refused2.nextRefreshAtMs - (refuseAt + 30000) === 60000 &&
+    refused3.nextRefreshAtMs - (refuseAt + 30000 + 60000) === 120000 &&
+    refused4.nextRefreshAtMs - (refuseAt + 30000 + 60000 + 120000) === 240000 &&
+    refused5.nextRefreshAtMs - (refuseAt + 30000 + 60000 + 120000 + 240000) === 300000 &&
+    refused6.nextRefreshAtMs - (refuseAt + 1000000) === 300000 &&
+    p.shouldRefresh(refused5, refused5.nextRefreshAtMs - 1) === false &&
+    p.shouldRefresh(refused5, refused5.nextRefreshAtMs) === true,
+    JSON.stringify([refused2, refused3, refused4, refused5, refused6].map(
+      (s: any): number => s.nextRefreshAtMs)));
+  const recovered = p.keepAliveOnRefreshed(refused3, refuseAt + 120000);
+  check('a successful refresh still advances the plain 30 s throttle and clears the count',
+    recovered.refreshFailures === 0 &&
+    recovered.nextRefreshAtMs === refuseAt + 120000 + 30000 &&
+    recovered.lastRefreshMs === refuseAt + 120000 &&
+    p.shouldRefresh(recovered, refuseAt + 120000 + 29999) === false &&
+    p.shouldRefresh(recovered, refuseAt + 120000 + 30000) === true);
+  check('... and the refusal history is a property of the task, cleared with the session',
+    p.keepAliveOnStartResolved(started, started.revision, true, T0 + 1200).refreshFailures === 0 &&
+    p.keepAliveOnStartResolved(started, started.revision, true, T0 + 1200).nextRefreshAtMs === 0 &&
+    p.keepAliveOnUserConnect(refused3).refreshFailures === 0 &&
+    p.keepAliveOnUserConnect(refused3).nextRefreshAtMs === 0 &&
+    p.keepAliveOnUserStop(refused3).refreshFailures === 0 &&
+    p.keepAliveOnLogout(refused3).refreshFailures === 0 &&
+    p.keepAliveOnLogout(refused3).nextRefreshAtMs === 0);
+
   // -- the live-view text -----------------------------------------------------
   check('the live view carries the tunnel\'s own traffic, never a progress percentage',
     p.keepAliveNotificationText({ onlinePeers: 2, peerCount: 6, txBytes: 1258291,
@@ -661,7 +731,14 @@ check('the adapter registers all three long-task callbacks and unregisters them'
 check('the adapter buffers cancels for the pure policy instead of deciding itself',
   SERVICE_TEXT.indexOf('takeKeepAliveCancels') >= 0 &&
   SERVICE_TEXT.indexOf('service.cancels.push(') >= 0 &&
-  SERVICE_TEXT.indexOf('sessionStopped') < 0 && SERVICE_TEXT.indexOf('backoff') < 0);
+  SERVICE_TEXT.indexOf('sessionStopped') < 0 &&
+  // 0.0.34: the adapter still owns NO transition and NO next-attempt moment —
+  // `keepAliveBackoffMs` appears only as the diagnostic label of a refused
+  // publish (UI_BG_TASK_REFRESH_BACKOFF), never as a decision.
+  SERVICE_TEXT.indexOf('nextRetryAtMs') < 0 &&
+  SERVICE_TEXT.indexOf('nextRefreshAtMs') < 0 &&
+  SERVICE_TEXT.indexOf('keepAliveOnRefreshed') < 0 &&
+  SERVICE_TEXT.indexOf('keepAliveOnRefreshFailed') < 0);
 check('the adapter is fail-soft: a refused creation returns false, never throws',
   /startKeepAlive[\s\S]*?catch \(error\)[\s\S]*?return false;/.test(SERVICE_TEXT));
 check('the ONE record name and its closed field set',
@@ -803,6 +880,35 @@ check('the live-view body comes from the SAME document, never a second read',
 check('the refresh is throttled by the pure policy, not by the adapter',
   syncBody.indexOf('shouldRefresh(this.bgKeepAliveState, nowMs)') >= 0 &&
   syncBody.indexOf('keepAliveOnRefreshed(') >= 0);
+// 0.0.34: the notification surface is MODE-AWARE (only a dataTransfer task has a
+// system live view to update) and a REFUSED publish must move the throttle — the
+// single `settle` exit is what makes the failure branch reach the policy too.
+check('the adapter only publishes a system live view for a mode that has one',
+  SERVICE_TEXT.indexOf('keepAlivePublishesLiveView(service.taskMode)') >= 0 &&
+  SERVICE_TEXT.indexOf("`mode-${service.taskMode}`") >= 0 &&
+  POLICY_TEXT.indexOf('export function keepAlivePublishesLiveView(mode: string): boolean {') >= 0);
+check('the adapter records the mode of the task it ADOPTED too',
+  sliceFrom(SERVICE_TEXT, 'async function claimExistingTask(',
+    'function requestedBackgroundMode(').indexOf('service.taskMode = taskMode(task);') >= 0);
+check('the start line carries the platform\'s own slotType/contentType (-1 if absent)',
+  SERVICE_TEXT.indexOf("const slotType: number = typeof task.slotType === 'number'") >= 0 &&
+  SERVICE_TEXT.indexOf("const contentType: number = typeof task.contentType === 'number'") >= 0 &&
+  SERVICE_TEXT.indexOf('slotType=%{public}d|contentType=%{public}d') >= 0);
+check('a refused publish writes ONE line per backoff level, never one per attempt',
+  SERVICE_TEXT.indexOf('UI_BG_TASK_REFRESH_BACKOFF') >= 0 &&
+  SERVICE_TEXT.indexOf('if (backoffMs !== service.refreshBackoffLoggedMs) {') >= 0 &&
+  SERVICE_TEXT.indexOf('keepAliveBackoffMs(service.refreshFailures)') >= 0);
+check('the page advances the throttle on BOTH outcomes of a refresh attempt',
+  syncBody.indexOf('keepAliveOnRefreshFailed(') >= 0 &&
+  syncBody.indexOf('settle(false);') >= 0 && syncBody.indexOf('.then(settle)') >= 0 &&
+  PAGE.indexOf('keepAliveOnRefreshFailed,') >= 0);
+const publishBody = sliceFrom(SERVICE_TEXT, 'async function publishLiveView(',
+  '// One request for the task.');
+check('a mode with no live view is SETTLED without ever calling publish',
+  publishBody.indexOf('if (!keepAlivePublishesLiveView(service.taskMode)) {') >= 0 &&
+  publishBody.indexOf("`mode-${service.taskMode}`") >= 0 &&
+  publishBody.indexOf('return true;') < publishBody.indexOf('notificationManager.publish(request)'),
+  publishBody.slice(0, 500));
 // 0.0.20: the grace needs two facts from OTHER state machines — when the tunnel
 // went inactive (the page's own clock) and whether the automatic reconnect has
 // spent its budget — and it republishes the live view with the policy's
@@ -950,7 +1056,9 @@ try {
     records: [], hilog: [], btm: {}, btmTasks: [], btmStopped: 0,
     btmStartResult: { notificationId: 5, continuousTaskId: 3 }, published: [],
     // 0.0.29: the borrowed type follows the device, so the test drives it.
-    deviceType: '2in1', btmRequestedModes: []
+    deviceType: '2in1', btmRequestedModes: [],
+    // 0.0.34: the platform's refusal of a publish (202 / ANS 110002 on the PC).
+    publishError: null
   };
   const svc = await import(
     pathToFileURL(join(SERVICE_FIXTURES, 'NetBirdKeepAliveService.ts')).href) as
@@ -1144,6 +1252,142 @@ try {
         JSON.stringify(ka.btmRequestedModes) === JSON.stringify(['taskKeeping']);
     })(),
     JSON.stringify(ka.btmRequestedModes));
+
+  // ---- 0.0.34: the notification surface follows the MODE ---------------------
+  //
+  // The 202 regression: on 2in1 the task became taskKeeping while the publish
+  // stayed a system live view, which a third-party app may only UPDATE — so the
+  // notification service refused every publish (`CheckLocalLiveViewAllowed is
+  // false`, ANS 110002 → ArkTS 202) and the 2 s tick retried it. What is asserted
+  // here is the SHIPPED request path: which requests actually reach
+  // notificationManager.publish (the hook records them) and what the adapter logs.
+  const kaAll = globals['__NB_KA'] as {
+    published: Record<string, any>[];
+    publishError: unknown;
+    btmStartResult: Record<string, unknown>;
+    hilog: { level: string; format: string; args: unknown[] }[];
+    records: { name: string; fields: Record<string, unknown> }[];
+  };
+  const refreshIn = async (mod: Record<string, unknown>): Promise<boolean> => {
+    const refresh = mod['refreshKeepAlive'] as (context: object, status: object,
+      revision: number, reason: string) => Promise<boolean>;
+    return await refresh({ filesDir: SERVICE_FIXTURES },
+      { onlinePeers: 3, peerCount: 4, txBytes: 1024, rxBytes: 2048 }, 0, 'vpn-active');
+  };
+  const startedLine = (): { format: string; args: unknown[] } | undefined =>
+    kaAll.hilog.filter((line): boolean => line.format.indexOf('UI_BG_TASK_STARTED') >= 0)
+      .pop();
+
+  check('a taskKeeping task (2in1) gets NO live-view publish at all, and says so once',
+    await (async (): Promise<boolean> => {
+      kaAll.publishError = null;
+      kaAll.published = [];
+      ka.deviceType = '2in1';
+      ka.btmTasks = [];
+      ka.btmStartResult = { notificationId: 5, continuousTaskId: 3, slotType: 2, contentType: 0 };
+      const mod = await freshService('pc34');
+      const started: boolean = await startIn(mod);
+      const before: number = kaAll.published.length;
+      const refreshed: boolean = await refreshIn(mod);
+      return started === true && before === 0 && kaAll.published.length === 0 &&
+        refreshed === true &&
+        ka.records.some((record): boolean => record.name === 'ui_bg_task' &&
+          record.fields['stage'] === 'refresh' &&
+          record.fields['result'] === 'skipped' &&
+          record.fields['reason'] === 'mode-taskKeeping');
+    })(),
+    JSON.stringify([kaAll.published.length, ka.records.slice(-3)]));
+  check('... and UI_BG_TASK_STARTED logs the platform\'s own slotType/contentType',
+    ((): boolean => {
+      const line = startedLine();
+      return line !== undefined && line.format.indexOf('slotType=') >= 0 &&
+        line.format.indexOf('contentType=') >= 0 && line.args[3] === 2 && line.args[4] === 0;
+    })(),
+    JSON.stringify(startedLine()));
+  check('a phone (dataTransfer) still publishes the SAME live-view request it always did',
+    await (async (): Promise<boolean> => {
+      kaAll.publishError = null;
+      kaAll.published = [];
+      ka.deviceType = 'phone';
+      ka.btmStartResult = { notificationId: 5, continuousTaskId: 3 };
+      const mod = await freshService('phone34');
+      const started: boolean = await startIn(mod);
+      const first: Record<string, any> = kaAll.published[0];
+      const refreshed: boolean = await refreshIn(mod);
+      // `slotType`/`contentType` are the hook's declared platform constants
+      // (SlotType.LIVE_VIEW = 4, NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW = 8).
+      return started === true && refreshed === true && kaAll.published.length === 2 &&
+        first['id'] === 5 && first['notificationSlotType'] === 4 &&
+        first['content']['notificationContentType'] === 8 &&
+        first['content']['systemLiveView']['text'] === '在线 0/0 · ↑未知 ↓未知' &&
+        first['template']['name'] === 'downloadTemplate' &&
+        kaAll.published[1]['content']['systemLiveView']['text'] === '在线 3/4 · ↑1.0 KB ↓2.0 KB';
+    })(),
+    JSON.stringify(kaAll.published));
+  check('a platform that reports neither type logs -1 rather than inventing one',
+    ((): boolean => {
+      const line = startedLine();
+      return line !== undefined && line.args[3] === -1 && line.args[4] === -1;
+    })(),
+    JSON.stringify(startedLine()));
+  check('an ADOPTED taskKeeping task is not published to either',
+    await (async (): Promise<boolean> => {
+      kaAll.publishError = null;
+      kaAll.published = [];
+      ka.deviceType = '2in1';
+      ka.btmRequestedModes = [];
+      ka.btmTasks = [{ bundleName: 'cn.alfadb.netbird', backgroundModes: ['taskKeeping'],
+        notificationId: 9, continuousTaskId: 11 }];
+      const mod = await freshService('adopt34');
+      const started: boolean = await startIn(mod);
+      const refreshed: boolean = await refreshIn(mod);
+      return started === true && refreshed === true && kaAll.published.length === 0 &&
+        ka.btmRequestedModes.length === 0;
+    })(),
+    JSON.stringify([kaAll.published.length, ka.btmRequestedModes]));
+  check('a REFUSED publish writes ONE backoff line per level, never one per attempt',
+    await (async (): Promise<boolean> => {
+      kaAll.published = [];
+      ka.deviceType = 'phone';
+      ka.btmTasks = [];
+      ka.btmStartResult = { notificationId: 5, continuousTaskId: 3, slotType: 4, contentType: 8 };
+      kaAll.publishError = { code: 202, message: 'Not System App' };
+      const mod = await freshService('refuse34');
+      const started: boolean = await startIn(mod);
+      for (let i = 0; i < 7; i++) { await refreshIn(mod); }
+      const levels: unknown[] = kaAll.hilog
+        .filter((line): boolean => line.format.indexOf('UI_BG_TASK_REFRESH_BACKOFF') >= 0)
+        .map((line): unknown => line.args[2]);
+      const errors = ka.records.filter((record): boolean =>
+        record.fields['stage'] === 'refresh' && record.fields['result'] === 'error');
+      return started === true && JSON.stringify(levels) ===
+        JSON.stringify([30000, 60000, 120000, 240000, 300000]) && errors.length === 1 &&
+        errors[0].fields['reason'] === '202';
+    })(),
+    JSON.stringify([kaAll.hilog.filter((line): boolean =>
+      line.format.indexOf('UI_BG_TASK_REFRESH_BACKOFF') >= 0).map((line): unknown => line.args),
+    ka.records.filter((record): boolean => record.fields['result'] === 'error')]));
+  check('... an accepted publish clears the level, so a later refusal is a NEW state change',
+    await (async (): Promise<boolean> => {
+      kaAll.publishError = null;
+      ka.deviceType = 'phone';
+      ka.btmTasks = [];
+      ka.btmStartResult = { notificationId: 5, continuousTaskId: 3, slotType: 4, contentType: 8 };
+      const mod = await freshService('refuse34b');
+      const before: number = kaAll.published.length;
+      const started: boolean = await startIn(mod);
+      const publishedOnStart: number = kaAll.published.length - before;
+      kaAll.publishError = { code: 202, message: 'Not System App' };
+      await refreshIn(mod);
+      const lines = kaAll.hilog.filter((line): boolean =>
+        line.format.indexOf('UI_BG_TASK_REFRESH_BACKOFF') >= 0);
+      const last = lines[lines.length - 1];
+      return started === true && publishedOnStart === 1 && last !== undefined &&
+        last.args[1] === 1 && last.args[2] === 30000;
+    })(),
+    JSON.stringify(kaAll.hilog.filter((line): boolean =>
+      line.format.indexOf('UI_BG_TASK_REFRESH_BACKOFF') >= 0).slice(-2)));
+  kaAll.publishError = null;
 } catch (error) {
   check(`harness (service) — ${(error as Error).message}`, false);
 }

@@ -76,6 +76,11 @@ const BTM = 'data:text/javascript,' + encodeURIComponent(
   ' ContinuousTaskSuspendReason: { SYSTEM_SUSPEND_SYSTEM_LOAD_WARNING: 12 }\n' +
   '};\nexport default api;');
 
+// 0.0.34: `published` records every request the SHIPPED adapter actually handed
+// to the platform (so "no live-view publish in taskKeeping mode" is asserted on
+// the real request path), and `publishError` makes the platform refuse one the
+// way the PC's notification service did (202 / ANS 110002), which is how the
+// refresh backoff and its per-level logging are driven.
 const NOTIFICATION = 'data:text/javascript,' + encodeURIComponent(
   'const s = () => globalThis.__NB_KA;\n' +
   'const api = {\n' +
@@ -83,7 +88,9 @@ const NOTIFICATION = 'data:text/javascript,' + encodeURIComponent(
   ' ContentType: { NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW: 8 },\n' +
   ' async isNotificationEnabled() { return true; },\n' +
   ' async requestEnableNotification() { },\n' +
-  ' async publish(request) { s().published.push(request); }\n' +
+  ' async publish(request) { const st = s();\n' +
+  '  if (st.publishError) { throw st.publishError; }\n' +
+  '  st.published.push(request); }\n' +
   '};\nexport default api;');
 
 const WANT_AGENT = 'data:text/javascript,' + encodeURIComponent(
