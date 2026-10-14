@@ -436,9 +436,34 @@ export function railInfoValueWidthVp(widthVp: number): number {
 /** The rail's copy slot (vp) — the peer list's own glyph, one icon across the app. */
 export const RAIL_INFO_COPY_SLOT_VP: number = 16;
 
-/** The rail row's VALUE TEXT width (vp) when the row carries the copy icon. */
+/**
+ * The rail row's VALUE TEXT width (vp) when the row carries the copy icon — the
+ * value column less the mark's slot AND (0.0.45 (I10)) the 5 vp gap that now puts
+ * the mark immediately after the value's own glyphs. The caller passes a WINDOW
+ * width and the rail tier is read from it, so this is the split shell's form; the
+ * narrow branch's card is the page (railInfoValueTextWidthFor).
+ */
 export function railInfoValueTextWidthVp(widthVp: number): number {
-  return railInfoValueWidthVp(widthVp) - RAIL_INFO_COPY_SLOT_VP;
+  return railInfoValueWidthVp(widthVp) - RAIL_INFO_COPY_SLOT_VP - COPY_ICON_GAP_VP;
+}
+
+/**
+ * The rail (or narrow-branch home card) row's value-text cap (vp) FOR A WINDOW: the
+ * value column at that window's own width — the tier's rail on the split shell,
+ * the page on the narrow branch — less the copy slot and its gap.
+ *
+ * The page needs this form and not railInfoValueTextWidthVp because `homeTab` is
+ * ONE builder on both branches: inside the rail its card is `railWidthFor(window)`
+ * wide, and on the phone the same card is the page's whole width. Feeding the rail
+ * tier's 240–320 vp column to the phone would ellipsise a 28-character 域名 that has
+ * 500 vp of room beside it.
+ */
+export function railInfoValueTextWidthFor(windowVp: number): number {
+  const page: number = paneLayoutOf(windowVp) === PANE_SPLIT
+    ? railWidthFor(windowVp) : windowVp;
+  const width: number = page - 2 * RAIL_PAGE_PADDING_VP -
+    2 * RAIL_CARD_PADDING_VP - RAIL_INFO_COPY_SLOT_VP - COPY_ICON_GAP_VP;
+  return width > 0 ? width : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +765,38 @@ export function peerRowTextWidthVp(navBarWidthVp: number): number {
 }
 
 /**
+ * The peer LIST CARD's width (vp) at a window's OWN branch: the split shell's list
+ * column — a function of the rail tier table (peerListNavBarWidthFor) — or, on the
+ * narrow branch, the PAGE, because peerListBody is the phone's 对端 tab body and its
+ * card is `width 100%` inside a page padded by RAIL_PAGE_PADDING_VP.
+ *
+ * 0.0.45 (I10) is why this exists. I8/I9 only ever READ these budgets in the
+ * selfcheck: the rows' text was `.layoutWeight(1)`, so the RUNTIME ellipsis width was
+ * whatever the row's layout gave it. I10 makes the text content-sized, so the budget
+ * is now the runtime cap on every branch — and feeding the narrow branch the split
+ * shell's `peerListNavBarWidthFor(window)` column (240 vp, i.e. 83 vp of name) cut
+ * the phone's IPs to `100.108.2…` on a row that has ~340 vp of text width. Never
+ * negative.
+ */
+export function peerRowCardWidthFor(windowVp: number): number {
+  const card: number = paneLayoutOf(windowVp) === PANE_SPLIT
+    ? peerListCardWidthVp(peerListNavBarWidthFor(windowVp))
+    : windowVp - 2 * RAIL_PAGE_PADDING_VP;
+  return card > 0 ? card : 0;
+}
+
+/**
+ * The width (vp) one peer row's TEXT has at a window's own branch: the card at that
+ * branch (peerRowCardWidthFor) less the row's own content padding and the selection
+ * marker every row reserves. The split form is peerRowTextWidthVp, unchanged.
+ */
+export function peerRowTextWidthFor(windowVp: number): number {
+  const text: number = peerRowCardWidthFor(windowVp) - 2 * PEER_ROW_LIST_PADDING_VP -
+    PEER_ROW_SELECT_BAR_VP;
+  return text > 0 ? text : 0;
+}
+
+/**
  * The row's right-hand META block (vp) at a window's tier — see the constants.
  *
  * 0.0.43 (I8) §2 — IT IS ALSO WHERE THE BLOCK LIVES, and that is why it is called
@@ -807,6 +864,53 @@ export const PEER_ROW_COPY_SLOT_VP: number = PEER_ROW_COPY_GLYPH_VP;
  * component's `responseRegion` (component/common.d.ts:17311, public since API 8).
  */
 export const PEER_ROW_COPY_TOUCH_VP: number = 40;
+// ---------------------------------------------------------------------------
+// 0.0.45 (I10) — THE HUG: the gap between a value and its copy icon
+// ---------------------------------------------------------------------------
+// I8/I9 put the mark in every surface but let the text STRETCH to the end of its
+// column, so the icon landed after the stretched text BOX rather than after the
+// glyphs: the owner's frame reads "the copy icons float in a middle column", and the
+// lead measured the list's icon left edge at x≈350 against a name whose ink ends at
+// ≈215 (the name's box ran to the meta column). The rail's IP row had the same
+// shape, and its value is left-aligned, so its mark sat at the card's right edge.
+//
+// The fix is structural in each row (the text is sized to its CONTENT and the
+// text+mark pair is packed left) and this is the ONE number that separates them:
+// the same 5 vp in the list's name line, the list's IP line, the detail row and the
+// rail.
+//
+// WHY 5 AND NOT 8 — the acceptance measures INK to INK ("the text's right edge and
+// the icon's left edge" in a zoomed frame), and three things sit between this number
+// and that measurement, all of them positive:
+//
+//   * the mark's ink starts 1 vp inside its 16 vp slot: the two 8×10 sheets are
+//     offset ∓3 vp and ArkUI draws a Column's 1.5 vp border INSIDE its box, so the
+//     back sheet spans x = 1…9 and the ink is 14 vp wide inside a 16 vp box
+//     (both numbers are on the device frame: 14 vp = 49 px, 16 vp slot = 56 px);
+//   * a proportional face leaves the last glyph's right side bearing INSIDE the
+//     text's advance, so the text's ink ends ~1.3 vp before its box does (measured
+//     on the frame as ≈4.5 px at 3.5 px/vp);
+//   * the 8 vp an earlier version shipped measured 28 px = 8.0 vp ink-to-ink on the
+//     0.0.45 phone frame — exactly ON the band's upper edge, where any read error
+//     puts it outside. 5 vp measures ≈7.3 vp, comfortably inside 4…8 vp, and still
+//     reads as attached (17.5 px on that device).
+/** The smallest gap (vp) the acceptance allows between a value and its mark. */
+export const COPY_ICON_GAP_MIN_VP: number = 4;
+/** The largest gap (vp) the acceptance allows between a value and its mark. */
+export const COPY_ICON_GAP_MAX_VP: number = 8;
+/** The shipped gap (vp, text box → mark box) between a value and its copy mark. */
+export const COPY_ICON_GAP_VP: number = 5;
+
+/** The gap (vp) a copy mark keeps from the text it belongs to — one number, every surface. */
+export function copyIconGapVp(): number {
+  return COPY_ICON_GAP_VP;
+}
+
+/** Is `gapVp` inside the shipped 4…8 vp band? (the acceptance's own question.) */
+export function copyIconGapInBand(gapVp: number): boolean {
+  return gapVp >= COPY_ICON_GAP_MIN_VP && gapVp <= COPY_ICON_GAP_MAX_VP;
+}
+
 /**
  * Does the peer LIST ROW render a copy slot at this window width? True exactly on
  * the split shell at the medium/roomy rail tiers — the pointer branch whose width
@@ -825,20 +929,42 @@ export function peerRowCopySlotVp(windowVp: number): number {
 }
 
 /**
+ * What the copy affordance takes out of a text BUDGET (vp) at a window width: the
+ * mark's slot AND the gap that puts it 5 vp after the last glyph, or 0 where the
+ * tier has no slot at all.
+ *
+ * 0.0.45 (I10) is the reason the gap joined the budget. The two numbers used to be
+ * one (the slot alone), because the text was STRETCHED: its box ran to the meta
+ * column and the icon followed the box, wherever the box ended. Now the box is the
+ * glyphs, so `budget + gap + slot` is what the row really spends — and the text's
+ * max width must already carry it, or a name that fills its budget would push the
+ * mark into the chip. The floors are unaffected: the gap is only spent at the
+ * medium/roomy tiers, where the name's floor has 60+ vp of room.
+ */
+export function peerRowCopyTakeVp(windowVp: number): number {
+  return peerRowCopyVisible(windowVp) ? COPY_ICON_GAP_VP + PEER_ROW_COPY_SLOT_VP : 0;
+}
+
+/**
  * The width (vp) line 1's NAME has at a window width: the row's text width at that
- * window's column, minus the meta block at that window's tier and minus the copy
- * slot (0 where the tier has none).
- * `>= PEER_ROW_NAME_MIN_WIDTH_VP` is exactly "a real 28-character fqdn fits", and
- * the selfcheck sweeps every window of the shell to hold it there.
+ * window's OWN branch (peerRowTextWidthFor), minus the meta block at that window's
+ * tier and minus what the copy affordance takes (peerRowCopyTakeVp: the 5 vp gap +
+ * the 16 vp slot from the medium tier up, 0 at the compact split tier and 0 on the
+ * narrow branch, neither of which has a mark in its rows).
+ * `>= PEER_ROW_NAME_MIN_WIDTH_VP` is exactly "a real 28-character fqdn fits" — at
+ * every window of the SPLIT shelf, which is the claim the selfcheck sweeps (the
+ * phone's 320–839 vp page cannot hold a 28-character fqdn beside the meta column at
+ * all, and never could).
  */
 export function peerRowNameWidthVp(navBarWidthVp: number, windowVp: number): number {
   return peerRowTextWidthVp(navBarWidthVp) - peerRowMetaWidthVp(windowVp) -
-    peerRowCopySlotVp(windowVp);
+    peerRowCopyTakeVp(windowVp);
 }
 
-/** The name column's width (vp) for a window width — the composed form. */
+/** The name column's width (vp) for a window width — the composed, branch-aware form. */
 export function peerRowNameWidthFor(windowVp: number): number {
-  return peerRowNameWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
+  return peerRowTextWidthFor(windowVp) - peerRowMetaWidthVp(windowVp) -
+    peerRowCopyTakeVp(windowVp);
 }
 
 /**
@@ -854,12 +980,16 @@ export function peerRowIpWidthVp(navBarWidthVp: number, windowVp: number): numbe
   if (peerRowCondensed(windowVp)) {
     return text - PEER_ROW_L2_META_COMPACT_VP;
   }
-  return text - peerRowMetaWidthVp(windowVp) - peerRowCopySlotVp(windowVp);
+  return text - peerRowMetaWidthVp(windowVp) - peerRowCopyTakeVp(windowVp);
 }
 
-/** The IP column's width (vp) for a window width — the composed form. */
+/** The IP column's width (vp) for a window width — the composed, branch-aware form. */
 export function peerRowIpWidthFor(windowVp: number): number {
-  return peerRowIpWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
+  const text: number = peerRowTextWidthFor(windowVp);
+  if (peerRowCondensed(windowVp)) {
+    return text - PEER_ROW_L2_META_COMPACT_VP;
+  }
+  return text - peerRowMetaWidthVp(windowVp) - peerRowCopyTakeVp(windowVp);
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,6 +1785,13 @@ export function detailPaneContentWidthVp(windowVp: number): number {
  * less the page's padding, the card's padding, the leading glyph and its gap, the
  * label column and its gap, and — for a copyable row — the copy mark and its gap.
  * This is the number the ellipsis argument rests on; never negative.
+ *
+ * 0.0.45 (I10) — the copy mark's gap is COPY_ICON_GAP_VP (5), not the row's own
+ * DETAIL_ROW_GAP_VP (8): the value is End-aligned inside the column, so its last
+ * glyph sits ON the column's right edge and the mark's 5 vp is what the eye reads.
+ * The value column therefore GREW by 3 vp (108 → 111 at the narrowest wide tier),
+ * which is why the floor's slack is now 6 vp and not 3. The label↔value gap is the
+ * row's own DETAIL_ROW_GAP_VP and is unchanged.
  */
 export function detailRowValueWidthVp(paneWidthVp: number, copyable: boolean): number {
   let width: number = paneWidthVp - 2 * DETAIL_ROW_PAGE_PADDING_VP -
@@ -1662,7 +1799,7 @@ export function detailRowValueWidthVp(paneWidthVp: number, copyable: boolean): n
   width -= DETAIL_ROW_ICON_SLOT_VP + DETAIL_ROW_ICON_GAP_VP;
   width -= DETAIL_ROW_LABEL_WIDTH_VP + DETAIL_ROW_GAP_VP;
   if (copyable) {
-    width -= DETAIL_ROW_GAP_VP + PEER_ROW_COPY_SLOT_VP;
+    width -= COPY_ICON_GAP_VP + PEER_ROW_COPY_SLOT_VP;
   }
   return width > 0 ? width : 0;
 }

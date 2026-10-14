@@ -273,6 +273,120 @@ try {
     (row.match(/this\.peerRowCopyIconVisible\(peer\)/g) ?? []).length === 2 &&
     !row.includes('@State') && !row.includes('copyVisible:') &&
     m.peerRowCopyVisible(m.HARMONY_BP_LG_VP) === false);
+
+  // ---- D. 0.0.45 (I10) — THE HUG: the mark sits after the GLYPHS ---------------
+  // The owner's frame read "the copy icons float in a middle column, detached from
+  // the text" and the lead measured it (icon left edge x≈350 against a name whose
+  // ink ends ≈215). The cause was structural — the text was `.layoutWeight(1)`, so
+  // its BOX ran to the meta column and the mark followed the box — so the fix is
+  // structural too, and these are the properties that keep it fixed:
+  //
+  //   * each line is [text (content-sized, capped at its own budget) + gap + mark],
+  //     and the tier's trailing pieces are pushed to the row's right edge;
+  //   * the gap is ONE pure number (copyIconGapVp) inside the acceptance's 4–8 vp;
+  //   * the slot stays reserved INSIDE the text's budget (peerRowCopyTakeVp), so a
+  //     pointer arriving cannot move the mark or re-ellipsise the name.
+  check('D: the copy gap is ONE pure number, inside the 4–8 vp band',
+    m.COPY_ICON_GAP_VP === 5 && m.copyIconGapVp() === m.COPY_ICON_GAP_VP &&
+    m.COPY_ICON_GAP_MIN_VP === 4 && m.COPY_ICON_GAP_MAX_VP === 8 &&
+    m.copyIconGapInBand(m.copyIconGapVp()) === true && m.copyIconGapInBand(4) === true &&
+    m.copyIconGapInBand(8) === true && m.copyIconGapInBand(3.9) === false &&
+    m.copyIconGapInBand(8.1) === false &&
+    // and the surfaces ask the module for it rather than writing a literal
+    PAGE.includes('COPY_ICON_GAP_VP,') &&
+    (PAGE.match(/Row\(\{ space: COPY_ICON_GAP_VP \}\)/g) ?? []).length === 4 &&
+    (row.match(/Row\(\{ space: COPY_ICON_GAP_VP \}\)/g) ?? []).length === 2);
+
+  // the two peer-row texts, each sliced from its own Text( through its own mark's
+  // call (so the slice is the Text + the reserved slot's `visible` gate and nothing
+  // of the other line)
+  const nameAt = row.indexOf('Text(peer.name)');
+  const ipAt = row.indexOf("Text(peer.ip.length > 0 ? peer.ip : '无 IP')");
+  const nameText = row.slice(nameAt, row.indexOf('this.copyToClipboard(value);', nameAt));
+  const ipText = row.slice(ipAt, row.indexOf('this.copyToClipboard(value);', ipAt));
+  check('D: the LIST row\'s name and IP are content-sized, capped at their own budget',
+    nameText.length > 0 && ipText.length > 0 &&
+    // THE DEFECT ITSELF: a stretched text box is what pushed the mark away
+    !/\.layoutWeight\(/.test(nameText) && !/\.layoutWeight\(/.test(ipText) &&
+    nameText.includes('.constraintSize({ maxWidth: peerRowNameWidthFor(this.widthVp) })') &&
+    ipText.includes('.constraintSize({ maxWidth: peerRowIpWidthFor(this.widthVp) })') &&
+    nameText.includes('.maxLines(1)') && ipText.includes('.maxLines(1)') &&
+    // the mark is INSIDE the pair (before the closing of the pair's Row) and the
+    // pair is a child of the line, so the mark can only follow the text it belongs to
+    nameText.includes('visible: this.peerRowCopyIconVisible(peer) && peer.name.length > 0,') &&
+    ipText.includes('visible: this.peerRowCopyIconVisible(peer) && peer.ip.length > 0,'));
+  check('D: each peer line packs the pair left and pushes the tier\'s meta right',
+    // the condensed dot (line 1) / chip + status (line 2) are the SECOND child, so
+    // SpaceBetween lands them on the row's edge exactly as before I10
+    (row.match(/\.justifyContent\(FlexAlign\.SpaceBetween\)/g) ?? []).length === 2 &&
+    row.includes("Text(connectionLabel(peer.connection))") &&
+    row.includes('Circle({ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP })') &&
+    // the slot's budget is the gap AND the glyph, and it is spent only where the
+    // mark exists (the compact split tier still has no slot at all)
+    m.peerRowCopyTakeVp(1024) === m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP &&
+    m.peerRowCopyTakeVp(840) === 0 &&
+    m.peerRowNameWidthFor(1024) + m.peerRowCopyTakeVp(1024) + m.PEER_ROW_META_WIDE_VP ===
+      m.peerRowTextWidthFor(1024) &&
+    m.peerRowIpWidthFor(1024) + m.peerRowCopyTakeVp(1024) + m.PEER_ROW_META_WIDE_VP ===
+      m.peerRowTextWidthFor(1024) &&
+    // 0.0.45 (I10): the cap the page spends is BRANCH-AWARE — the narrow branch's row
+    // has no mark, so it must not be handed the split shell's 240 vp list column
+    // (which cut the phone's IPs to `100.108.2…` before this was fixed)
+    m.peerRowCopyTakeVp(398) === 0 && m.peerRowCondensed(398) === false &&
+    m.peerRowNameWidthFor(398) === m.peerRowTextWidthFor(398) - m.PEER_ROW_META_WIDE_VP &&
+    m.peerRowIpWidthFor(398) === m.peerRowNameWidthFor(398) &&
+    m.peerRowIpWidthFor(398) >= m.PEER_ROW_IP_MIN_WIDTH_VP &&
+    m.peerRowTextWidthFor(398) === 398 - 2 * m.RAIL_PAGE_PADDING_VP -
+      2 * m.PEER_ROW_LIST_PADDING_VP - m.PEER_ROW_SELECT_BAR_VP);
+
+  const railValue = railRow.slice(railRow.indexOf('Text(this.value ? this.value'),
+    railRow.indexOf('if (this.copyValue.length > 0) {'));
+  // the detail row's value+mark pair, from its Row( to the pair's own layoutWeight
+  const detailPair = detailRow.slice(detailRow.indexOf('Row({ space: COPY_ICON_GAP_VP })'),
+    detailRow.indexOf('.alignItems(this.iconKind.length > 0 ?'));
+  check('D: the DETAIL row keeps its End-aligned column and its mark hugs it',
+    detailPair.length > 0 &&
+    detailPair.includes('if (this.copyValue.length > 0) {') &&
+    // the pair owns the rest of the row, so the value column stays the row's fixed
+    // axis and every row's mark lands on the same x
+    detailPair.includes('.layoutWeight(1)') &&
+    detailPair.includes('CopyIconButton({') &&
+    // the value is still the stretched, right-aligned column: an End-aligned value's
+    // last glyph is ON the column's right edge, which is where the mark's 5 vp starts
+    detailRow.includes('Row({ space: COPY_ICON_GAP_VP })') &&
+    /Text\(this\.value \? this\.value : '—'\)[\s\S]*?\.textAlign\(this\.valueEnd \? TextAlign\.End : TextAlign\.Start\)[\s\S]*?\.layoutWeight\(1\)/
+      .test(detailRow));
+  check('D: the RAIL row\'s always-visible mark hugs the IP / 域名 it copies',
+    railRow.includes('Row({ space: COPY_ICON_GAP_VP })') &&
+    railRow.includes('@Prop valueMaxWidth: number = RAIL_INFO_MIN_VALUE_VP;') &&
+    /Text\(this\.value \? this\.value : '—'\)[\s\S]*?\.constraintSize\(\{ maxWidth: this\.valueMaxWidth \}\)/
+      .test(railValue) &&
+    !/\.layoutWeight\(/.test(railValue) &&
+    // the cap the page hands the row is the module's own budget for THIS branch
+    (PAGE.match(/valueMaxWidth: railInfoValueTextWidthFor\(this\.widthVp\)/g) ?? []).length === 3 &&
+    m.railInfoValueTextWidthFor(1440) >= m.RAIL_INFO_MIN_VALUE_VP &&
+    m.railInfoValueTextWidthFor(1440) === m.railInfoValueTextWidthVp(1440) &&
+    // the narrow branch's card is the PAGE, not the rail tier's 240–320 vp column
+    m.railInfoValueTextWidthFor(600) === 600 - 2 * m.RAIL_PAGE_PADDING_VP -
+      2 * m.RAIL_CARD_PADDING_VP - m.RAIL_INFO_COPY_SLOT_VP - m.COPY_ICON_GAP_VP &&
+    m.railInfoValueTextWidthFor(600) > m.railInfoValueTextWidthFor(1440) &&
+    m.railInfoValueTextWidthFor(0) === 0 && m.railInfoValueTextWidthFor(-100) === 0);
+  check('D: the reserved slot cannot change the row height between pointer states',
+    // the slot is the 16 vp glyph — under the caption line box and the 64 vp row — and
+    // it is present for the whole tier, so hovering cannot resize anything
+    m.PEER_ROW_COPY_SLOT_VP === m.PEER_ROW_COPY_GLYPH_VP &&
+    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_VP * 1.5 &&
+    m.PEER_ROW_COPY_SLOT_VP < m.PEER_ROW_MIN_HEIGHT_VP &&
+    icon.includes('.visibility(this.visible ? Visibility.Visible : Visibility.Hidden)') &&
+    !icon.includes('Visibility.None') &&
+    // the name is ellipsised at a budget that ALREADY pays for the gap + the slot, so
+    // the pointer's arrival cannot buy the name any width and cannot take any away
+    m.peerRowNameWidthFor(1024) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(1024)) -
+      m.PEER_ROW_META_WIDE_VP - m.COPY_ICON_GAP_VP - m.PEER_ROW_COPY_SLOT_VP &&
+    // and the mark is at the same x whether it is Visible or Hidden, because its node
+    // stays in the row either way (the `visible` @Prop is the only thing that moves)
+    (PAGE.match(/visible: this\.peerRowCopyIconVisible\(peer\)/g) ?? []).length === 2 &&
+    (PAGE.match(/if \(this\.peerRowCopySlotVisible\(\)\) \{/g) ?? []).length === 2);
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);

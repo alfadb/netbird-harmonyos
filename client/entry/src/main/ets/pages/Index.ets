@@ -169,7 +169,7 @@ import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
 // the pane's state-driven DEFAULT destination, the xl indent limit and the visual
 // scale (type sizes / rail paddings). The page still only asks it.
 import {
-  BUTTON_INLINE_WIDTH_VP, CONNECT_RING_WIDTH_VP, contentMaxWidthVp,
+  BUTTON_INLINE_WIDTH_VP, CONNECT_RING_WIDTH_VP, contentMaxWidthVp, COPY_ICON_GAP_VP,
   DETAIL_CONTENT_MAX_WIDTH_VP, DETAIL_ICON_BRANCH, DETAIL_ICON_CLOCK,
   DETAIL_ICON_COPY, DETAIL_ICON_DOWN, DETAIL_ICON_EXIT, DETAIL_ICON_GLOBE,
   DETAIL_ICON_KEY, DETAIL_ICON_LINK, DETAIL_ICON_NODE,
@@ -189,13 +189,14 @@ import {
   PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
   PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
   PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
-  peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, RAIL_CARD_PADDING_VP,
+  peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, peerRowIpWidthFor,
+  peerRowNameWidthFor, RAIL_CARD_PADDING_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
-  RAIL_INFO_COPY_SLOT_VP,
+  RAIL_INFO_COPY_SLOT_VP, RAIL_INFO_MIN_VALUE_VP,
   RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_BOTTOM_PADDING_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
   RAIL_WORDMARK_MARGIN_VP,
-  railConnectionMaxHeightVp, railTrafficVisible,
+  railConnectionMaxHeightVp, railInfoValueTextWidthFor, railTrafficVisible,
   railWidthFor, SECTION_CHEVRON_SLOT_VP, SECTION_HEADER_GAP_VP,
   settingsContentMaxWidthVp, splitPaneWidthVp,
   TYPE_APP_TITLE_VP, TYPE_BODY_VP, TYPE_CAPTION_VP, TYPE_PAGE_TITLE_VP,
@@ -1256,25 +1257,36 @@ struct DetailRow {
           .width(DETAIL_ROW_LABEL_WIDTH_VP)
       }
       .alignItems(VerticalAlign.Center)
-      // Truthiness (not .length): a value that slipped through as null or
-      // undefined renders '—' instead of throwing inside the render pass.
-      Text(this.value ? this.value : '—')
-        .fontSize(TYPE_BODY_VP)
-        .fontColor($r('app.color.nb_text_primary'))
-        .fontFamily(this.mono ? 'Noto Sans Mono' : 'HarmonyOS Sans')
-        .textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)
-        .layoutWeight(1)
-        .maxLines(this.maxLines)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      if (this.copyValue.length > 0) {
-        CopyIconButton({
-          value: this.copyValue,
-          visible: true,
-          onCopy: (value: string): void => {
-            this.onCopy(value);
-          }
-        })
+      // 0.0.45 (I10) — THE HUG. The value keeps its own stretched column (so the rows'
+      // values stay one fixed, right-aligned axis whatever they contain) and its copy
+      // mark is a child of THAT column's pair, COPY_ICON_GAP_VP from its right edge.
+      // An End-aligned value's last glyph sits on that edge, so the mark is 5 vp from
+      // the glyphs and every row's mark is on the same x. The column is 2 vp WIDER
+      // than I9's (111 vs 108 at the 320 vp pane; the row's own 8 vp label gap is
+      // untouched and the mark's gap moved 8 → 5) — see detailRowValueWidthVp.
+      Row({ space: COPY_ICON_GAP_VP }) {
+        // Truthiness (not .length): a value that slipped through as null or
+        // undefined renders '—' instead of throwing inside the render pass.
+        Text(this.value ? this.value : '—')
+          .fontSize(TYPE_BODY_VP)
+          .fontColor($r('app.color.nb_text_primary'))
+          .fontFamily(this.mono ? 'Noto Sans Mono' : 'HarmonyOS Sans')
+          .textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)
+          .layoutWeight(1)
+          .maxLines(this.maxLines)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.copyValue.length > 0) {
+          CopyIconButton({
+            value: this.copyValue,
+            visible: true,
+            onCopy: (value: string): void => {
+              this.onCopy(value);
+            }
+          })
+        }
       }
+      .layoutWeight(1)
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .alignItems(this.iconKind.length > 0 ? VerticalAlign.Center : VerticalAlign.Top)
@@ -1346,8 +1358,14 @@ struct RailInfoRow {
   // 0.0.43 (I8) §3: non-empty ⇒ the row's value carries the copy icon, ALWAYS
   // visible (the rail is an identity card, not a hover surface). The rail passes
   // this for its local NetBird IP and its local 域名 and for nothing else; the
-  // value column pays for the slot (railInfoValueTextWidthVp).
+  // value column pays for the slot (railInfoValueTextWidthFor).
   @Prop copyValue: string = '';
+  // 0.0.45 (I10): the value text's own CAP (vp) — the caller's copy-aware budget
+  // (railInfoValueTextWidthFor(this.widthVp)). The value is sized to its CONTENT
+  // now (that is what makes the mark hug it), so this cap is the only thing keeping
+  // a long 域名 inside the card. It defaults to the rail's own value floor, so a
+  // caller that passes nothing still cannot let a value run out of the card.
+  @Prop valueMaxWidth: number = RAIL_INFO_MIN_VALUE_VP;
   onCopy: (value: string) => void = (): void => {
   };
 
@@ -1359,11 +1377,16 @@ struct RailInfoRow {
         .width('100%')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Row({ space: 8 }) {
+      // 0.0.45 (I10) — THE HUG. The value is content-sized (it used to be
+      // `.layoutWeight(1)`, which stretched its box to the card's edge and left the
+      // mark floating at that edge — the rail's own version of the list's defect)
+      // and its mark is COPY_ICON_GAP_VP after the glyphs, on both the PC rail and
+      // the narrow branch's home card.
+      Row({ space: COPY_ICON_GAP_VP }) {
         Text(this.value ? this.value : '—')
           .fontSize(TYPE_BODY_VP)
           .fontColor($r('app.color.nb_text_primary'))
-          .layoutWeight(1)
+          .constraintSize({ maxWidth: this.valueMaxWidth })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.copyValue.length > 0) {
@@ -4961,6 +4984,10 @@ struct Index {
             // handed over is the SAME string the row renders, so what the user sees
             // is what reaches the clipboard.
             copyValue: this.homeAddressText(),
+            // 0.0.45 (I10): the value's cap, so the mark hugs the address glyphs
+            // (the row's `homeTab` is the rail here and the page on the phone — the
+            // helper answers for the branch this call is running in).
+            valueMaxWidth: railInfoValueTextWidthFor(this.widthVp),
             onCopy: (value: string): void => {
               this.copyToClipboard(value);
             }
@@ -4970,6 +4997,7 @@ struct Index {
               label: '域名',
               value: this.homeFqdnText(),
               copyValue: this.homeFqdnText(),
+              valueMaxWidth: railInfoValueTextWidthFor(this.widthVp),
               onCopy: (value: string): void => {
                 this.copyToClipboard(value);
               }
@@ -4978,7 +5006,8 @@ struct Index {
             // owner's scope names (I8 §3 covers the domain/hostname and the IP only).
             RailInfoRow({
               label: '对端',
-              value: this.homePeersText()
+              value: this.homePeersText(),
+              valueMaxWidth: railInfoValueTextWidthFor(this.widthVp)
             })
           }
           // 0.0.38 (I3) E added the rail's own traffic summary here; its gate and its
@@ -5173,32 +5202,57 @@ struct Index {
     // read as a full-width band with square corners.) The INNER Row is the highlight
     // BLOCK: the selected/hover tint, the 3 vp selection marker and the corner
     // radius all live on it, so the highlight IS an inset rounded block.
+    // 0.0.45 (I10) — THE TEXT IS THE GLYPHS AGAIN. I8 gave line 1 and line 2 their
+    // copy marks but left the name and the IP at `.layoutWeight(1)`: the text BOX ran
+    // to the meta column, and the mark landed at the end of the BOX. The owner read
+    // it as "the copy icons float in a middle column, detached from the text" and the
+    // lead measured it (icon left edge x≈350 while the name's ink ends ≈215 — both
+    // marks stacked in that column). Each line is now [text (content-sized, capped at
+    // its own budget) + COPY_ICON_GAP_VP + its mark], with the tier's trailing pieces
+    // (the condensed dot / chip / status) pushed to the row's right edge by
+    // `justifyContent(FlexAlign.SpaceBetween)`. Nothing else about the row moves: the
+    // same fields, the same key, the same 64 vp height, the same inset highlight.
     Column() {
       Row({ space: 8 }) {
         // ---- the two-line text block -------------------------------------------
         Column({ space: 2 }) {
-          Row({ space: 8 }) {
-            Text(peer.name)
-              .fontSize(TYPE_BODY_VP)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            // 0.0.43 (I8) §3 — THE HOSTNAME'S COPY ICON. The node exists for the
-            // WHOLE TIER (peerRowCopySlotVisible) and only its `visible` @Prop
-            // follows the pointer: an `if` on the hover/selection would REMOVE the
-            // slot when the pointer left, and the 0.0.43 device frame measured just
-            // that (hovered/selected rows 74 vp against their neighbours' 64, i.e.
-            // hovering a row pushed the list below it down).
-            if (this.peerRowCopySlotVisible()) {
-              CopyIconButton({
-                value: peer.name,
-                visible: this.peerRowCopyIconVisible(peer) && peer.name.length > 0,
-                onCopy: (value: string): void => {
-                  this.copyToClipboard(value);
-                }
-              })
+          // 0.0.45 (I10) — THE HUG, LINE 1. The name and ITS copy icon are ONE pair,
+          // the text sized to its content (capped at peerRowNameWidthFor, which pays
+          // for both the gap and the slot) and the pair packed left; the trailing dot
+          // is pushed to the row's right edge by SpaceBetween. Before this the name
+          // was `.layoutWeight(1)`, so its box ran to the meta column and the icon
+          // followed the BOX — the owner's "copy icons float in a middle column"
+          // (icon at x≈350, name ink ending ≈215).
+          Row() {
+            Row({ space: COPY_ICON_GAP_VP }) {
+              Text(peer.name)
+                .fontSize(TYPE_BODY_VP)
+                .fontColor($r('app.color.nb_text_primary'))
+                // Content-sized and ellipsised AT ITS BUDGET: >= 196 vp at every
+                // window of the shell (the 28-character fqdn floor), so no name is
+                // cut shorter than it was, and no name can push the mark out.
+                .constraintSize({ maxWidth: peerRowNameWidthFor(this.widthVp) })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // 0.0.43 (I8) §3 — THE HOSTNAME'S COPY ICON. The node exists for the
+              // WHOLE TIER (peerRowCopySlotVisible) and only its `visible` @Prop
+              // follows the pointer: an `if` on the hover/selection would REMOVE the
+              // slot when the pointer left, and the 0.0.43 device frame measured just
+              // that (hovered/selected rows 74 vp against their neighbours' 64, i.e.
+              // hovering a row pushed the list below it down). 0.0.45 (I10): the slot
+              // is reserved INSIDE the text's budget (peerRowCopyTakeVp), so hovering
+              // can neither move the mark nor re-ellipsise the name.
+              if (this.peerRowCopySlotVisible()) {
+                CopyIconButton({
+                  value: peer.name,
+                  visible: this.peerRowCopyIconVisible(peer) && peer.name.length > 0,
+                  onCopy: (value: string): void => {
+                    this.copyToClipboard(value);
+                  }
+                })
+              }
             }
+            .alignItems(VerticalAlign.Center)
             // THE DOT IN THE CONDENSED TIER ONLY. From the medium tier up it is a
             // child of the meta column (I8 §2); at the compact split tier the name's
             // 28-character floor leaves 25 vp for everything else, which is the dot
@@ -5209,64 +5263,76 @@ struct Index {
             }
           }
           .width('100%')
+          // The dot is the row's right edge even though the text block now ends at
+          // the glyphs: one child (the wide tiers' pair) simply starts at the left.
+          .justifyContent(FlexAlign.SpaceBetween)
           .alignItems(VerticalAlign.Center)
           // Line 2: the address owns the row's text width — and the condensed
           // tier's chip / status text ride here with it. maxLines(1) is the hard
           // floor (a wrapped address is unreadable); the widths are what make it
           // never need the ellipsis in the first place.
-          Row({ space: 8 }) {
-            Text(peer.ip.length > 0 ? peer.ip : '无 IP')
-              .fontSize(TYPE_CAPTION_VP)
-              .fontColor($r('app.color.nb_text_muted'))
-              .layoutWeight(1)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            // 0.0.43 (I8) §3 — THE IP'S COPY ICON, and it carries THE IP: not the
-            // row's rendered fallback ('无 IP') and not the name. A peer whose
-            // document carries no address simply hides it ('无 IP' must never be
-            // written to the clipboard) while the SLOT stays reserved, so the row's
-            // height is the same whatever the document says.
-            if (this.peerRowCopySlotVisible()) {
-              CopyIconButton({
-                value: peer.ip,
-                visible: this.peerRowCopyIconVisible(peer) && peer.ip.length > 0,
-                onCopy: (value: string): void => {
-                  this.copyToClipboard(value);
-                }
-              })
+          // 0.0.45 (I10): the IP and ITS copy icon are a pair, exactly like line 1,
+          // and the condensed tier's chip + status are the row's right-aligned group.
+          Row() {
+            Row({ space: COPY_ICON_GAP_VP }) {
+              Text(peer.ip.length > 0 ? peer.ip : '无 IP')
+                .fontSize(TYPE_CAPTION_VP)
+                .fontColor($r('app.color.nb_text_muted'))
+                .constraintSize({ maxWidth: peerRowIpWidthFor(this.widthVp) })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // 0.0.43 (I8) §3 — THE IP'S COPY ICON, and it carries THE IP: not the
+              // row's rendered fallback ('无 IP') and not the name. A peer whose
+              // document carries no address simply hides it ('无 IP' must never be
+              // written to the clipboard) while the SLOT stays reserved, so the row's
+              // height is the same whatever the document says.
+              if (this.peerRowCopySlotVisible()) {
+                CopyIconButton({
+                  value: peer.ip,
+                  visible: this.peerRowCopyIconVisible(peer) && peer.ip.length > 0,
+                  onCopy: (value: string): void => {
+                    this.copyToClipboard(value);
+                  }
+                })
+              }
             }
+            .alignItems(VerticalAlign.Center)
             if (this.peerRowCondensed()) {
-              if (peer.online) {
-                // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
-                // the base/dark resources — same role for the ink and the tint.
-                // 0.0.39 (I4) P1.6 (review §4.2): 中继 is a NORMAL NetBird path, and
-                // painting half the mesh warning-orange trained the user to ignore
-                // the real warning colour. The chip keeps its tint shape and moves
-                // to the primary role's ink on a primary tint
-                // (nb_status_info_background), so orange means "something needs
-                // you" and nothing else.
-                Text(connectionLabel(peer.connection))
-                  .fontSize(TYPE_CAPTION_VP)
-                  .fontColor(peer.connection === 'direct'
-                    ? $r('app.color.nb_status_success')
-                    : $r('app.color.nb_primary'))
-                  .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-                  .borderRadius(10)
-                  .backgroundColor(peer.connection === 'direct'
-                    ? $r('app.color.nb_status_success_background')
-                    : $r('app.color.nb_status_info_background'))
+              Row({ space: 8 }) {
+                if (peer.online) {
+                  // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
+                  // the base/dark resources — same role for the ink and the tint.
+                  // 0.0.39 (I4) P1.6 (review §4.2): 中继 is a NORMAL NetBird path, and
+                  // painting half the mesh warning-orange trained the user to ignore
+                  // the real warning colour. The chip keeps its tint shape and moves
+                  // to the primary role's ink on a primary tint
+                  // (nb_status_info_background), so orange means "something needs
+                  // you" and nothing else.
+                  Text(connectionLabel(peer.connection))
+                    .fontSize(TYPE_CAPTION_VP)
+                    .fontColor(peer.connection === 'direct'
+                      ? $r('app.color.nb_status_success')
+                      : $r('app.color.nb_primary'))
+                    .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                    .borderRadius(10)
+                    .backgroundColor(peer.connection === 'direct'
+                      ? $r('app.color.nb_status_success_background')
+                      : $r('app.color.nb_status_info_background'))
+                }
+                // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机暂无 WG
+                // 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。 The TEXT only
+                // for the two states that need words (see the header comment).
+                if (peer.status !== 'connected') {
+                  Text(peerStatusText(peer.status))
+                    .fontSize(TYPE_CAPTION_VP)
+                    .fontColor(this.peerStatusResource(peer.status))
+                }
               }
-              // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机暂无 WG
-              // 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。 The TEXT only
-              // for the two states that need words (see the header comment).
-              if (peer.status !== 'connected') {
-                Text(peerStatusText(peer.status))
-                  .fontSize(TYPE_CAPTION_VP)
-                  .fontColor(this.peerStatusResource(peer.status))
-              }
+              .alignItems(VerticalAlign.Center)
             }
           }
           .width('100%')
+          .justifyContent(FlexAlign.SpaceBetween)
           .alignItems(VerticalAlign.Center)
         }
         .layoutWeight(1)

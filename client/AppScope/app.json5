@@ -2,8 +2,8 @@
   app: {
     bundleName: 'cn.alfadb.netbird',
     vendor: 'alfadb',
-    versionCode: 44,
-    versionName: '0.0.44',
+    versionCode: 45,
+    versionName: '0.0.45',
     icon: '$media:app_icon',
     label: '$string:app_name'
   }

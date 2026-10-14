@@ -557,20 +557,60 @@ try {
       return true;
     })(),
     `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
+  // 0.0.45 (I10) — THE NARROW BRANCH'S BUDGET IS THE PAGE, NOT THE RAIL COLUMN. I8/I9
+  // only READ these widths in the selfcheck (the rows' text was `.layoutWeight(1)`, so
+  // the runtime ellipsis width was whatever the row gave it); I10 makes the text
+  // content-sized, so the same number is the RUNTIME cap on every branch — and the
+  // first version of I10 fed the phone the SPLIT shell's `peerListNavBarWidthFor(w)`
+  // column (240 vp) and cut a 398 vp phone's IPs to `100.108.2…` (83 vp of budget on a
+  // row with ~340 vp of text). This check is that defect's own regression guard: on the
+  // narrow branch the budget is the page's card, the split column form is NOT what is
+  // spent, and the IP keeps its one-line floor at every phone width.
+  check('peer row: the NARROW branch spends the page\'s card, and the IP keeps its floor',
+    (() => {
+      const card: (w: number) => number = (w: number): number =>
+        w - 2 * m.RAIL_PAGE_PADDING_VP;
+      for (let w = m.HARMONY_BP_SM_VP; w < m.HARMONY_BP_LG_VP; w += 1) {
+        if (m.peerRowCardWidthFor(w) !== card(w)) { return false; }
+        if (m.peerRowTextWidthFor(w) !== card(w) - 2 * m.PEER_ROW_LIST_PADDING_VP -
+          m.PEER_ROW_SELECT_BAR_VP) { return false; }
+        if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
+        if (m.peerRowNameWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
+        // the defect itself: the split column's form must not answer on the phone
+        if (m.peerRowIpWidthFor(w) === m.peerRowIpWidthVp(m.peerListNavBarWidthFor(w), w)) {
+          return false;
+        }
+        if (m.peerRowCopyTakeVp(w) !== 0 || m.peerRowCondensed(w)) { return false; }
+      }
+      return m.peerRowNameWidthFor(398) === 241 && m.peerRowIpWidthFor(398) === 241 &&
+        m.peerRowCardWidthFor(398) === 366 && m.peerRowTextWidthFor(398) === 339 &&
+        m.peerRowCardWidthFor(0) === 0 && m.peerRowTextWidthFor(-40) === 0;
+    })(),
+    `398→card ${m.peerRowCardWidthFor(398)} text ${m.peerRowTextWidthFor(398)} ` +
+    `name ${m.peerRowNameWidthFor(398)} ip ${m.peerRowIpWidthFor(398)}`);
+  check('peer row: the SPLIT branch still spends the list column (branch-aware, not rewritten)',
+    m.peerRowCardWidthFor(840) === m.peerListCardWidthVp(m.peerListNavBarWidthFor(840)) &&
+    m.peerRowTextWidthFor(840) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(840)) &&
+    m.peerRowCardWidthFor(1440) === m.peerListCardWidthVp(m.peerListNavBarWidthFor(1440)) &&
+    m.peerRowTextWidthFor(1440) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(1440)));
   // 0.0.43 (I8) DELIBERATE UPDATE: the name's width now also pays for the COPY slot
   // (peerRowCopySlotVp: the 16 vp glyph from the medium tier up, 0 at the compact
   // split tier, where the tier cannot afford it — see the I8 checks below), and the
   // wide meta is its derived 98. The floors the numbers are checked against are
   // unchanged.
+  // 0.0.45 (I10) DELIBERATE UPDATE: what the copy affordance takes is now the GAP and
+  // the slot together (peerRowCopyTakeVp — the text is content-sized, so the 5 vp
+  // that puts the mark after the glyphs is spent from the same budget). It is still
+  // 0 at 840, where the tier has no mark at all, so the compact tier is unchanged.
   check('peer row: the name column at every tier bottom and the measured I3 window',
     m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_COMPACT_VP - 0 &&
+      m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(840) &&
     m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP &&
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1024) &&
     m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP &&
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1250) &&
     m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP,
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1440),
     `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
     `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
   check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
@@ -1480,8 +1520,10 @@ try {
     `slot=${m.PEER_ROW_COPY_SLOT_VP} caption box=${m.TYPE_CAPTION_VP * 1.5}`);
   check('I8 §3: the rail\'s copied row keeps the value text beside the slot',
     m.RAIL_INFO_COPY_SLOT_VP === m.PEER_ROW_COPY_SLOT_VP &&
+    // 0.0.45 (I10): the value text now also pays the 5 vp that puts the mark after
+    // the glyphs — the same COPY_ICON_GAP_VP every other copy surface spends.
     m.railInfoValueTextWidthVp(840) ===
-      m.railInfoValueWidthVp(840) - m.RAIL_INFO_COPY_SLOT_VP &&
+      m.railInfoValueWidthVp(840) - m.RAIL_INFO_COPY_SLOT_VP - m.COPY_ICON_GAP_VP &&
     m.railInfoValueTextWidthVp(840) >= m.PEER_ROW_IP_MIN_WIDTH_VP &&
     PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })'));
 } catch (error) {
