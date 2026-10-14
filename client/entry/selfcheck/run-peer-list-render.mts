@@ -72,6 +72,20 @@ try {
     m.peerRowKey({ ...peer, last_handshake_s: 42 }) ===
       m.peerRowKey({ ...peer, last_handshake_s: 42 }));
 
+  // 0.0.40 (I5) §3: Index.peerRow now paints a 3 vp primary marker and a tinted
+  // surface on the row whose detail is open, so the row's SELECTED state is a
+  // rendered field and belongs in the key — otherwise opening B's detail would leave
+  // A's key exactly as it was, ArkUI would reuse A's node, and the marker would keep
+  // pointing at the peer nobody is looking at. The selection is PAGE state, not a
+  // document field, so it arrives as the key's second argument; the default (false)
+  // is what the 连接概览 pane's non-selectable rows pass.
+  check('key: the row\'s SELECTED state is part of the key (I5\'s rendered field)',
+    m.peerRowKey(peer, true) !== m.peerRowKey(peer, false) &&
+    m.peerRowKey(peer, true) !== m.peerRowKey(peer) &&
+    m.peerRowKey(peer, true) === m.peerRowKey({ ...peer }, true) &&
+    // the 0.0.39 key is exactly the default form (no silent change for the pane)
+    m.peerRowKey(peer) === m.peerRowKey(peer, false));
+
   // -------------------------------------------------------------------------
   // 2. the rendered list model — the documented ArkUI ForEach contract
   // -------------------------------------------------------------------------
@@ -121,6 +135,18 @@ try {
   check('model: only the changed row is rebuilt — the untouched peer reuses its node',
     both.rebuilt.length === 1 && both.rebuilt[0] === m.peerRowKey(after) &&
     both.rows.get(m.peerRowKey(peerB)) === label(peerB));;
+  // 0.0.40 (I5) §3: the selection MOVES — with the flag in the key, BOTH rows are
+  // rebuilt (the one that lost the marker and the one that gained it), so what is on
+  // screen can never disagree with which detail is open.
+  const selection = render(
+    render(empty, [m.peerRowKey(before, true), m.peerRowKey(peerB, false)],
+      ['A|selected', 'B']).rows,
+    [m.peerRowKey(before, false), m.peerRowKey(peerB, true)], ['A', 'B|selected']);
+  check('model: a moved selection rebuilds BOTH rows (the marker cannot stay behind)',
+    selection.rebuilt.length === 2 &&
+    selection.rows.get(m.peerRowKey(before, false)) === 'A' &&
+    selection.rows.get(m.peerRowKey(peerB, true)) === 'B|selected' &&
+    selection.rows.get(m.peerRowKey(before, true)) === undefined);
 
   // -------------------------------------------------------------------------
   // 3. the reader side: the 0.0.34 skip stays, and a real change re-applies

@@ -20,6 +20,18 @@
 // detail's default/advanced split as a classifier over a row's label, the
 // settings column's width clamp and the rail's connection-region cap.
 //
+// 0.0.40 (I5): the independent visual review (pc-ui-design/ASTRA-REVIEW-I4.md)
+// read the I4 build and its three 必须改 items each moved a number that already
+// lived here — the rail's traffic summary becomes an OMITTED row when the
+// document carries no traffic (and a bound-then-stacked pair when it does, so no
+// counter can ever be ellipsised), the connection region's 60 % height cap
+// becomes a HEIGHT BUDGET subtracted from the rail's own measured height (the
+// cap clipped the 详细状态 entry while 132 px of slack sat under the card), and
+// the peer row gains the review's own selected state (a 3 vp primary bar + a
+// selected-row tint, both of which come out of the row's text budget). The
+// chevron slot and the guide pane's block width/offset are the same kind of
+// number. Every one of them is asserted by run-harmony-layout.mts.
+//
 // 0.0.39 (I4): the independent visual review (pc-ui-design/K3-REVIEW-I2.md) read
 // the I2 build and its P0.2 asked for TWO things the I3 column could not do at
 // once — the column becomes a TIERED table (a cap per rail tier, plus its own
@@ -362,13 +374,20 @@ export const RAIL_NAV_LABEL_GAP_VP: number =
 /** The rail/content seam's stroke (vp): the rail and the pane share one surface. */
 export const RAIL_SEAM_WIDTH_VP: number = 1;
 
-// ---- the connect control's state ring (0.0.39, I4) -------------------------
+// ---- the connect control's state ring (0.0.39 (I4), widened by I5) ----------
 // The review's §4.3: the 104 vp disc painted the CURRENT STATE as its fill while
 // its label is the INVERSE ACTION (断开 on green), so it read as a lamp and it
 // outranked the status card it exists to support. Fill = the primary action role
 // always; the state moves to this ring in the state colour.
+//
+// 0.0.40 (I5) §7: the ASTRA review could barely SEE that ring ("圆盘状态环略薄")
+// — 2 vp of state colour on the rim of a 104 vp disc is 2 % of the silhouette.
+// 3 vp doubles the painted area without touching the disc's size, its label or
+// its fill; the review's alternative (a 2 vp dark gap between disc and ring)
+// needs a Stack layer and would shrink the disc, which §7 explicitly forbids
+// ("保持圆盘尺寸与文字"), so it is deliberately NOT taken.
 /** The connect disc's state ring (vp). */
-export const CONNECT_RING_WIDTH_VP: number = 2;
+export const CONNECT_RING_WIDTH_VP: number = 3;
 
 /**
  * The width (vp) an info row's VALUE gets in the rail's card: the rail width
@@ -382,6 +401,53 @@ export const CONNECT_RING_WIDTH_VP: number = 2;
  */
 export function railInfoValueWidthVp(widthVp: number): number {
   return railWidthFor(widthVp) - 2 * RAIL_PAGE_PADDING_VP - 2 * RAIL_CARD_PADDING_VP;
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.40 (I5) §1 — the rail's traffic summary: OMIT the zero, bound the value
+// ---------------------------------------------------------------------------
+// The ASTRA review's §1 read the rail card's traffic line as
+// "发送 0 B（0 字节） · 接收 0 …" — two defects at once: a row that exists only to
+// say zero, and an ellipsis at the 240/280 vp tiers because `byteText` appends
+// the exact byte count in brackets ("0 B（0 字节）" is ~3x the width of "0 B").
+//
+// The rule here is the review's first option, and it is a POLICY over the two
+// counters, not a string length check:
+//
+//   * no counter above zero (or no counters at all — a document with no wg
+//     section) ⇒ the row does not exist. "发送 0 B · 接收 0 B" is not information;
+//     it is a row the user has to read to learn nothing, and on a disconnected
+//     rail it is what pushed the card into its ceiling. One direction being zero
+//     while the other is not still renders BOTH: "接收 0 B" is then a real fact
+//     (nothing has arrived), not a placeholder.
+//   * when the row DOES exist its value is bounded, so it never needs an
+//     ellipsis: the pair is rendered as two stacked lines (发 X / 收 Y), each of
+//     which is "the 发/收 prefix + the widest formatBytes() output". The review's
+//     own §1 fallback ("240 vp 档或较长数值放不下时拆成「发送 / 接收」两行，行高约
+//     4 vp，数值不得省略"), applied at every tier instead of only the narrow one —
+//     one shape, and the arithmetic below is the proof that neither line can
+//     overflow at any rail width.
+/** The widest `formatBytes()` output ("1023.9 PB"): 9 glyphs. */
+export const RAIL_TRAFFIC_VALUE_CHARS: number = 9;
+/** One glyph of that value at the body size (0.5 em, proportional-Latin rule). */
+export const RAIL_TRAFFIC_CHAR_VP: number = TYPE_BODY_VP * 0.5;
+/** The 发/收 prefix and its space (one CJK glyph at the body size, plus 4 vp). */
+export const RAIL_TRAFFIC_PREFIX_VP: number = TYPE_BODY_VP + 4;
+/** The width (vp) one stacked traffic line can need — the row's own ceiling. */
+export function railTrafficLineWidthVp(): number {
+  return RAIL_TRAFFIC_PREFIX_VP + RAIL_TRAFFIC_VALUE_CHARS * RAIL_TRAFFIC_CHAR_VP;
+}
+
+/**
+ * Does the rail render a traffic summary at all? True exactly when the document
+ * carries counters AND at least one of them is above zero. A non-finite or
+ * missing number is "no traffic", the same direction `formatBytes` fails in
+ * (未知, never a fake zero).
+ */
+export function railTrafficVisible(txBytes: number, rxBytes: number): boolean {
+  const sent: boolean = Number.isFinite(txBytes) && txBytes > 0;
+  const received: boolean = Number.isFinite(rxBytes) && rxBytes > 0;
+  return sent || received;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +551,16 @@ export const PEER_ROW_META_COMPACT_VP: number = 18;
 export const PEER_ROW_L2_META_COMPACT_VP: number = 88;
 /** The floor line 2 needs for a dotted-quad IPv4 on ONE line at caption size. */
 export const PEER_ROW_IP_MIN_WIDTH_VP: number = 120;
+/**
+ * 0.0.40 (I5) §3 — the SELECTED row's left marker (vp). The ASTRA review's §3 read
+ * the I4 对端详情 frame and could not tell the row whose detail was open
+ * (`blkserver.netcenter.local`) from its neighbours: "该行底色、文字和边缘与相邻
+ * 行没有可辨认的选中区别". The marker is the same 3 vp primary bar the rail's own
+ * destination rows carry (RAIL_NAV_BAR_WIDTH_VP), so the "this is the current
+ * one" language is one language in the app, and it is part of the row's text
+ * budget below — a marker that overlaps the name would be paid for by the name.
+ */
+export const PEER_ROW_SELECT_BAR_VP: number = RAIL_NAV_BAR_WIDTH_VP;
 /** The characters a real peer fqdn is measured in (the review's 28-char name). */
 export const PEER_ROW_FQDN_CHARS: number = 28;
 /**
@@ -560,12 +636,15 @@ export function peerRowCondensed(windowVp: number): boolean {
 }
 
 /**
- * The width (vp) one peer row's TEXT has: the list column minus the page padding
- * and the list card padding on both sides. Line 2 (the NetBird IP) owns this full
- * width, so `>= PEER_ROW_IP_MIN_WIDTH_VP` is exactly "the IP never wraps".
+ * The width (vp) one peer row's TEXT has: the list column minus the page padding,
+ * the list card padding and — 0.0.40 (I5) §3 — the selected row's own left marker,
+ * which every row reserves (transparent when unselected, so selecting a peer does
+ * not shift the text by 3 vp). Line 2 (the NetBird IP) owns this full width, so
+ * `>= PEER_ROW_IP_MIN_WIDTH_VP` is exactly "the IP never wraps".
  */
 export function peerRowTextWidthVp(navBarWidthVp: number): number {
-  return navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP - 2 * PEER_ROW_LIST_PADDING_VP;
+  return navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP - 2 * PEER_ROW_LIST_PADDING_VP -
+    PEER_ROW_SELECT_BAR_VP;
 }
 
 /** Line 1's right-hand block (vp) at a window's tier — see the two constants. */
@@ -645,15 +724,103 @@ export const BUTTON_INLINE_WIDTH_VP: number = 240;
 export const DETAIL_CONTENT_MAX_WIDTH_VP: number = 720;
 
 // ---------------------------------------------------------------------------
-// 0.0.38 (I3) — the RAIL's connection region
+// 0.0.40 (I5) §5 — the GUIDE pane's empty-state block, and §8 the chevron slot
 // ---------------------------------------------------------------------------
+// §5: the disconnected pane was one small card floating in the middle of a large
+// empty area ("更像孤立通知" / "缺少页面归属"). The ASTRA review's minimal
+// correction is a real 对端 page: the SAME title and hint line the connected list
+// opens with, then a BORDERLESS, width-limited block with the state text and the
+// guidance. The block therefore carries no card fill, no stroke and no fixed
+// width; it is capped and left-aligned on the page's own text axis, and set 72 vp
+// under the title (the review's 64–80 vp) so the empty area reads as the page's
+// whitespace rather than as a hole.
+/** The guide pane's empty-state block's width cap (vp) — the review's 480. */
+export const GUIDE_EMPTY_MAX_WIDTH_VP: number = 480;
+/** The gap between the 对端 title block and that empty-state block (vp). */
+export const GUIDE_BLOCK_TOP_GAP_VP: number = 72;
+/** The guide body's line height (vp) — the review's §5 "行高 22 vp". */
+export const GUIDE_BODY_LINE_HEIGHT_VP: number = 22;
+
+// §8: the review could not tell the collapsed sections' chevron from the preview
+// text's own punctuation. The preview stays (it is a useful content hint) and the
+// disclosure symbol gets a FIXED slot at the row's right edge with a wider gap, so
+// the two never read as one run of glyphs. The symbol itself stays the native
+// 14 vp ▾/▸ pair the row already used.
+/** The collapsed-section chevron's fixed slot at the row's right edge (vp). */
+export const SECTION_CHEVRON_SLOT_VP: number = 24;
+/** The gap between the preview text and that slot (vp) — the review's §8. */
+export const SECTION_HEADER_GAP_VP: number = 12;
+
+// ---------------------------------------------------------------------------
+// 0.0.40 (I5) — THE RAIL's connection region: a HEIGHT BUDGET, not a percentage
+// ---------------------------------------------------------------------------
+// 0.0.39 (I4) capped the connection region at RAIL_CONNECTION_MAX_HEIGHT_PCT
+// (60 %) of the rail. The ASTRA review's §2 measured what that cap does: the
+// connection card was cut off INSIDE the 详细状态 entry — its subtitle and its
+// bottom rounded corner — while ~132 px of slack sat between the card and the
+// navigation separator ("到下方导航分隔线之间仍有明显空白"). A percentage cap
+// cannot see the slack: it clips at 60 % of the rail whatever the content is and
+// whatever room is left.
+//
+// The fix is the review's own §2 minimal correction ("改为随内容布局 … 不给状态卡
+// 一个会在入口中间截断的固定高度"): the region keeps its CONTENT height and gets a
+// ceiling that is the space the rail really has — the rail's measured height
+// minus what the bottom region (the 1 vp seam + the navigation block) always
+// takes. With the ceiling expressed against the rail, the region can only ever
+// scroll when the content genuinely does not fit; whenever there is slack, the
+// card closes at its own bottom edge. The page hands the rail's measured height
+// here (onRootAreaChange's Area.height is in vp) and the block's own Scroll
+// carries the short-window case.
+//
+// The bottom region's height is the SAME numbers the builder lays out (the row
+// height, the gap, the two paddings), summed here so the page cannot drift from
+// the ceiling it is measured against.
+/** The rail's destination row height (vp) — the pointer/touch floor of the rail. */
+export const RAIL_NAV_ROW_HEIGHT_VP: number = 48;
+/** The gap between the two destination rows (vp). */
+export const RAIL_NAV_ROW_GAP_VP: number = 4;
+/** The destination block's own top padding (vp) — 8 vp grid. */
+export const RAIL_DESTINATIONS_PAD_TOP_VP: number = 8;
+/** The destination block's own bottom padding (vp) — 8 vp grid. */
+export const RAIL_DESTINATIONS_PAD_BOTTOM_VP: number = 12;
 /**
- * The share of the rail the connection region may take before it starts
- * scrolling (%). The region is CONTENT-height; this cap is what keeps the
- * navigation group on screen when the region's content is taller than the rail (a
- * short window), instead of pushing it out of the bottom.
+ * What the rail's bottom region always takes (vp): the seam, the block's
+ * paddings, the two rows and the gap between them. 1 + 8 + 48 + 4 + 48 + 12 =
+ * 121. I5 removed the 导航 caption, so the block is these numbers and nothing
+ * else.
  */
-export const RAIL_CONNECTION_MAX_HEIGHT_PCT: number = 60;
+export const RAIL_DESTINATIONS_HEIGHT_VP: number =
+  RAIL_SEAM_WIDTH_VP + RAIL_DESTINATIONS_PAD_TOP_VP + RAIL_NAV_ROW_HEIGHT_VP +
+    RAIL_NAV_ROW_GAP_VP + RAIL_NAV_ROW_HEIGHT_VP + RAIL_DESTINATIONS_PAD_BOTTOM_VP;
+/**
+ * The connection region's floor (vp). The identity block's own head — the 16 vp
+ * page padding, the wordmark and the 104 vp disc — needs ~190 vp; 240 keeps the
+ * whole head and the card's first rows on screen in a window too short for
+ * anything else, and the region's Scroll carries the rest. It is also the
+ * compact rail's own width, so no new number enters the file.
+ */
+export const RAIL_CONNECTION_MIN_VP: number = 240;
+
+/**
+ * The connection region's ceiling (vp) for a rail height in vp: everything but
+ * the bottom region, floored at RAIL_CONNECTION_MIN_VP so a degenerate height can
+ * never produce a negative or collapsing constraint. The floor is what a rail
+ * shorter than `RAIL_DESTINATIONS_HEIGHT_VP + RAIL_CONNECTION_MIN_VP` (361 vp)
+ * gets; an UNMEASURED height never reaches this function — the page answers
+ * '100%' (no ceiling at all) for it, because the failure direction that matters is
+ * the card closing at its own bottom edge rather than being cut in the middle of
+ * a row.
+ */
+export function railConnectionMaxHeightVp(railHeightVp: number): number {
+  const budget: number = railHeightVp - RAIL_DESTINATIONS_HEIGHT_VP;
+  return budget > RAIL_CONNECTION_MIN_VP ? budget : RAIL_CONNECTION_MIN_VP;
+}
+
+/**
+ * The rail's 详细状态 entry's minimum row height (vp) — the review's §2 "使入口
+ * 整行至少 48 vp", i.e. the same pointer floor the destination rows carry.
+ */
+export const RAIL_ENTRY_MIN_HEIGHT_VP: number = 48;
 
 // ---------------------------------------------------------------------------
 // 0.0.39 (I4) — the 连接概览 pane (the review's §1.4 content spec)

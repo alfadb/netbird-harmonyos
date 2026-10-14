@@ -58,6 +58,13 @@ try {
   const layoutFixture = join(dir, 'NetBirdHarmonyLayout.ts');
   writeFileSync(layoutFixture, readFileSync(join(ets, 'pages', 'NetBirdHarmonyLayout.ets')));
   const m = await import(pathToFileURL(layoutFixture).href);
+  // 0.0.40 (I5) §3: the peer-row KEY is executed here too, because the selected
+  // state had to join it — the same byte-identical fixture run-peer-list-render.mts
+  // uses.
+  const modelFixture = join(dir, 'NetBirdUiModel.ts');
+  writeFileSync(modelFixture,
+    readFileSync(join(ets, 'vpnextensionability', 'NetBirdUiModel.ets')));
+  const ui = await import(pathToFileURL(modelFixture).href);
 
   // -------------------------------------------------------------------------
   // 1. the classifier: the official WidthBreakpoint boundaries, verbatim
@@ -249,9 +256,16 @@ try {
     PAGE.includes('railWidthFor') && PAGE.includes('PANE_DEST_GUIDE') &&
     PAGE.includes('widePaneDestination') && PAGE.includes('contentMaxWidthVp') &&
     PAGE.includes("from './NetBirdHarmonyLayout';"));
-  check('rail: the nav block is 48 vp rows with a selected accent bar and group caption',
-    PAGE.includes(".height(48)") && PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
-    PAGE.includes("Text('导航')") && PAGE.includes('PANE_DEST_PEERS') &&
+  // 0.0.40 (I5) DELIBERATE UPDATE (review §6): the 导航 CAPTION is gone — it named a
+  // two-row group and the 1 vp boundary above already separates the regions. The
+  // property this check exists to protect is unchanged: two 48 vp rows, each with a
+  // 3 vp selected accent bar, driven by the resolved destination. The row height is
+  // now the module's own number, which is also what the connection region's height
+  // budget measures its ceiling against (RAIL_DESTINATIONS_HEIGHT_VP).
+  check('rail: the nav block is 48 vp rows with a selected accent bar and NO caption',
+    m.RAIL_NAV_ROW_HEIGHT_VP === 48 && PAGE.includes('.height(RAIL_NAV_ROW_HEIGHT_VP)') &&
+    PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
+    !PAGE.includes("Text('导航')") && PAGE.includes('PANE_DEST_PEERS') &&
     PAGE.includes('PANE_DEST_SETTINGS'));
   check('rail: pointer + keyboard affordances on the PC (hover, focus, tab order, Enter)',
     (PAGE.match(/\.onHover\(/g) ?? []).length === 2 &&
@@ -294,9 +308,16 @@ try {
   // the 连接概览 pane's 离线对端 rows — and both go through the same peerRowKey, so
   // there is still exactly one place a rendered field has to be declared. The list
   // itself is still one site.
+  // 0.0.40 (I5) DELIBERATE UPDATE (§3): the LIST site now passes the row's selected
+  // state into the key as peerRowKey's second argument — the selected marker/tint is
+  // a rendered field, and a key that ignored it would keep the node of the row the
+  // user just left selected. The 连接概览 rows are not selectable and keep the
+  // one-argument call (i.e. selected=false).
   check('pane: the list is ONE ForEach site and EVERY peer row keys on peerRowKey',
     (PAGE.match(/ForEach\(this\.visiblePeers\(\)/g) ?? []).length === 1 &&
-    (PAGE.match(/\}, \(peer: UiPeerEntry\) => peerRowKey\(peer\)\)/g) ?? []).length === 2);
+    (PAGE.match(/\}, \(peer: UiPeerEntry\) => peerRowKey\(peer\)\)/g) ?? []).length === 1 &&
+    (PAGE.match(/\}, \(peer: UiPeerEntry\) => peerRowKey\(peer, this\.peerRowSelected\(peer\)\)\)/g)
+      ?? []).length === 1);
   check('pane: the 设置 body is hosted in its own single-column Navigation',
     PAGE.includes('Navigation(this.settingsNavStack) {') &&
     PAGE.includes('this.settingsTab()') &&
@@ -369,16 +390,20 @@ try {
   //     device defect was a fixed 96 vp label column squeezing "0/0 已连接"
   //     into 已连/接
   // -------------------------------------------------------------------------
-  // 0.0.38 (I3) DELIBERATE UPDATE: the rail gained a FOURTH RailInfoRow — the
-  // wide-branch-only 流量 summary (I3's E, the same aggregate wg counters the
-  // overview pane reads; nothing new is read for it). The property this check
-  // exists to protect is unchanged: every rail info row is the STACKED
-  // RailInfoRow @Component, never a fixed-label-column Row, so no value can be
+  // 0.0.40 (I5) DELIBERATE UPDATE (review §1 + §6): the rail's rows are now THREE
+  // RailInfoRow sites — NetBird IP always, 域名 / 对端 on the phone only (the PC rail
+  // defers them to the overview pane and the list's own header) — and the 流量 row is
+  // no longer a RailInfoRow at all: it is a hand-written label + two stacked value
+  // lines, because the review's §1 requires the two counters to be unable to
+  // ellipsise and a single RailInfoRow value line cannot promise that. The property
+  // this check exists to protect is unchanged: every rail info row is the STACKED
+  // label-above-value shape, never a fixed-label-column Row, so no value can be
   // squeezed into a mid-word break.
-  check('rows: the rail\'s four info rows are the stacked RailInfoRow component',
-    (PAGE.match(/RailInfoRow\(\{/g) ?? []).length === 4 &&
+  check('rows: the rail\'s three RailInfoRows are the stacked component, phone-only pair',
+    (PAGE.match(/RailInfoRow\(\{/g) ?? []).length === 3 &&
     PAGE.includes('struct RailInfoRow {') &&
-    PAGE.includes('if (this.wideLayout() && this.overviewTrafficText(true).length > 0) {'));
+    PAGE.includes('if (!this.wideLayout()) {') &&
+    PAGE.includes('if (this.wideLayout() && this.railTrafficRowVisible()) {'));
   check('rows: that component paints the label ABOVE the value, each full width',
     (() => {
       const body = PAGE.slice(PAGE.indexOf('struct RailInfoRow {'),
@@ -481,9 +506,15 @@ try {
   check('peer row: the name floor is a 28-character fqdn at 14 vp (28 × 7 = 196)',
     m.PEER_ROW_FQDN_CHARS === 28 && m.PEER_ROW_NAME_CHAR_VP === 7 &&
     m.PEER_ROW_NAME_MIN_WIDTH_VP === 196);
-  check('peer row: line 2 (the IP) owns the row minus page+card padding',
-    m.peerRowTextWidthVp(280) === 280 - 2 * 16 - 2 * 12 &&
-    m.peerRowTextWidthVp(480) === 480 - 2 * 16 - 2 * 12);
+  // 0.0.40 (I5) DELIBERATE UPDATE (§3): the selected row's 3 vp left marker is part
+  // of every row's budget (it is always reserved, transparent when unselected, so
+  // selecting a peer cannot shift the text), which is why it is subtracted below —
+  // and it is the SAME 3 vp the rail's destination rows carry.
+  check('peer row: the selected marker is the rail\'s own 3 vp bar, in the text budget',
+    m.PEER_ROW_SELECT_BAR_VP === 3 && m.PEER_ROW_SELECT_BAR_VP === m.RAIL_NAV_BAR_WIDTH_VP);
+  check('peer row: line 2 (the IP) owns the row minus page+card padding+select marker',
+    m.peerRowTextWidthVp(280) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP &&
+    m.peerRowTextWidthVp(480) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP);
   check('peer row: THE IP NEVER WRAPS — line 2 clears the dotted-quad floor in the whole range',
     (() => {
       for (let bar = m.NAV_BAR_WIDTH_VP; bar <= m.PEER_LIST_NAV_BAR_CAP_ROOMY_VP; bar += 1) {
@@ -504,10 +535,10 @@ try {
     })(),
     `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
   check('peer row: the name column at every tier bottom and the measured I3 window',
-    m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - 18 &&
-    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - 112 &&
-    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - 112 &&
-    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - 112,
+    m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 18 &&
+    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112 &&
+    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112 &&
+    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112,
     `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
     `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
   check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
@@ -613,8 +644,25 @@ try {
     m.settingsContentMaxWidthVp(680) === 0 && m.settingsContentMaxWidthVp(601) === 0 &&
     m.settingsContentMaxWidthVp(681) === 680 && m.settingsContentMaxWidthVp(2560) === 680 &&
     m.settingsContentMaxWidthVp(Number.NaN) === 0);
-  check('rail: the connection region is capped so the nav group can never be pushed out',
-    m.RAIL_CONNECTION_MAX_HEIGHT_PCT === 60);
+  // 0.0.40 (I5) DELIBERATE UPDATE (§2, review §2): the 60 % cap is REPLACED. The
+  // property it existed for (the nav group can never be pushed out by the connection
+  // region) is now arithmetic against the rail's own measured height: the ceiling is
+  // "everything but the bottom region", floored so a very short window still shows
+  // the identity block's head and scrolls the rest. A percentage could not see the
+  // slack the ASTRA review measured under the card — it clipped the 详细状态 entry
+  // with ~132 px of it sitting right there.
+  check('rail: the connection region\'s ceiling is the rail minus its bottom region',
+    m.RAIL_DESTINATIONS_HEIGHT_VP ===
+      m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP + m.RAIL_NAV_ROW_HEIGHT_VP +
+        m.RAIL_NAV_ROW_GAP_VP + m.RAIL_NAV_ROW_HEIGHT_VP + m.RAIL_DESTINATIONS_PAD_BOTTOM_VP &&
+    m.RAIL_DESTINATIONS_HEIGHT_VP === 121 &&
+    m.railConnectionMaxHeightVp(833) === 833 - 121 &&
+    m.railConnectionMaxHeightVp(1080) === 1080 - 121 &&
+    m.railConnectionMaxHeightVp(400) === 400 - 121 &&
+    m.railConnectionMaxHeightVp(300) === m.RAIL_CONNECTION_MIN_VP &&
+    m.railConnectionMaxHeightVp(0) === m.RAIL_CONNECTION_MIN_VP &&
+    m.railConnectionMaxHeightVp(Number.NaN) === m.RAIL_CONNECTION_MIN_VP &&
+    m.RAIL_CONNECTION_MAX_HEIGHT_PCT === undefined);
   check('buttons: the inline (non-primary) button is the review\'s ~240, not a bar',
     m.BUTTON_INLINE_WIDTH_VP === 240);
   check('detail: the detail card is capped at 720 vp',
@@ -633,8 +681,12 @@ try {
     m.RAIL_NAV_BAR_WIDTH_VP === 3);
   check('rail seam: the rail/pane boundary is a 1 vp stroke, one vp grid',
     m.RAIL_SEAM_WIDTH_VP === 1);
-  check('disc: the state ring is 2 vp (the review\'s §4.3)',
-    m.CONNECT_RING_WIDTH_VP === 2);
+  // 0.0.40 (I5) DELIBERATE UPDATE (§7, review §7): 2 → 3 vp. The review could
+  // "barely see" the ring at 2 vp on a 104 vp disc; the fill, the label and the disc
+  // size are unchanged, and the review's own alternative (a dark gap layer) is
+  // deliberately not taken because it would shrink the disc it forbids shrinking.
+  check('disc: the state ring is 3 vp (I5 §7, was 2)',
+    m.CONNECT_RING_WIDTH_VP === 3);
 
   // -------------------------------------------------------------------------
   // 18. the I3 + I4 WIRING, against the shipped page source
@@ -648,12 +700,17 @@ try {
     PAGE.includes('this.overviewRowKeys()') &&
     PAGE.includes('private overviewRowKeys(): string[] {') &&
     PAGE.includes('return overviewRowKeys(this.overviewFacts());'));
+  // 0.0.40 (I5) DELIBERATE UPDATE (§1): the aggregate counter reader moved from
+  // `overviewTrafficText` (byteText — size + exact bytes) to `railTrafficText`
+  // (formatBytes only), because the bracketed duplicate unit was two thirds of the
+  // string and the reason the rail's line ellipsised. The property is unchanged:
+  // every value the pane/rail render is a method call on the polled document.
   check('A: the overview reads live state only (no new field, no frozen by-value row)',
     PAGE.includes('private overviewDirectCount(): number {') &&
     PAGE.includes('private overviewRelayCount(): number {') &&
     PAGE.includes('private overviewOfflineCount(): number {') &&
     PAGE.includes('private overviewOfflinePeers(): UiPeerEntry[] {') &&
-    PAGE.includes('return byteText(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);') &&
+    PAGE.includes('return formatBytes(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);') &&
     PAGE.includes('private overviewHas(key: string): boolean {') &&
     !PAGE.includes('@State overviewRows'));
   check('A: THE PANE CARRIES THE NUMBERS — hero, three tiles, relay, offline, error',
@@ -840,11 +897,15 @@ try {
       const row = PAGE.slice(at, at + 500);
       return row.includes("Text('›')") && !row.includes('textOverflow');
     })());
+  // 0.0.40 (I5) DELIBERATE UPDATE (§6): the 导航 caption's `.padding({ left:
+  // RAIL_CARD_PADDING_VP, bottom: 4 })` is gone with the caption. The rail's text
+  // axis is unchanged and still asserted by the module's own sum (see the 'rail axis'
+  // check above): the caption was the row that USED that padding, not the axis.
   check('E+8: the rail text sits on ONE axis and the rail/pane seam is drawn',
     PAGE.includes('.padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })') &&
     PAGE.includes('.margin({ left: RAIL_NAV_LABEL_GAP_VP })') &&
     PAGE.includes('.width(RAIL_NAV_BAR_WIDTH_VP)') &&
-    PAGE.includes('.padding({ left: RAIL_CARD_PADDING_VP, bottom: 4 })') &&
+    !PAGE.includes("Text('导航')") &&
     PAGE.includes('.padding({ left: RAIL_CARD_PADDING_VP })') &&
     PAGE.includes('left: RAIL_DESTINATIONS_PADDING_VP, right: RAIL_DESTINATIONS_PADDING_VP,') &&
     PAGE.includes('.border({ width: { right: RAIL_SEAM_WIDTH_VP }, color: $r(\'app.color.nb_card_border\') })'));
@@ -876,6 +937,9 @@ try {
     !PAGE.includes('private toggleBusy()') &&
     PAGE.includes('return this.wideLayout() ? 104 : 132;') &&
     PAGE.includes('return this.wideLayout() ? 18 : 22;'));
+  // 0.0.40 (I5) DELIBERATE UPDATE (§3): the row now paints one more nb_primary — the
+  // selected row's own 3 vp marker (2 chips + 1 marker; the marker is transparent
+  // until that row is the selected one).
   check('P1.6: the 中继 chip carries the primary tint, warning stays for warnings',
     // The chip is the only tinted pill in the peer row and it pairs the primary INK
     // with the info tint in BOTH row shapes. The warning tint keeps its ONE other
@@ -887,7 +951,7 @@ try {
       const primary = /\$r\('app\.color\.nb_primary'\)/g;
       const warning = /\$r\('app\.color\.nb_status_warning_background'\)/g;
       return (row.match(info) ?? []).length === 2 && !warning.test(row) &&
-        (row.match(primary) ?? []).length === 2 &&
+        (row.match(primary) ?? []).length === 3 &&
         (PAGE.match(warning) ?? []).length === 1;
     })());
   check('G: the narrow branch keeps its information architecture (bottom tabs, one column)',
@@ -897,6 +961,177 @@ try {
     PAGE.includes("return '100%';") &&
     PAGE.includes("return this.wideLayout() ? 'auto' : '100%';") &&
     !PAGE.includes('deviceInfo.deviceType'));
+
+  // -------------------------------------------------------------------------
+  // 19. 0.0.40 (I5) — THE ASTRA REVIEW'S EIGHT FINDINGS, each as a property of
+  //     the pure module and/or of the shipped page source
+  // -------------------------------------------------------------------------
+
+  // §1 — THE TRAFFIC SUMMARY: omit the zero, and the surviving row cannot be
+  // ellipsised. Two halves: the POLICY over the two counters, and the WIDTH of one
+  // stacked line against the narrowest rail's value column.
+  check('I5 §1: the traffic row exists only when a counter is above zero',
+    !m.railTrafficVisible(0, 0) &&
+    m.railTrafficVisible(1, 0) && m.railTrafficVisible(0, 1) &&
+    m.railTrafficVisible(1024, 0) &&
+    // a missing / non-finite counter is "no traffic", never a fake zero
+    !m.railTrafficVisible(Number.NaN, 0) &&
+    !m.railTrafficVisible(undefined as unknown as number, 0) &&
+    !m.railTrafficVisible(-1, -1) &&
+    // …and an infinite counter is not a value the row can print either
+    !m.railTrafficVisible(Number.POSITIVE_INFINITY, 0));
+  check('I5 §1: one stacked traffic line fits the narrowest rail (no ellipsis possible)',
+    m.railTrafficLineWidthVp() ===
+      m.RAIL_TRAFFIC_PREFIX_VP + m.RAIL_TRAFFIC_VALUE_CHARS * m.RAIL_TRAFFIC_CHAR_VP &&
+    m.railTrafficLineWidthVp() <= m.railInfoValueWidthVp(840) &&
+    m.railTrafficLineWidthVp() <= m.RAIL_INFO_MIN_VALUE_VP,
+    `line=${m.railTrafficLineWidthVp()} value column at 840=${m.railInfoValueWidthVp(840)}`);
+  check('I5 §1: the row is wired to the policy, stacked, and never ellipsised',
+    PAGE.includes('private railTrafficRowVisible(): boolean {') &&
+    PAGE.includes('return railTrafficVisible(traffic.tx_bytes, traffic.rx_bytes_to_tun);') &&
+    PAGE.includes('private railTrafficText(sent: boolean): string {') &&
+    PAGE.includes('return formatBytes(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);') &&
+    PAGE.includes('if (this.wideLayout() && this.railTrafficRowVisible()) {') &&
+    PAGE.includes('Text(`发 ${this.railTrafficText(true)}`)') &&
+    PAGE.includes('Text(`收 ${this.railTrafficText(false)}`)') &&
+    // the bracketed byte count left the rail (byteText stays in 详细状态 only)
+    !PAGE.includes('overviewTrafficText') &&
+    (() => {
+      // The traffic block itself must carry no textOverflow at all: with the width
+      // arithmetic above, an ellipsis there would be a silent truncation waiting for
+      // the one value nobody checked.
+      const at = PAGE.indexOf('if (this.wideLayout() && this.railTrafficRowVisible()) {');
+      const block = PAGE.slice(at, PAGE.indexOf('if (this.lastErrorLine().length > 0) {', at));
+      return block.length > 0 && !block.includes('textOverflow');
+    })());
+
+  // §2 — THE CARD IS NOT CLIPPED. The geometry is expressible: the ceiling must be
+  // the rail minus what the bottom region always takes, so it can only reach the
+  // Scroll when the rail genuinely cannot hold the card.
+  check('I5 §2: the ceiling clears the card at the captured windows and keeps the nav room',
+    // the ASTRA frame's rail height and the 19:53 capture window's:
+    m.railConnectionMaxHeightVp(833) === 712 && m.railConnectionMaxHeightVp(1240) === 1119 &&
+    m.railConnectionMaxHeightVp(833) >= m.RAIL_CONNECTION_MIN_VP &&
+    m.railConnectionMaxHeightVp(833) + m.RAIL_DESTINATIONS_HEIGHT_VP === 833);
+  check('I5 §2: the ceiling is STRICTLY roomier than the retired 60 % cap',
+    // The monotonicity that makes the fix safe at every window, not just the
+    // captured one: H - 121 > 0.6 H for every rail taller than 302.5 vp, i.e. the
+    // new ceiling can only ever give the region MORE room than the percentage did.
+    (() => {
+      for (let h = 303; h <= 3000; h += 1) {
+        if (m.railConnectionMaxHeightVp(h) <= 0.6 * h) { return false; }
+      }
+      return true;
+    })());
+  check('I5 §2: the page measures the rail and the 详细状态 entry keeps its 48 vp row',
+    PAGE.includes('@State heightVp: number = 0;') &&
+    PAGE.includes('const height: number = newArea.height as number;') &&
+    PAGE.includes('if (height > 0 && height !== this.heightVp) {') &&
+    PAGE.includes('private railConnectionMaxHeight(): Length {') &&
+    PAGE.includes('return railConnectionMaxHeightVp(railHeight);') &&
+    !PAGE.includes('RAIL_CONNECTION_MAX_HEIGHT_PCT') &&
+    m.RAIL_ENTRY_MIN_HEIGHT_VP === 48 &&
+    PAGE.includes('.constraintSize({ minHeight: RAIL_ENTRY_MIN_HEIGHT_VP })'));
+
+  // §3 — THE SELECTED ROW (+ the row key). The key is EXECUTED, not merely grepped:
+  // the selected flag has to be part of it, both ways round.
+  check('I5 §3: the selected flag is part of peerRowKey (both directions)',
+    ui.peerRowKey({ pub_key: 'K', name: 'n', ip: 'i', online: true, connection: 'direct',
+      status: 'connected' }, true) !==
+    ui.peerRowKey({ pub_key: 'K', name: 'n', ip: 'i', online: true, connection: 'direct',
+      status: 'connected' }, false) &&
+    // the default keeps the 连接概览 rows' key byte-identical to 0.0.39
+    ui.peerRowKey({ pub_key: 'K', name: 'n', ip: 'i', online: true, connection: 'direct',
+      status: 'connected' }) ===
+    ui.peerRowKey({ pub_key: 'K', name: 'n', ip: 'i', online: true, connection: 'direct',
+      status: 'connected' }, false));
+  check('I5 §3: the row paints the marker + the tint from the observed selection',
+    PAGE.includes('private peerRowSelected(peer: UiPeerEntry): boolean {') &&
+    PAGE.includes('return selected !== null && selected.pub_key === peer.pub_key;') &&
+    PAGE.includes('width: { left: PEER_ROW_SELECT_BAR_VP },') &&
+    PAGE.includes("this.peerRowSelected(peer) ? $r('app.color.nb_primary') : Color.Transparent") &&
+    PAGE.includes('.backgroundColor(this.peerRowSelected(peer)') &&
+    PAGE.includes("? $r('app.color.nb_row_selected_background') : Color.Transparent)") &&
+    // …and the key carries it, so the framework cannot reuse the row that was just
+    // deselected
+    PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))'));
+
+  // §5 — THE DISCONNECTED WORKSPACE. The title block is the SAME bytes as the
+  // connected list's, so "the page starts in the same place" is checkable.
+  check('I5 §5: the guide pane opens with the SAME 对端 header the list uses',
+    (() => {
+      const header = ["Text('对端')", '.fontSize(TYPE_PAGE_TITLE_VP)',
+        '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))",
+        ".width('100%')"].join('\n            ');
+      // exactly TWO occurrences: the peer list's header and the guide's.
+      const hits = PAGE.split(header).length - 1;
+      const guide = PAGE.slice(PAGE.indexOf('wideGuidePane() {'),
+        PAGE.indexOf('connectionOverviewPane() {'));
+      return hits === 2 && guide.includes("Text('对端')") &&
+        guide.indexOf("Text('对端')") < guide.indexOf('GUIDE_EMPTY_MAX_WIDTH_VP') &&
+        guide.includes('.margin({ top: 8 })');
+    })());
+  check('I5 §5: the empty-state block is BORDERLESS, width-capped and 72 vp under the title',
+    m.GUIDE_EMPTY_MAX_WIDTH_VP === 480 && m.GUIDE_BLOCK_TOP_GAP_VP === 72 &&
+    m.GUIDE_BODY_LINE_HEIGHT_VP === 22 &&
+    (() => {
+      const guide = PAGE.slice(PAGE.indexOf('wideGuidePane() {'),
+        PAGE.indexOf('connectionOverviewPane() {'));
+      return guide.includes('.constraintSize({ maxWidth: GUIDE_EMPTY_MAX_WIDTH_VP })') &&
+        guide.includes('.margin({ top: GUIDE_BLOCK_TOP_GAP_VP })') &&
+        guide.includes('.lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)') &&
+        // the small centred card is gone: no card fill, no stroke, no centring
+        !guide.includes('nb_card_background') && !guide.includes('.border(') &&
+        !guide.includes('justifyContent(FlexAlign.Center)') &&
+        // the connect control still lives in the rail, never here
+        !guide.includes('this.requestStart()') && !guide.includes('this.requestStop()') &&
+        !guide.includes('this.toggleLabel()');
+    })());
+
+  // §6 — the rail's retained set, and the caption that is gone.
+  check('I5 §6: the PC rail keeps 状态 + NetBird IP, drops 域名/对端 to the pane',
+    (() => {
+      const from = PAGE.indexOf('Column({ space: 4 }) {\n          Row({ space: 10 }) {');
+      const card = PAGE.slice(from, PAGE.indexOf('if (this.sessionRowOffer()) {', from));
+      return from > 0 && card.includes('this.stateText()') &&
+        card.includes("label: 'NetBird IP'") &&
+        card.includes('if (!this.wideLayout()) {') &&
+        card.includes("label: '域名'") && card.includes("label: '对端'") &&
+        // the phone keeps all three: the guard is the wide branch's, not the row's
+        card.indexOf('if (!this.wideLayout()) {') < card.indexOf("label: '域名'") &&
+        card.indexOf("label: '对端'") < card.indexOf("Text('详细状态')");
+    })());
+  check('I5 §6: no 导航 caption literal is left anywhere in the page',
+    // No Text('导航') and no string literal at all; a COMMENT may still explain that
+    // the caption is gone — that is documentation, not a rendered line.
+    !PAGE.includes("Text('导航')") && !/['"]导航['"]/.test(PAGE));
+
+  // §4 — the neutral button's ink is its OWN role, never the primary role's.
+  check('I5 §4: every neutral button wears the neutral ink (no cross-role ink)',
+    PAGE.includes("$r('app.color.nb_on_neutral_button')") &&
+    (PAGE.match(/\$r\('app\.color\.nb_neutral_button_background'\)/g) ?? []).length ===
+      (PAGE.match(/\$r\('app\.color\.nb_on_neutral_button'\)/g) ?? []).length &&
+    // the dual-surface button swaps BOTH attributes on the same condition
+    PAGE.includes('this.logExportBusy\n          ? $r(\'app.color.nb_on_neutral_button\')') &&
+    !PAGE.includes(".backgroundColor($r('app.color.nb_neutral_button_background'))\n" +
+      "            .fontColor($r('app.color.nb_on_primary'))"));
+
+  // §8 — the chevron's own slot, and the preview's trailing separator that the
+  // reviewer could not confirm (it is not there).
+  check('I5 §8: the section chevron has a fixed 24 vp slot 12 vp from the preview',
+    m.SECTION_CHEVRON_SLOT_VP === 24 && m.SECTION_HEADER_GAP_VP === 12 &&
+    PAGE.includes('Row({ space: SECTION_HEADER_GAP_VP })') &&
+    PAGE.includes('.width(SECTION_CHEVRON_SLOT_VP)'));
+  check('I5 §8: no collapsed-section summary ends with a stray separator',
+    (() => {
+      // Every summary literal the page hands a section header: none may end with
+      // ' ·' (the reviewer's unconfirmed "尾随 ·"), and neither may the rail's own
+      // caption sentence.
+      const summaries = PAGE.match(/summary: '[^']*'/g) ?? [];
+      const texts = PAGE.match(/Text\('[^']* · [^']*'\)/g) ?? [];
+      return summaries.length > 0 && summaries.every((s: string) => !/ ·'$/.test(s)) &&
+        texts.every((s: string) => !/ ·'\)$/.test(s));
+    })());
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);

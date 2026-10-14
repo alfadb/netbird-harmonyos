@@ -76,6 +76,13 @@ const CONTRACT: Array<[string, string, string]> = [
   ['nb_primary', '#17324D', '#7FB2D9'],
   ['nb_on_primary', '#FFFFFF', '#0B1218'],
   ['nb_neutral_button_background', '#8A9AA6', '#3A4750'],
+  // 0.0.40 (I5) §4: the ink that sits ON the neutral surface. Until I5 every
+  // neutral button borrowed nb_on_primary, which is a DARK ink in dark mode
+  // (#0B1218 on #3A4750 — ~2:1, i.e. the ASTRA review's "返回 按钮的深色文字像禁用
+  // 态"). The neutral surface is not the primary role, so it gets its own ink: the
+  // light step is unchanged (#FFFFFF) and the dark step is nb_text_primary's own
+  // #E8EEF3, the colour the review named.
+  ['nb_on_neutral_button', '#FFFFFF', '#E8EEF3'],
   ['nb_status_success', '#176B3A', '#6FCF97'],
   ['nb_status_warning', '#8A6D1A', '#E8C468'],
   ['nb_status_error', '#A12622', '#F08A82'],
@@ -85,6 +92,11 @@ const CONTRACT: Array<[string, string, string]> = [
   // chip's tint is the primary/info role rather than the warning one — the new
   // token, in both modes, ~5.8:1 (dark) / ~10.5:1 (light) against nb_primary.
   ['nb_status_info_background', '#DCE8F2', '#233240'],
+  // 0.0.40 (I5) §3: the selected peer row's tint. The review named #263D4D for the
+  // dark step (its own measured value); the light step is the same hue against the
+  // white card, so a selected row is visible without the 直连/中继 chip's own info
+  // tint becoming indistinguishable from the row it sits on.
+  ['nb_row_selected_background', '#E4EDF5', '#263D4D'],
   ['nb_on_status', '#FFFFFF', '#0B1218'],
   ['nb_window_status_bar_background', '#F2F6F8', '#10171D'],
   ['nb_window_navigation_bar_background', '#F2F6F8', '#10171D'],
@@ -122,7 +134,8 @@ const ROLE_PAIRS: Array<[string, string]> = [
   ['nb_status_success', 'nb_on_status'],
   ['nb_status_warning', 'nb_on_status'],
   ['nb_status_error', 'nb_on_status'],
-  ['nb_neutral_button_background', 'nb_on_primary'],
+  // 0.0.40 (I5) §4: the neutral surface's own ink (see the contract entry).
+  ['nb_neutral_button_background', 'nb_on_neutral_button'],
 ];
 let pairsOk = true;
 for (const [fill, ink] of ROLE_PAIRS) {
@@ -270,17 +283,26 @@ check('EntryAbility performs no device-wide theme write (follow-system app scope
 
 // 7. Every themed Button that paints a filled role carries an EXPLICIT on-role
 //    ink (no reliance on the platform default font color for a filled button).
+//    0.0.40 (I5) §4: the NEUTRAL fill's own ink counts as its on-role — using
+//    nb_on_primary on the neutral surface was the defect that check now prevents
+//    (dark mode: near-black ink on dark slate), so a block may carry either the
+//    role's own ink or, for the one button that flips between primary and neutral,
+//    both.
 const buttonBlocks = PAGE.match(/Button\([^)]*\)[\s\S]{0,400}?\.onClick/g) ?? [];
 const filledWithoutInk: string[] = [];
 for (const block of buttonBlocks) {
-  if (block.includes('nb_primary') || block.includes('nb_neutral_button_background') ||
-    block.includes('nb_status_success')) {
-    if (!block.includes('nb_on_primary') && !block.includes('nb_on_status')) {
-      filledWithoutInk.push(block.split('\n').slice(0, 3).join(' ').trim());
-    }
+  const fills: string[] = [];
+  if (block.includes('nb_primary')) { fills.push('nb_on_primary'); }
+  if (block.includes('nb_neutral_button_background')) { fills.push('nb_on_neutral_button'); }
+  if (block.includes('nb_status_success')) { fills.push('nb_on_status'); }
+  const declared: boolean = fills.length === 0 ||
+    fills.every((ink: string) => block.includes(ink));
+  if (!declared) {
+    filledWithoutInk.push(block.split('\n').slice(0, 3).join(' ').trim());
   }
 }
-check('every filled-role Button declares an explicit on-role ink', filledWithoutInk.length === 0);
+check('every filled-role Button declares its own role ink (no cross-role ink)',
+  filledWithoutInk.length === 0);
 if (filledWithoutInk.length > 0) { console.log(`     ${filledWithoutInk.join('\n     ')}`); }
 
 // 8. The embedded remote page stays provider-controlled: no JS/CSS injection and

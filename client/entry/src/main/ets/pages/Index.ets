@@ -167,7 +167,8 @@ import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
 // scale (type sizes / rail paddings). The page still only asks it.
 import {
   BUTTON_INLINE_WIDTH_VP, CONNECT_RING_WIDTH_VP, contentMaxWidthVp,
-  DETAIL_CONTENT_MAX_WIDTH_VP, GUIDE_LOGIN,
+  DETAIL_CONTENT_MAX_WIDTH_VP, GUIDE_BLOCK_TOP_GAP_VP, GUIDE_BODY_LINE_HEIGHT_VP,
+  GUIDE_EMPTY_MAX_WIDTH_VP, GUIDE_LOGIN,
   OV_HERO_ADDRESS, OV_HERO_FQDN, OV_ROW_ERROR, OV_ROW_NONE, OV_ROW_OFFLINE,
   OV_ROW_RELAY_IN_USE, OV_TILE_CONNECTED, OV_TILE_DIRECT, OV_TILE_RELAY,
   OVERVIEW_CONTENT_MAX_WIDTH_VP, OVERVIEW_OFFLINE_MAX_ROWS, OVERVIEW_TILE_HEIGHT_VP,
@@ -175,12 +176,15 @@ import {
   PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf,
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
   peerDetailSectionOf, peerFqdnDuplicatesTitle, PEER_ROW_LIST_PADDING_VP,
-  PEER_ROW_MIN_HEIGHT_VP, peerContentMinWidthVp, peerListNavBarWidthFor,
-  peerRowCondensed, peerSearchWidthVp, RAIL_CARD_PADDING_VP,
-  RAIL_CONNECTION_MAX_HEIGHT_PCT, RAIL_DESTINATIONS_PADDING_VP,
-  RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_PADDING_VP,
-  RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
-  railWidthFor, settingsContentMaxWidthVp, splitPaneWidthVp,
+  PEER_ROW_MIN_HEIGHT_VP, PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
+  peerListNavBarWidthFor, peerRowCondensed, peerSearchWidthVp, RAIL_CARD_PADDING_VP,
+  RAIL_DESTINATIONS_PAD_BOTTOM_VP,
+  RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
+  RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
+  RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
+  railConnectionMaxHeightVp, railTrafficVisible,
+  railWidthFor, SECTION_CHEVRON_SLOT_VP, SECTION_HEADER_GAP_VP,
+  settingsContentMaxWidthVp, splitPaneWidthVp,
   TYPE_APP_TITLE_VP, TYPE_BODY_VP, TYPE_CAPTION_VP, TYPE_PAGE_TITLE_VP,
   TYPE_SECTION_TITLE_VP, TYPE_STAT_VALUE_VP, WidePaneFacts, wideGuideKind,
   widePaneDestination
@@ -908,7 +912,14 @@ struct DetailSectionHeader {
   };
 
   build() {
-    Row({ space: 8 }) {
+    // 0.0.40 (I5) §8 (review §8): the disclosure symbol gets its own fixed 24 vp
+    // slot at the row's right edge and a 12 vp gap from the preview text, so the two
+    // never read as one run of glyphs ("当前末端符号小，容易与预览标点混读"). The
+    // preview text itself is unchanged — the review could not confirm it ends with a
+    // stray separator and the shipped strings do not (see run-harmony-layout's §8
+    // check, which pins that no summary ends with one) — and the whole row is still
+    // the click target.
+    Row({ space: SECTION_HEADER_GAP_VP }) {
       Text(this.title ? this.title : '')
         .fontSize(TYPE_SECTION_TITLE_VP)
         .fontWeight(FontWeight.Medium)
@@ -923,6 +934,8 @@ struct DetailSectionHeader {
       Text(this.expanded ? '▾' : '▸')
         .fontSize(TYPE_CAPTION_VP)
         .fontColor($r('app.color.nb_text_muted'))
+        .width(SECTION_CHEVRON_SLOT_VP)
+        .textAlign(TextAlign.Center)
     }
     .width('100%')
     .padding({ top: 12, bottom: 8 })
@@ -1113,6 +1126,12 @@ struct Index {
   // for layout (see NetBirdHarmonyLayout's header): a resized desktop window walks
   // through every tier.
   @State widthVp: number = 0;
+  // 0.0.40 (I5) §2: the same observer's HEIGHT in vp. The rail's connection region
+  // is capped against the rail's own height (railConnectionMaxHeightVp) instead of
+  // a percentage of it, and the root container's Area is already in vp — so this is
+  // the number the ceiling is measured against, and it is observed rather than
+  // assumed exactly like the width.
+  @State heightVp: number = 0;
   // 0.0.37 (I2) pointer affordance: which rail navigation row the pointer is over
   // (0 = none — the same value PANE_DEST_GUIDE carries, since the guide is what
   // "no destination" means). @State because it paints: hoverEffect gives the
@@ -2549,6 +2568,17 @@ struct Index {
     return peer !== null ? peer.name : '';
   }
 
+  /**
+   * 0.0.40 (I5) §3: is THIS list row the peer whose detail is open? Identity is the
+   * public key (the same field selectedPeerLive uses to re-read the live row), and
+   * the answer feeds both the row's selected treatment and its ForEach key — see
+   * peerRow's own comment and NetBirdUiModel.peerRowKey's second parameter.
+   */
+  private peerRowSelected(peer: UiPeerEntry): boolean {
+    const selected: UiPeerEntry | null = this.selectedPeer;
+    return selected !== null && selected.pub_key === peer.pub_key;
+  }
+
   // 主题 (2026-10-09): the three-state peer status mapped to the SHARED
   // base/dark color resources. NetBirdUiModel stays a pure Node-loadable module
   // and keeps its own literal hex for the same three states (its host selfcheck
@@ -2768,13 +2798,33 @@ struct Index {
     return count;
   }
 
-  /** The aggregate counter text ('' when the document carried no wg section). */
-  private overviewTrafficText(sent: boolean): string {
+  /**
+   * 0.0.40 (I5) §1: the rail's traffic COUNTER text — `formatBytes` only, no
+   * bracketed byte count. `byteText` (size + exact bytes) is still what the 详细状态
+   * page and the peer detail render, where the reconciliation numbers belong; on the
+   * rail the bracket was ~2/3 of the string's width and the reason the line
+   * ellipsised. '' when the document carried no wg section.
+   */
+  private railTrafficText(sent: boolean): string {
     const traffic: DetailTrafficView | null = this.trafficView();
     if (traffic === null) {
       return '';
     }
-    return byteText(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);
+    return formatBytes(sent ? traffic.tx_bytes : traffic.rx_bytes_to_tun);
+  }
+
+  /**
+   * 0.0.40 (I5) §1: does the rail render the traffic row at all? The pure policy
+   * over the two counters (railTrafficVisible) — the row does not exist unless one
+   * of them is above zero, so a disconnected rail has no "0 B" line to explain and
+   * a connected one never shows a zero-only pair.
+   */
+  private railTrafficRowVisible(): boolean {
+    const traffic: DetailTrafficView | null = this.trafficView();
+    if (traffic === null) {
+      return false;
+    }
+    return railTrafficVisible(traffic.tx_bytes, traffic.rx_bytes_to_tun);
   }
 
   private overviewFacts(): OverviewFacts {
@@ -4398,32 +4448,66 @@ struct Index {
               .fontColor(this.stateColor())
           }
           .margin({ bottom: 6 })
-          // 0.0.37 (I2): the three info rows are STACKED label-above-value
+          // 0.0.37 (I2): the info rows are STACKED label-above-value
           // (RailInfoRow) — the I1 device screenshot broke "0/0 已连接" between
           // 已 and 连 because the label's fixed 96 vp column squeezed the value.
+          //
+          // 0.0.40 (I5) §6: the PC rail keeps 状态 + NetBird IP. The 域名 and 对端
+          // rows are gone FROM THE RAIL ONLY (the phone's 主页 card keeps all of
+          // them — its own IA, and it has no overview pane to defer to): on the PC
+          // the 域名 lives in the overview pane's hero and on the peer detail, and
+          // the 对端 count is the peer list's OWN header line, so the rail was
+          // printing "11/20 已连接" a second time 200 px to the left of the same
+          // sentence. The ASTRA review's §6 names exactly this pair, and the IP
+          // stays because §6 says it must: while reading a REMOTE peer's detail the
+          // rail's own address is the only local anchor on screen.
           RailInfoRow({
             label: 'NetBird IP',
             value: this.homeAddressText()
           })
-          RailInfoRow({
-            label: '域名',
-            value: this.homeFqdnText()
-          })
-          RailInfoRow({
-            label: '对端',
-            value: this.homePeersText()
-          })
-          // 0.0.38 (I3) E: the rail's own traffic summary, WIDE BRANCH ONLY — the
-          // same aggregate WireGuard counters the overview pane and 详细状态 read
-          // (no new field, no new reader). It renders only when the document really
-          // carries the counters, and it is what keeps the connection card in
-          // proportion with the rail's height once the navigation group moved up
-          // under it. The phone's 主页 card is untouched (its own IA).
-          if (this.wideLayout() && this.overviewTrafficText(true).length > 0) {
+          if (!this.wideLayout()) {
             RailInfoRow({
-              label: '流量',
-              value: `发送 ${this.overviewTrafficText(true)} · 接收 ${this.overviewTrafficText(false)}`
+              label: '域名',
+              value: this.homeFqdnText()
             })
+            RailInfoRow({
+              label: '对端',
+              value: this.homePeersText()
+            })
+          }
+          // 0.0.38 (I3) E added the rail's own traffic summary here; its gate and its
+          // shape are 0.0.40 (I5) §1. See the comments on railTrafficVisible /
+          // railTrafficLineWidthVp in NetBirdHarmonyLayout: the row EXISTS only when
+          // the document carries a counter above zero (a "发送 0 B · 接收 0 B" row is
+          // a row the user reads to learn nothing, and on the disconnected rail it
+          // was what pushed the card into its ceiling), and when it exists its two
+          // counters are STACKED rather than run together with a " · " — each line
+          // is "发/收 + the widest possible formatBytes() output", 86.5 vp against
+          // the narrowest rail's 176 vp value column, so no counter can ever be
+          // ellipsised. The exact byte counts stay in 详细状态 / the peer detail
+          // (byteText), where there is room for them: the review's §1 asked for the
+          // bracketed duplicate unit to leave the rail.
+          if (this.wideLayout() && this.railTrafficRowVisible()) {
+            Column({ space: 2 }) {
+              Text('流量')
+                .fontSize(TYPE_CAPTION_VP)
+                .fontColor($r('app.color.nb_text_muted'))
+                .width('100%')
+                .maxLines(1)
+              Text(`发 ${this.railTrafficText(true)}`)
+                .fontSize(TYPE_BODY_VP)
+                .fontColor($r('app.color.nb_text_primary'))
+                .width('100%')
+                .maxLines(1)
+              Text(`收 ${this.railTrafficText(false)}`)
+                .fontSize(TYPE_BODY_VP)
+                .fontColor($r('app.color.nb_text_primary'))
+                .width('100%')
+                .maxLines(1)
+            }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .padding({ top: 6, bottom: 6 })
           }
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
@@ -4465,6 +4549,12 @@ struct Index {
           .width('100%')
           .alignItems(VerticalAlign.Center)
           .padding({ top: 10, bottom: 10 })
+          // 0.0.40 (I5) §2 (review §2): "使入口整行至少 48 vp" — the same pointer
+          // floor the rail's destination rows carry. The card's bottom 16 vp comes
+          // from the card's own padding(RAIL_CARD_PADDING_VP) below, and the region's
+          // ceiling (railConnectionMaxHeight) is what keeps the row whole instead of
+          // the row being what gets cut.
+          .constraintSize({ minHeight: RAIL_ENTRY_MIN_HEIGHT_VP })
           .hoverEffect(HoverEffect.Highlight)
           .focusable(true)
           .onClick(() => {
@@ -4534,7 +4624,11 @@ struct Index {
     .height(this.homeBodyHeight())
     .backgroundColor($r('app.color.nb_page_background'))
     .align(Alignment.Top)
-    .scrollBar(BarState.Off)
+    // 0.0.40 (I5) §2: in a window short enough that the connection region really
+    // has to scroll, the boundary must read as a scroll position and not as a
+    // broken card — the same rule the pane's own Scrolls already follow. The phone
+    // keeps BarState.Off (a finger does not need the cue).
+    .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
   }
 
   // ---- 对端 -------------------------------------------------------------------
@@ -4646,6 +4740,35 @@ struct Index {
     // target I2 introduced.
     .padding({ top: 12, bottom: 12 })
     .constraintSize({ minHeight: PEER_ROW_MIN_HEIGHT_VP })
+    // 0.0.40 (I5) §3 — THE SELECTED ROW. The ASTRA review read the I4 detail frame
+    // and could not tell the row whose detail was open from its neighbours: "该行
+    // 底色、文字和边缘与相邻行没有可辨认的选中区别 … 用户来回看列表与详情时，需要
+    // 再次比对完整域名才能知道正在查看谁" (§3). The treatment is the review's own
+    // two-part one:
+    //
+    //   * a 3 vp left marker in the app's action blue — RAIL_NAV_BAR_WIDTH_VP, the
+    //     SAME bar the rail's destination rows use, so "this is the current one"
+    //     is one language in the app;
+    //   * the row's own surface tint (nb_row_selected_background, the review's
+    //     #263D4D in dark).
+    //
+    // Both are painted by the observed selection rather than by hover: the marker is
+    // ALWAYS reserved (transparent when unselected), so selecting a peer cannot
+    // shift the row's text by 3 vp — the width that marker takes is subtracted in
+    // NetBirdHarmonyLayout.peerRowTextWidthVp, which is what keeps the name/IP
+    // arithmetic honest now that the row has one more thing in it.
+    //
+    // The selection is part of the row's KEY (peerRowKey(peer, selected) in the
+    // ForEach below), which is what makes it reactive at all: the 1 s reader
+    // replaces the whole peers[] on every applied document and ArkUI reuses a row
+    // whose key did not change, so a selection that is not in the key would keep
+    // its node and never repaint.
+    .border({
+      width: { left: PEER_ROW_SELECT_BAR_VP },
+      color: this.peerRowSelected(peer) ? $r('app.color.nb_primary') : Color.Transparent
+    })
+    .backgroundColor(this.peerRowSelected(peer)
+      ? $r('app.color.nb_row_selected_background') : Color.Transparent)
     // 0.0.37 (I2): pointer affordances on the PC. hoverEffect.Highlight is the
     // framework's own hover tint (no per-row @State, so the ForEach key/reuse
     // contract of 0.0.35 is untouched); focusable makes the row reachable in the
@@ -4704,7 +4827,7 @@ struct Index {
             .fontSize(TYPE_BODY_VP)
             .height(40)
             .backgroundColor($r('app.color.nb_neutral_button_background'))
-            .fontColor($r('app.color.nb_on_primary'))
+            .fontColor($r('app.color.nb_on_neutral_button'))
             .hoverEffect(HoverEffect.Highlight)
             .onClick(() => {
               this.closeVisibleSubflow();
@@ -4983,7 +5106,7 @@ struct Index {
               ListItem() {
                 this.peerRow(peer)
               }
-            }, (peer: UiPeerEntry) => peerRowKey(peer))
+            }, (peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer)))
           }
           .width('100%')
           .layoutWeight(1)
@@ -5081,7 +5204,7 @@ struct Index {
             .fontSize(TYPE_CAPTION_VP)
             .height(36)
             .backgroundColor($r('app.color.nb_neutral_button_background'))
-            .fontColor($r('app.color.nb_on_primary'))
+            .fontColor($r('app.color.nb_on_neutral_button'))
             .onClick((): void => this.cancelAccountLogin(false))
         }
       }
@@ -5285,13 +5408,18 @@ struct Index {
           .fontColor($r('app.color.nb_text_secondary'))
           .width('100%')
       }
+      // 0.0.40 (I5) §4: this is the one button that paints EITHER the primary or
+      // the neutral surface (it is disabled while exporting), so its ink follows the
+      // same condition — nb_on_primary is a dark ink in dark mode and would read as
+      // "disabled" on the neutral fill, the defect the 返回 control had.
       Button(this.logExportBusy ? '正在导出…' : '导出日志')
         .fontSize(TYPE_BODY_VP)
         .height(38)
         .width('100%')
         .backgroundColor(this.logExportBusy
           ? $r('app.color.nb_neutral_button_background') : $r('app.color.nb_primary'))
-        .fontColor($r('app.color.nb_on_primary'))
+        .fontColor(this.logExportBusy
+          ? $r('app.color.nb_on_neutral_button') : $r('app.color.nb_on_primary'))
         .enabled(!this.logExportBusy)
         .onClick(() => {
           // The picked URI is user data: only this marker is logged.
@@ -5344,7 +5472,7 @@ struct Index {
           .fontSize(TYPE_BODY_VP)
           .height(36)
           .backgroundColor($r('app.color.nb_neutral_button_background'))
-          .fontColor($r('app.color.nb_on_primary'))
+          .fontColor($r('app.color.nb_on_neutral_button'))
           .onClick(() => {
             this.closeVisibleSubflow();
           })
@@ -5751,7 +5879,7 @@ struct Index {
           .fontSize(TYPE_BODY_VP)
           .height(36)
           .backgroundColor($r('app.color.nb_neutral_button_background'))
-          .fontColor($r('app.color.nb_on_primary'))
+          .fontColor($r('app.color.nb_on_neutral_button'))
           .onClick(() => {
             this.closeVisibleSubflow();
           })
@@ -6423,9 +6551,24 @@ struct Index {
     return this.wideLayout() ? 'auto' : '100%';
   }
 
-  /** The rail connection region's cap (see RAIL_CONNECTION_MAX_HEIGHT_PCT). */
+  /**
+   * 0.0.40 (I5) §2: the rail connection region's ceiling, in vp — the space the
+   * rail really has above its bottom region (railConnectionMaxHeightVp), fed by the
+   * height onRootAreaChange() measured. 0.0.39 (I4) used a flat 60 % of the rail,
+   * which clipped the 详细状态 entry while slack sat under the card (the ASTRA
+   * review's §2), so the percentage is gone.
+   *
+   * An unmeasured height (the first frame, before the root has reported its area)
+   * answers '100%': no ceiling at all. The failure direction is deliberate — a card
+   * that closes at its own bottom edge is right, a card cut in the middle of a row
+   * is not.
+   */
   private railConnectionMaxHeight(): Length {
-    return `${RAIL_CONNECTION_MAX_HEIGHT_PCT}%`;
+    const railHeight: number = this.heightVp;
+    if (!(railHeight > 0)) {
+      return '100%';
+    }
+    return railConnectionMaxHeightVp(railHeight);
   }
 
   /**
@@ -6491,8 +6634,14 @@ struct Index {
   // The root container's width observer, shared by both branches: the mounted root
   // reports the page's area in vp, so a 2in1 freeform drag re-classifies the shell
   // frame by frame (a documented breakpoint trigger — no extra code path).
+  // 0.0.40 (I5) §2: the same Area carries the height the rail's connection-region
+  // ceiling is measured against (see railConnectionMaxHeight).
   private onRootAreaChange(newArea: Area): void {
     const width: number = newArea.width as number;
+    const height: number = newArea.height as number;
+    if (height > 0 && height !== this.heightVp) {
+      this.heightVp = height;
+    }
     if (width > 0 && width !== this.widthVp) {
       this.widthVp = width;
       // A window that just became wide enough shows the pane: make sure its route
@@ -6658,13 +6807,16 @@ struct Index {
       // whole void below the nav; the spacers put the rail's slack around the block
       // it belongs to, which is what "the dead middle third disappears" means here.
       //
-      // The identity block stays a DIRECT child of the rail (not a child of a
-      // weighted wrapper): RAIL_CONNECTION_MAX_HEIGHT_PCT is a percentage, and it
-      // has to resolve against the RAIL's height — nested one level deeper it
-      // resolved against the leftover space instead and the block's own Scroll
-      // clipped the 详细状态 entry (caught in the 19:45 device capture). The cap is
-      // the safety valve: a short window scrolls the connection block (it keeps its
-      // own Scroll) instead of pushing the 导航 group out of the bottom.
+      // The identity block stays a DIRECT child of the rail: it was a percentage cap
+      // in I4, and a percentage resolves against the PARENT's height — nested one
+      // level deeper it resolved against the leftover space instead and the block's
+      // own Scroll clipped the 详细状态 entry (19:45 device capture). It is now an
+      // absolute ceiling measured against the rail (railConnectionMaxHeight →
+      // railConnectionMaxHeightVp), which is the same reason it must stay here: the
+      // ceiling is expressed in the RAIL's height. What the ceiling guarantees is
+      // that the bottom region keeps its space — a short window scrolls the
+      // connection block (it keeps its own Scroll) instead of pushing that region
+      // out of the bottom.
       Column()
         .width('100%')
         .layoutWeight(1)
@@ -6712,8 +6864,16 @@ struct Index {
     // bottom of the rail), which is the deliberate relationship: the connection
     // surface owns the top of the column — it is the app's identity and the one
     // thing that must never scroll away — while the first-level destinations keep
-    // a stable, thumb-reachable position under the 1 vp boundary above. A caption
-    // makes the block read as a group rather than as two loose rows.
+    // a stable, thumb-reachable position under the 1 vp boundary above.
+    //
+    // 0.0.40 (I5) §6 (review §6, agreed with the product owner before this run):
+    // the 导航 CAPTION IS GONE. It named a group of exactly two rows and cost a
+    // text line plus 4 vp in a 240 vp column; the 1 vp boundary above already says
+    // "another region starts here" and the rows say what they are. What it leaves
+    // behind is the row geometry, which now comes from the module's own numbers
+    // (RAIL_NAV_ROW_HEIGHT_VP / RAIL_NAV_ROW_GAP_VP / the two paddings) — the same
+    // numbers RAIL_DESTINATIONS_HEIGHT_VP sums to 121 vp, i.e. the space the
+    // connection region's ceiling is measured against.
     //
     // 48 vp rows with a 3 vp selected accent bar (a clear selected state that does
     // not depend on colour alone), a hover tint from the framework's own
@@ -6721,14 +6881,7 @@ struct Index {
     // rows are written INLINE, not as a @Builder(index, label): a @Builder with two
     // or more by-value parameters never refreshes in ArkUI (the 0.0.35 statusDot
     // defect), and every attribute below is a function of observed state.
-    Column({ space: 4 }) {
-      Text('导航')
-        .fontSize(TYPE_CAPTION_VP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width('100%')
-        // 0.0.39 (I4) P1.8 (review §5.1): the caption sits on the rail's ONE text
-        // axis (32 vp = this block's 16 + the card padding), not at 24.
-        .padding({ left: RAIL_CARD_PADDING_VP, bottom: 4 })
+    Column({ space: RAIL_NAV_ROW_GAP_VP }) {
       Row() {
         Row()
           .width(RAIL_NAV_BAR_WIDTH_VP)
@@ -6746,7 +6899,7 @@ struct Index {
           .margin({ left: RAIL_NAV_LABEL_GAP_VP })
       }
       .width('100%')
-      .height(48)
+      .height(RAIL_NAV_ROW_HEIGHT_VP)
       .padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })
       .borderRadius(12)
       .backgroundColor(this.wideDestination() === PANE_DEST_PEERS ||
@@ -6794,7 +6947,7 @@ struct Index {
           .margin({ left: RAIL_NAV_LABEL_GAP_VP })
       }
       .width('100%')
-      .height(48)
+      .height(RAIL_NAV_ROW_HEIGHT_VP)
       .padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })
       .borderRadius(12)
       .backgroundColor(this.wideDestination() === PANE_DEST_SETTINGS ||
@@ -6826,12 +6979,12 @@ struct Index {
     }
     .width('100%')
     // 0.0.39 (I4) P1.8 (review §5.1): the block's own padding is the axis minus the
-    // card padding, so the 导航 caption and the accent bar land on the same 32 vp
-    // the card's text does (the caption adds RAIL_CARD_PADDING_VP back, the row's
-    // bar is at the block edge and its label 13 vp later).
+    // card padding, so the accent bar is at the block edge and its label 13 vp later
+    // lands on the same 32 vp the card's text does. I5 removed the caption that used
+    // to add RAIL_CARD_PADDING_VP back on top of this; the label's axis is unchanged.
     .padding({
       left: RAIL_DESTINATIONS_PADDING_VP, right: RAIL_DESTINATIONS_PADDING_VP,
-      top: 8, bottom: 12
+      top: RAIL_DESTINATIONS_PAD_TOP_VP, bottom: RAIL_DESTINATIONS_PAD_BOTTOM_VP
     })
   }
 
@@ -6968,89 +7121,134 @@ struct Index {
   //                            in the rail (the phone has it on the 主页 tab), so
   //                            the guide points at it instead of duplicating it.
   //   尚未配置服务器           → 去设置, because there is nothing to connect with yet.
+  //
+  // 0.0.40 (I5) §5 (the ASTRA review's §5 / (c)): the pane was ONE small card
+  // floating in the middle of the large empty area — "更像孤立通知 … 缺少页面归属"
+  // — so it is now a real 对端 WORKSPACE, composed exactly like the connected one:
+  //
+  //   * the SAME header block the peer list opens with (对端 at TYPE_PAGE_TITLE_VP /
+  //     Bold, then a 14 vp secondary caption line, the same 8 vp top margin, the same
+  //     16 vp page padding). A header that moves when the tunnel comes up is what
+  //     made the empty state read as a different page; this one does not move.
+  //   * then — 72 vp below it — a BORDERLESS, width-capped block carrying the state
+  //     text, the guidance and (when they exist) the login entry / 去设置. No card
+  //     fill, no stroke, no centring: the review asked for exactly that ("去掉现在的
+  //     小卡片底色和描边"), so the whitespace reads as the page's own.
+  //
+  // The state text stays state-driven (this.stateText()) and the connect CONTROL
+  // stays in the rail — nothing about the pane's rule changed, only its composition.
+  // The review's suggested 40 vp symbol is deliberately NOT added: `sys.symbol.*` is
+  // not enumerated in this SDK (the same reason I4 skipped the search field's
+  // magnifier), and the app's own verdict dot already carries the state colour.
   @Builder
   wideGuidePane() {
-    Column() {
-      Column({ space: 16 }) {
-        Row({ space: 10 }) {
-          Circle({ width: 12, height: 12 })
-            .fill(this.stateColor())
-          Text(this.configured ? this.stateText() : '尚未配置服务器')
+    Scroll() {
+      Column() {
+        // The SAME header as peerListBody's (title + one caption line), so the page
+        // starts in the same place whether the tunnel is up or down.
+        Column({ space: 2 }) {
+          Text('对端')
             .fontSize(TYPE_PAGE_TITLE_VP)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.stateColor())
-            .layoutWeight(1)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.nb_text_primary'))
+            .width('100%')
+          Text('连接后可在此搜索对端并查看详情。')
+            .fontSize(TYPE_CAPTION_VP)
+            .fontColor($r('app.color.nb_text_secondary'))
+            .width('100%')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         .width('100%')
-        // 0.0.37: 上一次失败原因, when one is recorded — and only when it says
-        // something the headline does not (for needs-login lastErrorLine() IS
-        // 需要登录, the headline).
-        if (this.lastErrorLine().length > 0 && this.lastErrorLine() !== this.stateText()) {
-          Text(this.lastErrorLine())
-            .fontSize(TYPE_CAPTION_VP)
-            .fontColor($r('app.color.nb_status_error'))
-            .width('100%')
-            .maxLines(3)
+        .alignItems(HorizontalAlign.Start)
+        .margin({ top: 8 })
+        // The empty state: the state verdict, the guidance, the entries.
+        Column({ space: 16 }) {
+          Row({ space: 10 }) {
+            Circle({ width: 12, height: 12 })
+              .fill(this.stateColor())
+            Text(this.configured ? this.stateText() : '尚未配置服务器')
+              .fontSize(TYPE_PAGE_TITLE_VP)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.stateColor())
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          // 0.0.37: 上一次失败原因, when one is recorded — and only when it says
+          // something the headline does not (for needs-login lastErrorLine() IS
+          // 需要登录, the headline).
+          if (this.lastErrorLine().length > 0 && this.lastErrorLine() !== this.stateText()) {
+            Text(this.lastErrorLine())
+              .fontSize(TYPE_CAPTION_VP)
+              .fontColor($r('app.color.nb_status_error'))
+              .width('100%')
+              .maxLines(3)
+          }
+          if (this.wideGuideKind() === GUIDE_LOGIN) {
+            Text('账户会话已过期或本设备未在管理端注册。重新登录后即可连接；连接成功后这里会显示对端列表。')
+              .fontSize(TYPE_CAPTION_VP)
+              .fontColor($r('app.color.nb_text_secondary'))
+              .width('100%')
+              .lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)
+              .maxLines(3)
+            Button(this.accountLoginBusy ? '正在登录…' : '账户登录')
+              .fontSize(TYPE_SECTION_TITLE_VP)
+              .height(44)
+              .width('100%')
+              .backgroundColor($r('app.color.nb_primary'))
+              .fontColor($r('app.color.nb_on_primary'))
+              .enabled(!this.accountLoginBusy)
+              .hoverEffect(HoverEffect.Highlight)
+              .focusable(true)
+              .onClick((): void => {
+                this.beginConnectLogin();
+              })
+          } else {
+            Text(this.configured
+              ? '连接开关位于左栏，点按圆形按钮即可连接。连接成功后这里会显示对端列表。'
+              : '请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
+              .fontSize(TYPE_CAPTION_VP)
+              .fontColor($r('app.color.nb_text_secondary'))
+              .width('100%')
+              .lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)
+              .maxLines(3)
+          }
+          if (!this.configured || this.wideGuideKind() === GUIDE_LOGIN) {
+            Button('去设置')
+              .fontSize(TYPE_SECTION_TITLE_VP)
+              .height(44)
+              .width('100%')
+              // The app's existing SECONDARY action role (the same pair 对端详情's
+              // 返回 uses), not a hand-rolled outline: one neutral fill + its explicit
+              // on-role ink, from the base/dark palette.
+              .backgroundColor($r('app.color.nb_neutral_button_background'))
+              .fontColor($r('app.color.nb_on_neutral_button'))
+              .hoverEffect(HoverEffect.Highlight)
+              .focusable(true)
+              .onClick((): void => {
+                this.activeTab = 2;
+              })
+          }
         }
-        if (this.wideGuideKind() === GUIDE_LOGIN) {
-          Text('账户会话已过期或本设备未在管理端注册。重新登录后即可连接；连接成功后这里会显示对端列表。')
-            .fontSize(TYPE_CAPTION_VP)
-            .fontColor($r('app.color.nb_text_secondary'))
-            .width('100%')
-            .maxLines(4)
-          Button(this.accountLoginBusy ? '正在登录…' : '账户登录')
-            .fontSize(TYPE_SECTION_TITLE_VP)
-            .height(44)
-            .width('100%')
-            .backgroundColor($r('app.color.nb_primary'))
-            .fontColor($r('app.color.nb_on_primary'))
-            .enabled(!this.accountLoginBusy)
-            .hoverEffect(HoverEffect.Highlight)
-            .focusable(true)
-            .onClick((): void => {
-              this.beginConnectLogin();
-            })
-        } else {
-          Text(this.configured
-            ? '连接开关位于左栏，点按圆形按钮即可连接。连接成功后这里会显示对端列表。'
-            : '请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
-            .fontSize(TYPE_CAPTION_VP)
-            .fontColor($r('app.color.nb_text_secondary'))
-            .width('100%')
-            .maxLines(4)
-        }
-        if (!this.configured || this.wideGuideKind() === GUIDE_LOGIN) {
-          Button('去设置')
-            .fontSize(TYPE_SECTION_TITLE_VP)
-            .height(44)
-            .width('100%')
-            // The app's existing SECONDARY action role (the same pair 对端详情's
-            // 返回 uses), not a hand-rolled outline: one neutral fill + its explicit
-            // on-role ink, from the base/dark palette.
-            .backgroundColor($r('app.color.nb_neutral_button_background'))
-            .fontColor($r('app.color.nb_on_primary'))
-            .hoverEffect(HoverEffect.Highlight)
-            .focusable(true)
-            .onClick((): void => {
-              this.activeTab = 2;
-            })
-        }
+        .width('100%')
+        // The review's width rule (min(avail - 64, 480)): at the split shell's floor
+        // the pane's content box is 568 vp, so the 480 cap IS the minimum here.
+        .constraintSize({ maxWidth: GUIDE_EMPTY_MAX_WIDTH_VP })
+        .margin({ top: GUIDE_BLOCK_TOP_GAP_VP })
+        .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
-      .constraintSize({ maxWidth: 480 })
-      .padding(24)
-      .borderRadius(16)
-      .border({ width: 1, color: $r('app.color.nb_card_border') })
-      .backgroundColor($r('app.color.nb_card_background'))
+      .padding(RAIL_PAGE_PADDING_VP)
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
-    .padding(24)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
+    // A short window scrolls the guide rather than clipping it (the same rule as
+    // the peer list and the overview pane beside it).
+    .align(Alignment.Top)
+    .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
     .backgroundColor($r('app.color.nb_page_background'))
   }
 

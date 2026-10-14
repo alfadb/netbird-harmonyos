@@ -1250,10 +1250,24 @@ export function onlinePeerCount(peers: UiPeerEntry[]): number {
 // Keep this in step with what a peer row renders (name / ip / online chip /
 // connection / status, and the 离线对端 list's last-seen); a field added there
 // belongs here too.
-export function peerRowKey(peer: UiPeerEntry): string {
+// 0.0.40 (I5) §3: the key gained the row's SELECTED state — the second parameter,
+// not a peer field. Index.peerRow now paints a 3 vp primary marker and a tinted
+// surface on the row whose detail is open (the ASTRA review's §3), and that is a
+// rendered field like any other: without it in the key, opening B's detail would
+// leave A's selected row keyed exactly as before, so ArkUI would reuse A's node and
+// A's marker would keep pointing at the peer nobody is looking at. It is passed in
+// rather than read off the peer because the selection is page state, not part of
+// the document — and it defaults to `false`, which is byte-identical to the old key
+// for the 连接概览 pane's own peer rows (they are not selectable).
+//
+// Keep this in step with what a peer row renders (name / ip / online chip /
+// connection / status, the 离线对端 list's last-seen, and now the selected state);
+// a field added there belongs here too.
+export function peerRowKey(peer: UiPeerEntry, selected: boolean = false): string {
   return `${peer.pub_key}|${peer.name}|${peer.ip}|${peer.online ? '1' : '0'}` +
     `|${peer.connection}|${peer.status}|${peer.last_handshake_s === null ||
-      peer.last_handshake_s === undefined ? 'n' : peer.last_handshake_s}`;
+      peer.last_handshake_s === undefined ? 'n' : peer.last_handshake_s}` +
+    `|${selected ? '1' : '0'}`;
 }
 
 // ---------------------------------------------------------------------------

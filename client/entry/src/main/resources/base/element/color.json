@@ -53,6 +53,10 @@
       "value": "#8A9AA6"
     },
     {
+      "name": "nb_on_neutral_button",
+      "value": "#FFFFFF"
+    },
+    {
       "name": "nb_status_success",
       "value": "#176B3A"
     },
@@ -75,6 +79,10 @@
     {
       "name": "nb_status_info_background",
       "value": "#DCE8F2"
+    },
+    {
+      "name": "nb_row_selected_background",
+      "value": "#E4EDF5"
     },
     {
       "name": "nb_on_status",
