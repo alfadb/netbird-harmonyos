@@ -1226,6 +1226,26 @@ export function onlinePeerCount(peers: UiPeerEntry[]): number {
   return count;
 }
 
+// 0.0.35 对端列表重绘 (device report 2026-10-14): the 对端 list's ForEach key.
+//
+// ArkUI's ForEach reuses the child of every key that already existed and never
+// calls that item's generator again ("非首次渲染 ... 如果键值存在，则不会创建新的
+// 组件，而是直接渲染该键值所对应的组件"; "数据变化不渲染 ... 新的 articleList[0]
+// 生成的 key 没有变，ForEach 不会将数据更新同步给子组件"). The page therefore has to
+// key a row by EVERY field `Index.peerRow` renders, not by its identity: the 1 s
+// reader re-parses the document into brand-new UiPeerEntry objects with the SAME
+// pub_key, and an identity-only key re-bound every row to the tap-time snapshot
+// (a status/connection change was never painted until the 对端详情 分支 was left and
+// re-entered, which rebuilds the whole list). A row whose rendered content did not
+// change keeps its key, hence its node — the 0.0.34 skip stays as cheap as it is.
+//
+// Keep this in step with what peerRow renders (name / ip / online chip /
+// connection / status); a field added there belongs here too.
+export function peerRowKey(peer: UiPeerEntry): string {
+  return `${peer.pub_key}|${peer.name}|${peer.ip}|${peer.online ? '1' : '0'}` +
+    `|${peer.connection}|${peer.status}`;
+}
+
 // ---------------------------------------------------------------------------
 // Chinese display texts
 // ---------------------------------------------------------------------------

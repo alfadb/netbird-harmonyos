@@ -39,7 +39,7 @@ import type { ProcessExitRecord } from '../vpnextensionability/NetBirdSystemEven
 import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, NEEDS_LOGIN_CLASS,
   NEEDS_LOGIN_TEXT, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
-  lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
+  lastErrorText, lastHandshakeText, onlinePeerCount, peerRowKey, peerStatusText,
   sortPeers, vpnActiveState,
   SESSION_EXTENDED_TEXT, sessionExtendFailureText, sessionRowDeadlineS,
   sessionRowView } from '../vpnextensionability/NetBirdUiModel';
@@ -3942,11 +3942,14 @@ struct Index {
   // 主题 (2026-10-09): the dot takes a resolved colour (Resource or literal) —
   // ResourceColor is exactly what Circle().fill accepts, so a $r reference from
   // stateColor()/peerStatusResource() passes without a string/Resource mismatch.
-  @Builder
-  statusDot(color: ResourceColor, size: number) {
-    Circle({ width: size, height: size })
-      .fill(color)
-  }
+  //
+  // 0.0.35 状态点重绘 (device report 2026-10-14): the dots are INLINE now, not a
+  // `statusDot(color, size)` @Builder. A @Builder with two or more by-value
+  // parameters never refreshes ("@Builder传入的参数是两个或两个以上 ... 不会触发
+  // 动态渲染UI"), so every dot kept the colour of its first build while the text
+  // next to it followed the document. Written inline, each .fill() call sits in
+  // the Circle's own creation closure and reads the SAME observed state as that
+  // text (stateColor() / selectedPeerColor()) or the row's own peer object.
 
   // ---- 主页 -------------------------------------------------------------------
 
@@ -4033,7 +4036,8 @@ struct Index {
         // as the status text above (主页与对端页同读 this.published 一份数据).
         Column({ space: 4 }) {
           Row({ space: 10 }) {
-            this.statusDot(this.stateColor(), 12)
+            Circle({ width: 12, height: 12 })
+              .fill(this.stateColor())
             Text(this.stateText())
               .fontSize(20)
               .fontWeight(FontWeight.Medium)
@@ -4203,7 +4207,8 @@ struct Index {
         Text(peerStatusText(peer.status))
           .fontSize(12)
           .fontColor(this.peerStatusResource(peer.status))
-        this.statusDot(this.peerStatusResource(peer.status), 10)
+        Circle({ width: 10, height: 10 })
+          .fill(this.peerStatusResource(peer.status))
       }
       .alignItems(VerticalAlign.Center)
     }
@@ -4243,7 +4248,8 @@ struct Index {
         Scroll() {
           Column({ space: 4 }) {
             Row({ space: 10 }) {
-              this.statusDot(this.selectedPeerColor(), 12)
+              Circle({ width: 12, height: 12 })
+                .fill(this.selectedPeerColor())
               Text(this.selectedPeerName())
                 .fontSize(19)
                 .fontWeight(FontWeight.Medium)
@@ -4311,11 +4317,19 @@ struct Index {
             .margin({ top: 32 })
         } else {
           List({ space: 0 }) {
+            // 0.0.35 对端列表重绘 (device report 2026-10-14): the key carries what
+            // peerRow renders (NetBirdUiModel.peerRowKey), NOT the identity. The
+            // 1 s reader replaces the whole peers[] with freshly parsed objects
+            // on every applied document, so a pub_key-only key made ArkUI reuse
+            // every row and never re-run its builder: the label stayed the
+            // tap-time snapshot until the detail branch was left and re-entered
+            // (that rebuilds this list). A changed row now gets a new key and is
+            // rebuilt from the new document; an unchanged row keeps its node.
             ForEach(this.visiblePeers(), (peer: UiPeerEntry) => {
               ListItem() {
                 this.peerRow(peer)
               }
-            }, (peer: UiPeerEntry) => peer.pub_key)
+            }, (peer: UiPeerEntry) => peerRowKey(peer))
           }
           .width('100%')
           .layoutWeight(1)
