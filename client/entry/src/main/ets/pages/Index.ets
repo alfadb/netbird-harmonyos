@@ -41,6 +41,9 @@ import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
 // — process memory only, never persisted, never re-derived here.
 import { lastKilledVpnProcess } from '../vpnextensionability/NetBirdSystemEvents';
 import type { ProcessExitRecord } from '../vpnextensionability/NetBirdSystemEventsCore';
+// 0.0.43 (I8) §3: the ONE pasteboard write in the app (a public, ACL-free API —
+// see the module's own d.ts citations), called only from copyToClipboard() below.
+import { writeClipboardText } from '../vpnextensionability/NetBirdClipboard';
 import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, NEEDS_LOGIN_CLASS,
   NEEDS_LOGIN_TEXT, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
@@ -175,10 +178,14 @@ import {
   OverviewFacts, overviewRowKeys, PANE_DEST_GUIDE,
   PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf,
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
-  peerDetailSectionOf, peerFqdnDuplicatesTitle, PEER_ROW_LIST_PADDING_VP,
-  PEER_ROW_MIN_HEIGHT_VP, PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
+  peerDetailCopyValue, peerDetailSectionOf, peerFqdnDuplicatesTitle,
+  PEER_LIST_CARD_RADIUS_VP, PEER_ROW_COPY_GLYPH_VP, PEER_ROW_COPY_SLOT_VP,
+  PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
+  PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
+  PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
   peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, RAIL_CARD_PADDING_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
+  RAIL_INFO_COPY_SLOT_VP,
   RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_BOTTOM_PADDING_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
   RAIL_WORDMARK_MARGIN_VP,
@@ -358,6 +365,11 @@ const ACCOUNT_INTENT_EXTEND: string = 'extend';
 // Upstream's extend toasts: LENGTH_SHORT on success and LENGTH_LONG on failure
 // (MainActivity.java:1073-1086). Same 4 s as the connect-failure toast.
 const SESSION_TOAST_MS: number = 4000;
+// 0.0.43 (I8) §3: the copy confirmation. A SHORT toast (2 s): a copy is a done
+// deal the user asked for, not a verdict that needs reading, and the string it
+// confirms is on the clipboard rather than in the message.
+const COPY_TOAST_MS: number = 2000;
+const COPY_DONE_TEXT: string = '已复制';
 
 // Lenient section readers: undefined/null (absent section or an explicit null)
 // return null; anything else is asserted to the local mirror and every field
@@ -853,6 +865,78 @@ function defaultRouteText(network: DetailNetworkView): string {
   return `已保留未下发（原因：${reason}）`;
 }
 
+// 0.0.43 (I8) §3 — THE COPY AFFORDANCE, one component for every surface that has
+// one (the peer list's name/IP, the peer detail's 域名 / NetBird IP, the rail's
+// local NetBird IP / 域名).
+//
+// THE GLYPH IS DRAWN, NOT A SYMBOL RESOURCE. SymbolGlyph exists in this SDK
+// (component/symbolglyph.d.ts:29) and takes `$r('sys.symbol.*')`, but the symbol
+// NAMES are not enumerable from the SDK: they live in the device's system resource
+// package, the only `sys.symbol` occurrences in the SDK's own d.ts files are doc
+// EXAMPLES (symbolglyph.d.ts:34's ohos_wifi, symbol_span.d.ts:41's ohos_wifi), and
+// nothing in build-tools resolves or lists them. A name a host selfcheck cannot
+// verify is a runtime failure waiting for a typo — and this project has already
+// answered the same question the same way twice (the search field's magnifier,
+// Index.ets) — so the glyph is TWO OVERLAPPING ROUNDED RECTANGLES ~16 vp, the
+// universal duplicate/copy mark, drawn from ArkUI primitives.
+//
+// THE TOUCH TARGET IS 40 x 40 vp THOUGH THE GLYPH IS 16. The node's layout slot is
+// PEER_ROW_COPY_SLOT_VP (24 vp) and `responseRegion`
+// (component/common.d.ts:17311, public since API 8: "Sets one or more touch
+// targets ... The default touch target is the entire component") widens the HIT
+// area to PEER_ROW_COPY_TOUCH_VP (40) around the glyph. The region is the only
+// thing larger than the glyph — nothing is painted outside the 16 vp mark, so no
+// target overlaps the text or the chip on screen.
+//
+// VISIBILITY IS `Visibility.Hidden`, NEVER `Visibility.None`
+// (component/enums.d.ts:1831-1861 — Hidden "is hidden, and a placeholder is used
+// for it in the layout"): the slot keeps its place in the row, so a pointer
+// arriving on a row cannot reflow the name being read. The state that drives it is
+// the OBSERVED hover/selection of the row (this.hoveredPeerKey / selectedPeer), not
+// a field of the row — see the row key note in peerRow.
+@Component
+struct CopyIconButton {
+  @Prop value: string = '';
+  @Prop visible: boolean = true;
+  onCopy: (value: string) => void = (): void => {
+  };
+
+  build() {
+    Stack() {
+      // The sheet behind, up and to the left of the one in front …
+      Column()
+        .width(8)
+        .height(10)
+        .borderRadius(2)
+        .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+        .offset({ x: -3, y: -3 })
+      // … and the sheet in front, down and to the right: the two overlap by 5 x 7
+      // vp inside the 16 vp box, which is what makes the pair read as "copy".
+      Column()
+        .width(8)
+        .height(10)
+        .borderRadius(2)
+        .border({ width: 1.5, color: $r('app.color.nb_text_muted') })
+        .offset({ x: 3, y: 3 })
+    }
+    .width(PEER_ROW_COPY_SLOT_VP)
+    .height(PEER_ROW_COPY_SLOT_VP)
+    .responseRegion({
+      x: -(PEER_ROW_COPY_TOUCH_VP - PEER_ROW_COPY_SLOT_VP) / 2,
+      y: -(PEER_ROW_COPY_TOUCH_VP - PEER_ROW_COPY_SLOT_VP) / 2,
+      width: PEER_ROW_COPY_TOUCH_VP,
+      height: PEER_ROW_COPY_TOUCH_VP
+    })
+    .visibility(this.visible ? Visibility.Visible : Visibility.Hidden)
+    .onClick(() => {
+      // The string is the caller's, never re-derived here: the name icon copies the
+      // hostname and the IP icon copies the address because that is what the row
+      // handed this component (I8's own acceptance test).
+      this.onCopy(this.value);
+    })
+  }
+}
+
 // One label/value row of the detail screens. A child @Component with @Prop —
 // NOT the old @Builder(fieldRow): a @Builder's by-value expression arguments
 // are frozen at mount in ArkUI (the B.1 device defect), while @Prop re-syncs
@@ -876,6 +960,13 @@ struct DetailRow {
   // 0.0.39 (I4) P1.7: a 64-character public key reads as ONE unit in the mono face
   // (the review's 标识 group); every other row keeps the UI face.
   @Prop mono: boolean = false;
+  // 0.0.43 (I8) §3: non-empty ⇒ this row carries the copy icon, ALWAYS visible
+  // (the detail pane has no hover rule). The caller decides the string through the
+  // pure `peerDetailCopyValue` policy, so the ONLY rows that can carry it are the
+  // domain/hostname and the IP — 公钥 is deliberately left uncopyable.
+  @Prop copyValue: string = '';
+  onCopy: (value: string) => void = (): void => {
+  };
 
   build() {
     Row({ space: 8 }) {
@@ -893,6 +984,15 @@ struct DetailRow {
         .layoutWeight(1)
         .maxLines(this.maxLines)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.copyValue.length > 0) {
+        CopyIconButton({
+          value: this.copyValue,
+          visible: true,
+          onCopy: (value: string): void => {
+            this.onCopy(value);
+          }
+        })
+      }
     }
     .width('100%')
     .alignItems(VerticalAlign.Top)
@@ -960,6 +1060,13 @@ struct DetailSectionHeader {
 struct RailInfoRow {
   @Prop label: string = '';
   @Prop value: string = '';
+  // 0.0.43 (I8) §3: non-empty ⇒ the row's value carries the copy icon, ALWAYS
+  // visible (the rail is an identity card, not a hover surface). The rail passes
+  // this for its local NetBird IP and its local 域名 and for nothing else; the
+  // value column pays for the slot (railInfoValueTextWidthVp).
+  @Prop copyValue: string = '';
+  onCopy: (value: string) => void = (): void => {
+  };
 
   build() {
     Column({ space: 2 }) {
@@ -969,12 +1076,25 @@ struct RailInfoRow {
         .width('100%')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(this.value ? this.value : '—')
-        .fontSize(TYPE_BODY_VP)
-        .fontColor($r('app.color.nb_text_primary'))
-        .width('100%')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Row({ space: 8 }) {
+        Text(this.value ? this.value : '—')
+          .fontSize(TYPE_BODY_VP)
+          .fontColor($r('app.color.nb_text_primary'))
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.copyValue.length > 0) {
+          CopyIconButton({
+            value: this.copyValue,
+            visible: true,
+            onCopy: (value: string): void => {
+              this.onCopy(value);
+            }
+          })
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -2603,6 +2723,65 @@ struct Index {
    */
   private peerRowHovered(peer: UiPeerEntry): boolean {
     return this.hoveredPeerKey.length > 0 && this.hoveredPeerKey === peer.pub_key;
+  }
+
+  /**
+   * 0.0.43 (I8) §3: does THIS list row render the copy SLOT at all? This is the
+   * TIER question only (peerRowCopyVisible, a pure function of the window), and it
+   * is the `if` the row uses — deliberately NOT the pointer state. The slot has to
+   * exist for every row of the tier, because the framework only keeps the place of
+   * a HIDDEN node (Visibility.Hidden); a node that is not created shortens the row,
+   * and the 0.0.43 device frame measured exactly that: the hovered and the selected
+   * row were 74 vp tall against their neighbours' 64 (96 px vs 83 px pitch), so a
+   * pointer entering a row pushed every row below it down.
+   */
+  private peerRowCopySlotVisible(): boolean {
+    return peerRowCopyVisible(this.widthVp);
+  }
+
+  /**
+   * 0.0.43 (I8) §3: is THIS row's copy icon VISIBLE? The pointer's answer, and only
+   * that: the row's observed hover OR its selection — never a field of the peer,
+   * which is what keeps the copy icon OUT of peerRowKey (a key input that changed
+   * with the pointer would rebuild both rows on every pointer move, the 0.0.35
+   * defect's other direction). It goes into the component's `visible` @Prop, i.e.
+   * Visibility.Hidden, so the reserved slot keeps its geometry either way.
+   */
+  private peerRowCopyIconVisible(peer: UiPeerEntry): boolean {
+    return this.peerRowHovered(peer) || this.peerRowSelected(peer);
+  }
+
+  /**
+   * 0.0.43 (I8) §3 — THE copy path. ONE writer for every surface (the list rows, the
+   * peer detail and the rail's identity rows all call this), so the confirmation and
+   * the fail-soft policy exist once:
+   *
+   *   * the write itself is NetBirdClipboard.writeClipboardText (public
+   *     @ohos.pasteboard API, no ACL — see that module's d.ts citations);
+   *   * the confirmation is a Toast (已复制), the same transient channel the page's
+   *     other one-shot notices use. It carries NO value: the clipboard is the
+   *     channel for the string, and a toast that echoed an address would be noise.
+   *   * a refusal (an empty string, or a platform error like 27787278 "replication
+   *     is prohibited") is WARN-logged and swallowed. A copy is an affordance on a
+   *     row whose real job is to show a peer; an error dialog over it would be worse
+   *     than the missing confirmation.
+   */
+  private copyToClipboard(value: string): void {
+    if (value.length === 0) {
+      return;
+    }
+    try {
+      writeClipboardText(value);
+      this.getUIContext().getPromptAction().showToast({
+        message: COPY_DONE_TEXT, duration: COPY_TOAST_MS
+      });
+      // The VALUE never enters the log — only how long it was.
+      hilog.info(DOMAIN, TAG, 'UI_COPY|bundle=%{public}s|length=%{public}d',
+        BUNDLE_NAME, value.length);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'UI_COPY_REJECTED|bundle=%{public}s|code=%{public}s',
+        BUNDLE_NAME, String((error as BusinessFailure).code ?? 'none'));
+    }
   }
 
   // 主题 (2026-10-09): the three-state peer status mapped to the SHARED
@@ -4493,13 +4672,27 @@ struct Index {
           // rail's own address is the only local anchor on screen.
           RailInfoRow({
             label: 'NetBird IP',
-            value: this.homeAddressText()
+            value: this.homeAddressText(),
+            // 0.0.43 (I8) §3: the rail's local address is copyable ALWAYS (no hover
+            // rule on the identity card — the owner's visibility split). The value
+            // handed over is the SAME string the row renders, so what the user sees
+            // is what reaches the clipboard.
+            copyValue: this.homeAddressText(),
+            onCopy: (value: string): void => {
+              this.copyToClipboard(value);
+            }
           })
           if (!this.wideLayout()) {
             RailInfoRow({
               label: '域名',
-              value: this.homeFqdnText()
+              value: this.homeFqdnText(),
+              copyValue: this.homeFqdnText(),
+              onCopy: (value: string): void => {
+                this.copyToClipboard(value);
+              }
             })
+            // The 对端 row keeps NO copy affordance: it is a count, not a value the
+            // owner's scope names (I8 §3 covers the domain/hostname and the IP only).
             RailInfoRow({
               label: '对端',
               value: this.homePeersText()
@@ -4689,88 +4882,158 @@ struct Index {
     //     floor plus PEER_ROW_L2_META_COMPACT_VP).
     // The row renders the SAME fields on both shapes, so peerRowKey is unchanged
     // by the condensation.
-    Column({ space: 2 }) {
+    // 0.0.43 (I8) §1/§2 — TWO CONTAINERS, ONE JOB EACH. The OUTER Column is the
+    // row's hit area and owns the HIGHLIGHT INSET: its horizontal padding is
+    // PEER_ROW_HIGHLIGHT_INSET_VP — the SAME 12 vp the list's own content padding
+    // is — so the tint below can never reach the list card's rounded edge. (Up to
+    // 0.0.42 that 12 vp came from the LIST's padding, which is why the highlight
+    // read as a full-width band with square corners.) The INNER Row is the highlight
+    // BLOCK: the selected/hover tint, the 3 vp selection marker and the corner
+    // radius all live on it, so the highlight IS an inset rounded block.
+    Column() {
       Row({ space: 8 }) {
-        Text(peer.name)
-          .fontSize(TYPE_BODY_VP)
-          .fontColor($r('app.color.nb_text_primary'))
-          .layoutWeight(1)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (peer.online && !this.peerRowCondensed()) {
-          // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
-          // the base/dark resources — same role for the ink and the tint.
-          // 0.0.39 (I4) P1.6 (review §4.2): 中继 is a NORMAL NetBird path, and
-          // painting half the mesh warning-orange trained the user to ignore the
-          // real warning colour. The chip keeps its tint shape and moves to the
-          // primary role's ink on a primary tint (nb_status_info_background), so
-          // orange means "something needs you" and nothing else.
-          Text(connectionLabel(peer.connection))
-            .fontSize(TYPE_CAPTION_VP)
-            .fontColor(peer.connection === 'direct'
-              ? $r('app.color.nb_status_success')
-              : $r('app.color.nb_primary'))
-            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-            .borderRadius(10)
-            .backgroundColor(peer.connection === 'direct'
-              ? $r('app.color.nb_status_success_background')
-              : $r('app.color.nb_status_info_background'))
+        // ---- the two-line text block -------------------------------------------
+        Column({ space: 2 }) {
+          Row({ space: 8 }) {
+            Text(peer.name)
+              .fontSize(TYPE_BODY_VP)
+              .fontColor($r('app.color.nb_text_primary'))
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 0.0.43 (I8) §3 — THE HOSTNAME'S COPY ICON. The node exists for the
+            // WHOLE TIER (peerRowCopySlotVisible) and only its `visible` @Prop
+            // follows the pointer: an `if` on the hover/selection would REMOVE the
+            // slot when the pointer left, and the 0.0.43 device frame measured just
+            // that (hovered/selected rows 74 vp against their neighbours' 64, i.e.
+            // hovering a row pushed the list below it down).
+            if (this.peerRowCopySlotVisible()) {
+              CopyIconButton({
+                value: peer.name,
+                visible: this.peerRowCopyIconVisible(peer) && peer.name.length > 0,
+                onCopy: (value: string): void => {
+                  this.copyToClipboard(value);
+                }
+              })
+            }
+            // THE DOT IN THE CONDENSED TIER ONLY. From the medium tier up it is a
+            // child of the meta column (I8 §2); at the compact split tier the name's
+            // 28-character floor leaves 25 vp for everything else, which is the dot
+            // and nothing more — see the tier note on peerRowMetaWidthVp.
+            if (this.peerRowCondensed()) {
+              Circle({ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP })
+                .fill(this.peerStatusResource(peer.status))
+            }
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+          // Line 2: the address owns the row's text width — and the condensed
+          // tier's chip / status text ride here with it. maxLines(1) is the hard
+          // floor (a wrapped address is unreadable); the widths are what make it
+          // never need the ellipsis in the first place.
+          Row({ space: 8 }) {
+            Text(peer.ip.length > 0 ? peer.ip : '无 IP')
+              .fontSize(TYPE_CAPTION_VP)
+              .fontColor($r('app.color.nb_text_muted'))
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 0.0.43 (I8) §3 — THE IP'S COPY ICON, and it carries THE IP: not the
+            // row's rendered fallback ('无 IP') and not the name. A peer whose
+            // document carries no address simply hides it ('无 IP' must never be
+            // written to the clipboard) while the SLOT stays reserved, so the row's
+            // height is the same whatever the document says.
+            if (this.peerRowCopySlotVisible()) {
+              CopyIconButton({
+                value: peer.ip,
+                visible: this.peerRowCopyIconVisible(peer) && peer.ip.length > 0,
+                onCopy: (value: string): void => {
+                  this.copyToClipboard(value);
+                }
+              })
+            }
+            if (this.peerRowCondensed()) {
+              if (peer.online) {
+                // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
+                // the base/dark resources — same role for the ink and the tint.
+                // 0.0.39 (I4) P1.6 (review §4.2): 中继 is a NORMAL NetBird path, and
+                // painting half the mesh warning-orange trained the user to ignore
+                // the real warning colour. The chip keeps its tint shape and moves
+                // to the primary role's ink on a primary tint
+                // (nb_status_info_background), so orange means "something needs
+                // you" and nothing else.
+                Text(connectionLabel(peer.connection))
+                  .fontSize(TYPE_CAPTION_VP)
+                  .fontColor(peer.connection === 'direct'
+                    ? $r('app.color.nb_status_success')
+                    : $r('app.color.nb_primary'))
+                  .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                  .borderRadius(10)
+                  .backgroundColor(peer.connection === 'direct'
+                    ? $r('app.color.nb_status_success_background')
+                    : $r('app.color.nb_status_info_background'))
+              }
+              // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机暂无 WG
+              // 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。 The TEXT only
+              // for the two states that need words (see the header comment).
+              if (peer.status !== 'connected') {
+                Text(peerStatusText(peer.status))
+                  .fontSize(TYPE_CAPTION_VP)
+                  .fontColor(this.peerStatusResource(peer.status))
+              }
+            }
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
         }
-        // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机
-        // 暂无 WG 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。 The TEXT
-        // only for the two states that need words (see the header comment).
-        if (peer.status !== 'connected' && !this.peerRowCondensed()) {
-          Text(peerStatusText(peer.status))
-            .fontSize(TYPE_CAPTION_VP)
-            .fontColor(this.peerStatusResource(peer.status))
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+        // ---- the meta column (I8 §2) -------------------------------------------
+        // THE 直连/中继 CHIP, THE 空闲/离线 TEXT AND THE STATUS DOT, as ONE trailing
+        // column of the row body. The body's `VerticalAlign.Center` (below) centres
+        // it against BOTH text lines, which is the owner's "center them vertically
+        // within the row's full height" — they used to be children of line 1 and
+        // therefore sat on the name's own baseline in a two-line row.
+        //
+        // The column carries NO width of its own: its natural width is the chip /
+        // text / dot it renders, and the BUDGET the name and the IP are measured
+        // against is PEER_ROW_META_WIDE_VP (the sum of those parts), so a row that
+        // renders fewer of them hands the text MORE room, never less.
+        if (!this.peerRowCondensed()) {
+          Row({ space: 8 }) {
+            if (peer.online) {
+              Text(connectionLabel(peer.connection))
+                .fontSize(TYPE_CAPTION_VP)
+                .fontColor(peer.connection === 'direct'
+                  ? $r('app.color.nb_status_success')
+                  : $r('app.color.nb_primary'))
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(10)
+                .backgroundColor(peer.connection === 'direct'
+                  ? $r('app.color.nb_status_success_background')
+                  : $r('app.color.nb_status_info_background'))
+            }
+            if (peer.status !== 'connected') {
+              Text(peerStatusText(peer.status))
+                .fontSize(TYPE_CAPTION_VP)
+                .fontColor(this.peerStatusResource(peer.status))
+            }
+            Circle({ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP })
+              .fill(this.peerStatusResource(peer.status))
+          }
         }
-        Circle({ width: 10, height: 10 })
-          .fill(this.peerStatusResource(peer.status))
       }
       .width('100%')
+      // I8 §2: THE LINE THAT CENTRES THE META. The 已连接 state, the selection and
+      // the hover are colours and nothing else, so the chip and the dot sit at the
+      // SAME place in all three states — and in every state of every document.
       .alignItems(VerticalAlign.Center)
-      // Line 2: the address owns the row's whole text width — and the condensed
-      // tier's chip / status text ride here with it. maxLines(1) is the hard floor
-      // (a wrapped address is unreadable); the widths are what make it never need
-      // the ellipsis in the first place.
-      Row({ space: 8 }) {
-        Text(peer.ip.length > 0 ? peer.ip : '无 IP')
-          .fontSize(TYPE_CAPTION_VP)
-          .fontColor($r('app.color.nb_text_muted'))
-          .layoutWeight(1)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.peerRowCondensed()) {
-          if (peer.online) {
-            Text(connectionLabel(peer.connection))
-              .fontSize(TYPE_CAPTION_VP)
-              .fontColor(peer.connection === 'direct'
-                ? $r('app.color.nb_status_success')
-                : $r('app.color.nb_primary'))
-              .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-              .borderRadius(10)
-              .backgroundColor(peer.connection === 'direct'
-                ? $r('app.color.nb_status_success_background')
-                : $r('app.color.nb_status_info_background'))
-          }
-          if (peer.status !== 'connected') {
-            Text(peerStatusText(peer.status))
-              .fontSize(TYPE_CAPTION_VP)
-              .fontColor(this.peerStatusResource(peer.status))
-          }
-        }
-      }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-    // 0.0.38 (I3) C: 12 + 12 vp of padding around a 40 vp two-line body is the
-    // ≈64 vp compact row; the minHeight keeps that true even in a font whose
-    // metrics are shorter, and the row still clears the ≥48 vp pointer/touch
-    // target I2 introduced.
-    .padding({ top: 12, bottom: 12 })
-    .constraintSize({ minHeight: PEER_ROW_MIN_HEIGHT_VP })
+      // 0.0.38 (I3) C: 12 + 12 vp of padding around a 40 vp two-line body is the
+      // ≈64 vp compact row; the minHeight keeps that true even in a font whose
+      // metrics are shorter, and the row still clears the ≥48 vp pointer/touch
+      // target I2 introduced.
+      .padding({ top: 12, bottom: 12 })
+      .constraintSize({ minHeight: PEER_ROW_MIN_HEIGHT_VP })
     // 0.0.40 (I5) §3 — THE SELECTED ROW. The ASTRA review read the I4 detail frame
     // and could not tell the row whose detail was open from its neighbours: "该行
     // 底色、文字和边缘与相邻行没有可辨认的选中区别 … 用户来回看列表与详情时，需要
@@ -4816,6 +5079,22 @@ struct Index {
     .backgroundColor(this.peerRowSelected(peer)
       ? $r('app.color.nb_row_selected_background')
       : this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background') : Color.Transparent)
+    // 0.0.43 (I8) §1: the OTHER half of "an inset rounded block". The block is
+    // inset by the list's own content padding (the outer Column's padding) and its
+    // corner is rounded, so the highlight cannot read as a band whose square corner
+    // pokes at the card's own 16 vp arc. The radius is bounded below by the
+    // concentric radius (card − inset) and shipped at 12 — the same
+    // octave-below-the-cards radius the search field uses; both numbers are asserted
+    // in run-harmony-layout.mts.
+    .borderRadius(PEER_ROW_HIGHLIGHT_RADIUS_VP)
+    }
+    .width('100%')
+    // I8 §1: THE INSET. This is the list's own horizontal content padding, applied
+    // by the ROW instead of by the List, so "the highlight respects the list's
+    // padding" is one constant rather than a property of the framework's padding
+    // semantics — and it is the width the row's text budget already subtracts
+    // (peerRowTextWidthVp).
+    .padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })
     // 0.0.37 (I2): pointer affordances on the PC; focusable makes the row reachable
     // in the keyboard tab order. No custom cursor: `mouseStyle` is not in the public
     // API.
@@ -4935,7 +5214,14 @@ struct Index {
               Column({ space: 0 }) {
                 ForEach(this.peerDetailSectionFields(PEER_DETAIL_CONNECTION),
                   (field: DetailField) => {
-                    DetailRow({ label: field.label, value: field.value })
+                    DetailRow({
+                      label: field.label,
+                      value: field.value,
+                      copyValue: peerDetailCopyValue(field.label, field.value),
+                      onCopy: (value: string): void => {
+                        this.copyToClipboard(value);
+                      }
+                    })
                   }, (field: DetailField) => `${field.label}=${field.value}`)
                 // The accounting caveat, as the 14 vp caption the review asks for
                 // under the group its rows belong to (it used to be a grey paragraph
@@ -4969,7 +5255,14 @@ struct Index {
               Column({ space: 0 }) {
                 ForEach(this.peerDetailSectionFields(PEER_DETAIL_PATH),
                   (field: DetailField) => {
-                    DetailRow({ label: field.label, value: field.value })
+                    DetailRow({
+                      label: field.label,
+                      value: field.value,
+                      copyValue: peerDetailCopyValue(field.label, field.value),
+                      onCopy: (value: string): void => {
+                        this.copyToClipboard(value);
+                      }
+                    })
                   }, (field: DetailField) => `pp|${field.label}=${field.value}`)
               }
               .width('100%')
@@ -4991,7 +5284,14 @@ struct Index {
               Column({ space: 0 }) {
                 ForEach(this.peerDetailSectionFields(PEER_DETAIL_ICE),
                   (field: DetailField) => {
-                    DetailRow({ label: field.label, value: field.value })
+                    DetailRow({
+                      label: field.label,
+                      value: field.value,
+                      copyValue: peerDetailCopyValue(field.label, field.value),
+                      onCopy: (value: string): void => {
+                        this.copyToClipboard(value);
+                      }
+                    })
                   }, (field: DetailField) => `pi|${field.label}=${field.value}`)
                 Text('ICE 各行只描述候选路径与端点应用情况（断开后仍可能保留上次选中的地址），' +
                   '实际承载以「承载 / 中继通道地址」为准，ICE 已连接不代表流量直连。')
@@ -5021,7 +5321,15 @@ struct Index {
                 // 64-character key reads as ONE unit that way (review §3.2).
                 ForEach(this.peerDetailSectionFields(PEER_DETAIL_IDENTITY),
                   (field: DetailField) => {
-                    DetailRow({ label: field.label, value: field.value, mono: true })
+                    DetailRow({
+                      label: field.label,
+                      value: field.value,
+                      mono: true,
+                      copyValue: peerDetailCopyValue(field.label, field.value),
+                      onCopy: (value: string): void => {
+                        this.copyToClipboard(value);
+                      }
+                    })
                   }, (field: DetailField) => `pid|${field.label}=${field.value}`)
               }
               .width('100%')
@@ -5173,14 +5481,23 @@ struct Index {
           // no new colour enters the system and the card's edge stays clean.
           .divider({ strokeWidth: 1, color: $r('app.color.nb_card_border'),
             startMargin: 0, endMargin: 0 })
-          .borderRadius(16)
+          // 0.0.43 (I8) §1: the card's radius is the NAMED constant now, because the
+          // highlight block's corner is bounded against this exact number (the
+          // block is inset by the content padding and its radius has to clear the
+          // card's arc — see peerRowHighlightCornerClearanceVp).
+          .borderRadius(PEER_LIST_CARD_RADIUS_VP)
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
-          // 0.0.38 (I3) C: the list card's own horizontal padding is 12 vp, not
-          // the shared 16 — those 8 vp go straight to the name column
-          // (peerRowNameWidthFor measures this exact number), which is where the
-          // "blkint…" truncation came from.
-          .padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })
+          // 0.0.38 (I3) C / 0.0.43 (I8) §1: THE LIST'S HORIZONTAL PADDING MOVED TO
+          // THE ROW. I3 put the 12 vp here and the row's text budget (and the I6
+          // search-field width) has been measured from it ever since — which is why
+          // the selected row's tint inherited it as an edge-to-edge band with square
+          // corners. I8 gives the same 12 vp to the ROW
+          // (PEER_ROW_HIGHLIGHT_INSET_VP, the identical number), so the tint block
+          // is inset by construction and the divider — which I3's own measurement
+          // showed runs edge-to-edge regardless of this padding — is unchanged.
+          // The card's content geometry is therefore identical: the row's border box
+          // is card minus 24 vp, exactly what peerRowTextWidthVp assumes.
           // A mouse needs a scroll position cue; a finger does not, so the wide
           // branch shows the bar and the phone keeps today's BarState.Off.
           .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)

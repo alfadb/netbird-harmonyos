@@ -43,6 +43,16 @@
 // fill/ring split. Every one of those numbers lives here, so the host selfcheck
 // can assert them instead of a screenshot.
 //
+// 0.0.43 (I8): the peer row's own three owner findings — the selected row's tint
+// becomes an INSET ROUNDED BLOCK (inset = the list content padding, radius stated
+// and bounded against the card's own 16), the 直连/中继 chip and the status dot
+// leave line 1 for a FULL-HEIGHT META COLUMN the row body centres vertically (with
+// the compact tier's impossibility stated as arithmetic, since its name floor
+// cannot pay for such a column), and the row gains a TIER-GATED copy slot for the
+// hostname and the IP. The meta column's 112 vp budget is replaced by the sum of
+// its own parts (98), because the column now has to be exactly as wide as the
+// chrome it holds.
+//
 // Nothing here reads `deviceInfo.deviceType`: the layout follows the WINDOW, never
 // the device (a 2in1 window can be dragged through every tier — DESIGN-HARMONY
 // §A.2/§C.2). deviceType stays where it is already correct: the tray gate and
@@ -403,6 +413,24 @@ export function railInfoValueWidthVp(widthVp: number): number {
   return railWidthFor(widthVp) - 2 * RAIL_PAGE_PADDING_VP - 2 * RAIL_CARD_PADDING_VP;
 }
 
+// 0.0.43 (I8) §3 — THE RAIL'S COPY SLOT.
+// The rail's local NetBird IP and 域名 rows carry their copy icon ALWAYS (the
+// owner's visibility rule: no hover is needed on the identity card), so the row's
+// VALUE text and the icon share the value column: the text is what has to fit
+// beside a slot, and `railInfoValueTextWidthVp` is that width. The slot is the peer
+// row's own 16 vp glyph — one icon, one size, in every surface that copies a value
+// (the peer row's slot is the same number for the same reason: a slot no taller
+// than a text line cannot change any of these rows' heights). The selfcheck holds
+// the remaining text against the SAME dotted-quad floor the peer list uses — the
+// widest thing the PC rail ever puts in a copied row is an IP.
+/** The rail's copy slot (vp) — the peer list's own glyph, one icon across the app. */
+export const RAIL_INFO_COPY_SLOT_VP: number = 16;
+
+/** The rail row's VALUE TEXT width (vp) when the row carries the copy icon. */
+export function railInfoValueTextWidthVp(widthVp: number): number {
+  return railInfoValueWidthVp(widthVp) - RAIL_INFO_COPY_SLOT_VP;
+}
+
 // ---------------------------------------------------------------------------
 // 0.0.40 (I5) §1 — the rail's traffic summary: OMIT the zero, bound the value
 // ---------------------------------------------------------------------------
@@ -530,25 +558,62 @@ export const PEER_LIST_CONTENT_MIN_COMPACT_VP: number = 320;
 export const PEER_ROW_LIST_PADDING_VP: number = 12;
 /** The two-line peer row's minimum height (vp): name+chip+status / IP. */
 export const PEER_ROW_MIN_HEIGHT_VP: number = 64;
+// 0.0.43 (I8) §2 — THE META IS A COLUMN OF ITS OWN PARTS.
+// ---------------------------------------------------------------------------
+// Up to 0.0.42 the 直连/中继 chip, the 空闲/离线 text and the status dot were
+// children of LINE 1's Row, so the row's chrome budget was a single number with
+// slack in it (112 vp) and the three of them sat on the name's baseline while the
+// row was two lines tall — the owner's I8 finding: "the chip and the status dot
+// currently align with the first text line and read as top-heavy".
+//
+// I8 makes them a trailing column of the row body (see peerRowMetaWidthVp), which
+// is vertically centred against the two-line text block by the row's own
+// `VerticalAlign.Center` — so the column has to know its EXACT width, and the
+// budget is derived from the four widths the chrome actually needs:
+//
+//   chip        中继 / 直连 — two CJK glyphs at 14 vp + the pill's 8 + 8 vp padding
+//   status      空闲 / 离线 — two CJK glyphs at 14 vp
+//   dot         the 10 vp status circle
+//   gap         the row's own child gap (Row({ space: 8 }))
+//
+// `chip + gap + status + gap + dot` = 98 replaces the 112 (+14 vp of slack), and
+// the same four parts reproduce the COMPACT tier's two budgets exactly as the
+// tier renders them (the dot's column on line 1; the chip + status beside the IP).
+/** Line 1's / the column's chip width (vp): 中继 / 直连 at 14 vp + the pill's padding. */
+export const PEER_ROW_CHIP_WIDTH_VP: number = 44;
+/** The 空闲 / 离线 text's width (vp) at 14 vp. */
+export const PEER_ROW_STATUS_TEXT_WIDTH_VP: number = 28;
+/** The status dot's diameter (vp). */
+export const PEER_ROW_DOT_VP: number = 10;
+/** The peer row's own child gap (vp) — the `space` of every Row in the row body. */
+export const PEER_ROW_META_GAP_VP: number = 8;
 /**
- * Line 1's right-hand block at the WIDE tiers (medium/roomy): the 直连/中继 chip,
- * the 空闲/离线 status text, the status dot and their gaps. The 已连接 TEXT no
- * longer renders at all (the dot and the chip already say it twice — the review's
- * §3.1), but the budget keeps room for the longest of the other two states, so a
- * row that shows 离线 cannot push the name below its floor.
+ * The WIDE tiers' (medium/roomy) full-height meta column: the 直连/中继 chip, the
+ * 空闲/离线 status text and the status dot, with their gaps — the whole trailing
+ * column the I8 row centres vertically. The 已连接 TEXT no longer renders at all
+ * (the dot and the chip already say it twice — the review's §3.1), but the column
+ * keeps room for the longest of the other two states, so a row that shows 离线
+ * cannot push the name below its floor.
  */
-export const PEER_ROW_META_WIDE_VP: number = 112;
+export const PEER_ROW_META_WIDE_VP: number =
+  PEER_ROW_CHIP_WIDTH_VP + PEER_ROW_META_GAP_VP + PEER_ROW_STATUS_TEXT_WIDTH_VP +
+    PEER_ROW_META_GAP_VP + PEER_ROW_DOT_VP;
 /**
  * Line 1's right-hand block at the COMPACT tier: the status dot and its gap only.
- * The chip and any 空闲/离线 text ride line 2 (see PEER_ROW_L2_META_COMPACT_VP).
+ * The chip and any 空闲/离线 text ride line 2 (see PEER_ROW_L2_META_COMPACT_VP),
+ * because that tier's 28-character name floor cannot pay for a wider meta column
+ * (see the I8 note on peerRowMetaWidthVp).
  */
-export const PEER_ROW_META_COMPACT_VP: number = 18;
+export const PEER_ROW_META_COMPACT_VP: number =
+  PEER_ROW_DOT_VP + PEER_ROW_META_GAP_VP;
 /**
  * Line 2's right-hand block at the COMPACT tier: the 直连/中继 chip, the
  * 空闲/离线 text and their gaps, beside the IP. Line 2's text width minus this is
  * still >= the IP's own one-line floor at every window of the shell.
  */
-export const PEER_ROW_L2_META_COMPACT_VP: number = 88;
+export const PEER_ROW_L2_META_COMPACT_VP: number =
+  PEER_ROW_META_GAP_VP + PEER_ROW_CHIP_WIDTH_VP + PEER_ROW_META_GAP_VP +
+    PEER_ROW_STATUS_TEXT_WIDTH_VP;
 /** The floor line 2 needs for a dotted-quad IPv4 on ONE line at caption size. */
 export const PEER_ROW_IP_MIN_WIDTH_VP: number = 120;
 /**
@@ -664,24 +729,182 @@ export function peerRowTextWidthVp(navBarWidthVp: number): number {
     PEER_ROW_SELECT_BAR_VP;
 }
 
-/** Line 1's right-hand block (vp) at a window's tier — see the two constants. */
+/**
+ * The row's right-hand META block (vp) at a window's tier — see the constants.
+ *
+ * 0.0.43 (I8) §2 — IT IS ALSO WHERE THE BLOCK LIVES, and that is why it is called
+ * a column now. At the medium/roomy tiers the chip + status text + dot become ONE
+ * trailing column of the row body, a SIBLING of the two-line text block, and the
+ * row body's `VerticalAlign.Center` centres it against BOTH lines — which is the
+ * owner's "center them vertically within the row's full height". At the compact
+ * split tier (840…1023 vp) the same thing is geometrically impossible and the
+ * budget shows why:
+ *
+ *   the tier's row has text width `T` and has to hold, at 840 vp, T = 221 vp
+ *     name   >= PEER_ROW_NAME_MIN_WIDTH_VP (196)   — a real 28-char fqdn
+ *     IP     >= PEER_ROW_IP_MIN_WIDTH_VP   (120)   — a dotted quad on one line
+ *   and a full-height column takes its width out of BOTH lines, so the column can
+ *   be at most `T - 196` = 25 vp wide while line 2 additionally needs its chip +
+ *   status (88) — 25 + 88 + 120 = 233 > 221 vp. The tier therefore keeps I4's
+ *   condensation (the dot on line 1, the chip + status beside the IP on line 2),
+ *   and the selfcheck asserts BOTH the impossibility and the shipped arrangement.
+ */
 export function peerRowMetaWidthVp(windowVp: number): number {
   return peerRowCondensed(windowVp) ? PEER_ROW_META_COMPACT_VP : PEER_ROW_META_WIDE_VP;
 }
 
+// ---------------------------------------------------------------------------
+// 0.0.43 (I8) §3 — the row's COPY slot
+// ---------------------------------------------------------------------------
+// The list rows carry a copy affordance beside the hostname and beside the IP, and
+// it is INVISIBLE until the row is hovered or selected (I8's own visibility rule;
+// the phone branch has no pointer at all and keeps its rows unchanged).
+//
+// TWO things have to be true for that to be invisible in the LAYOUT as well, and
+// the 0.0.43 device frame caught the first version of this code getting the second
+// one wrong:
+//
+//   1. the slot is created for the WHOLE TIER, not for the hovered row. The row
+//      renders the component whenever `peerRowCopyVisible(window)` holds and only
+//      its `visible` @Prop follows the pointer — because an `if` around the node
+//      removes it from the layout when the pointer leaves, which SHORTENS the row:
+//      the frame measured the hovered and the selected rows at 74 vp against their
+//      neighbours' 64 (96 px vs 83 px pitch at 1.2964 px/vp), i.e. hovering a row
+//      pushed the whole list below it down. That is the reflow this slot exists to
+//      prevent, so the gate is the tier.
+//   2. the slot is no TALLER than the row's own text lines, so reserving it cannot
+//      grow the 64 vp row either: it is exactly the 16 vp glyph, which is under
+//      both the name's 15 vp line box and the IP's 14 vp one. Invisible is
+//      `Visibility.Hidden` (component/enums.d.ts:1851 — "hidden, and a placeholder
+//      is used for it in the layout"), never `Visibility.None`.
+//
+// The slot is also TIER-GATED, and that gate is arithmetic rather than taste: at
+// the compact split tier the 28-character name floor has 7 vp of slack (203
+// against 196 — see peerRowMetaWidthVp) and a 16 vp slot does not fit; from the
+// medium tier up the same floor has the room. `peerRowCopyVisible` is that rule,
+// and the row, the budget and the selfcheck all read it.
+/** The drawn copy glyph's size (vp) — two overlapping rounded rectangles. */
+export const PEER_ROW_COPY_GLYPH_VP: number = 16;
+/**
+ * The glyph's layout slot (vp): the glyph itself. Deliberately NOT bigger — the
+ * slot is reserved on every row of the tier, so a slot taller than the text lines
+ * would raise the two-line row's height (24 vp measured 74 vp rows; 16 keeps them
+ * at the 64 vp the compact form states).
+ */
+export const PEER_ROW_COPY_SLOT_VP: number = PEER_ROW_COPY_GLYPH_VP;
+/**
+ * The icon's TOUCH target (vp): >= 40 x 40 even though the glyph is 16, via the
+ * component's `responseRegion` (component/common.d.ts:17311, public since API 8).
+ */
+export const PEER_ROW_COPY_TOUCH_VP: number = 40;
+/**
+ * Does the peer LIST ROW render a copy slot at this window width? True exactly on
+ * the split shell at the medium/roomy rail tiers — the pointer branch whose width
+ * budget can afford it. The narrow (phone/tablet) branch is FALSE: it has no hover,
+ * so its rows stay byte-for-byte what they were (I8's phone-branch decision), and
+ * the compact split tier is false because its name floor cannot pay for the slot.
+ */
+export function peerRowCopyVisible(windowVp: number): boolean {
+  return paneLayoutOf(windowVp) === PANE_SPLIT &&
+    railTierOf(windowVp) !== RAIL_TIER_COMPACT;
+}
+
+/** The row's copy slot (vp) at a window width — 0 when the tier cannot afford it. */
+export function peerRowCopySlotVp(windowVp: number): number {
+  return peerRowCopyVisible(windowVp) ? PEER_ROW_COPY_SLOT_VP : 0;
+}
+
 /**
  * The width (vp) line 1's NAME has at a window width: the row's text width at that
- * window's column, minus line 1's chip/dot block at that window's tier.
+ * window's column, minus the meta block at that window's tier and minus the copy
+ * slot (0 where the tier has none).
  * `>= PEER_ROW_NAME_MIN_WIDTH_VP` is exactly "a real 28-character fqdn fits", and
  * the selfcheck sweeps every window of the shell to hold it there.
  */
 export function peerRowNameWidthVp(navBarWidthVp: number, windowVp: number): number {
-  return peerRowTextWidthVp(navBarWidthVp) - peerRowMetaWidthVp(windowVp);
+  return peerRowTextWidthVp(navBarWidthVp) - peerRowMetaWidthVp(windowVp) -
+    peerRowCopySlotVp(windowVp);
 }
 
 /** The name column's width (vp) for a window width — the composed form. */
 export function peerRowNameWidthFor(windowVp: number): number {
   return peerRowNameWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
+}
+
+/**
+ * The width (vp) line 2's IP has. At the compact tier the IP shares line 2 with the
+ * chip + status text (I4's condensation) and the dot is on line 1, so only that
+ * line's block comes off. At the wide tiers the IP shares the ROW with the
+ * full-height meta column (I8 §2) and carries its own copy icon (I8 §3), so both
+ * come off.
+ * `>= PEER_ROW_IP_MIN_WIDTH_VP` is exactly "the IP never wraps" at every window.
+ */
+export function peerRowIpWidthVp(navBarWidthVp: number, windowVp: number): number {
+  const text: number = peerRowTextWidthVp(navBarWidthVp);
+  if (peerRowCondensed(windowVp)) {
+    return text - PEER_ROW_L2_META_COMPACT_VP;
+  }
+  return text - peerRowMetaWidthVp(windowVp) - peerRowCopySlotVp(windowVp);
+}
+
+/** The IP column's width (vp) for a window width — the composed form. */
+export function peerRowIpWidthFor(windowVp: number): number {
+  return peerRowIpWidthVp(peerListNavBarWidthFor(windowVp), windowVp);
+}
+
+// ---------------------------------------------------------------------------
+// 0.0.43 (I8) §1 — the row highlight is an INSET ROUNDED BLOCK
+// ---------------------------------------------------------------------------
+// The owner read the 0.0.42 frame as "the selected row's tint spans the whole list
+// card edge-to-edge" and asked for the opposite: a block that respects the list's
+// horizontal padding and has a corner radius, so the highlight cannot touch the
+// card's rounded edges. The geometry is three numbers:
+//
+//   * `PEER_ROW_HIGHLIGHT_INSET_VP` — the block's left/right inset from the card's
+//     inner edge. It IS the list's own content padding (PEER_ROW_LIST_PADDING_VP),
+//     because that is the padding the row content uses: the page now writes it as
+//     the ROW's own horizontal inset, so "the tint is inset by the content padding"
+//     is one constant the selfcheck can compare with itself.
+//   * `PEER_LIST_CARD_RADIUS_VP` — the card's own radius (16), which the block's
+//     corner has to clear.
+//   * `PEER_ROW_HIGHLIGHT_RADIUS_VP` — the block's radius. It is at least the
+//     CONCENTRIC radius (`card - inset` = 4, the most a nested rounded box may be
+//     and still look nested) and, because a 4 vp radius still reads as a square
+//     corner, the shipped value is 12 (the same octave-below-the-cards radius the
+//     search field uses). The selfcheck pins both: the bound, and the fact that the
+//     block's corner is clear of the card's rounded edge by a stated number of vp.
+/** The peer list card's own corner radius (vp). */
+export const PEER_LIST_CARD_RADIUS_VP: number = 16;
+/** The highlight block's left/right inset from the card's inner edge (vp). */
+export const PEER_ROW_HIGHLIGHT_INSET_VP: number = PEER_ROW_LIST_PADDING_VP;
+/** The highlight block's corner radius (vp). */
+export const PEER_ROW_HIGHLIGHT_RADIUS_VP: number = 12;
+
+/**
+ * The SMALLEST radius a block inset by `PEER_ROW_HIGHLIGHT_INSET_VP` inside a
+ * `PEER_LIST_CARD_RADIUS_VP` card may have and still read as nested rather than as
+ * a square corner poking at the card's arc: the two radii are concentric when
+ * `inner = outer - inset`.
+ */
+export function peerRowHighlightConcentricRadiusVp(): number {
+  const concentric: number = PEER_LIST_CARD_RADIUS_VP - PEER_ROW_HIGHLIGHT_INSET_VP;
+  return concentric > 0 ? concentric : 0;
+}
+
+/**
+ * How far (vp) the highlight block's corner is from the card's rounded edge,
+ * measured along the corner's own diagonal (the closest approach between the two
+ * arcs). Positive = the block cannot touch the card's rounded edge, which is the
+ * property the owner asked for; the shipped geometry clears it by ~15 vp.
+ */
+export function peerRowHighlightCornerClearanceVp(): number {
+  const inset: number = PEER_ROW_HIGHLIGHT_INSET_VP;
+  const radius: number = PEER_ROW_HIGHLIGHT_RADIUS_VP;
+  const cardRadius: number = PEER_LIST_CARD_RADIUS_VP;
+  const blockDiagonal: number =
+    Math.sqrt((inset + radius) * (inset + radius) * 2) - radius;
+  const cardDiagonal: number = Math.sqrt(cardRadius * cardRadius * 2) - cardRadius;
+  return blockDiagonal - cardDiagonal;
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1273,29 @@ export function peerDetailSectionOf(label: string): string {
     }
   }
   return PEER_DETAIL_PATH;
+}
+
+/**
+ * 0.0.43 (I8) §3 — WHICH DETAIL ROWS ARE COPYABLE, AND WHAT THEY COPY.
+ *
+ * The owner's scope for this pass is exact: the domain/hostname and the IP, and
+ * NOTHING else — "no public-key copy in this pass". So the answer is a policy over
+ * the row's LABEL (the same shape as peerDetailSectionOf), and it returns the
+ * string to copy only for the two labels that are a hostname or an address:
+ *
+ *   域名        the peer's fqdn (or the row's own value when the page fell back)
+ *   NetBird IP  the peer's overlay address
+ *
+ * Every other label — including 公钥, which is the one row whose whole point is a
+ * 64-character identity — answers '' and therefore renders NO copy affordance at
+ * all. A row that says '未知' (the page's own not-carried marker) is not copied
+ * either: copying "未知" would put a placeholder on the clipboard.
+ */
+export function peerDetailCopyValue(label: string, value: string): string {
+  if (label !== '域名' && label !== 'NetBird IP') {
+    return '';
+  }
+  return value === '未知' ? '' : value;
 }
 
 /**

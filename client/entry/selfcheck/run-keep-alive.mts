@@ -1026,9 +1026,9 @@ check('module.json5 asks for the continuous-task permission, inside requestPermi
   MODULE_JSON5.indexOf("name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'") >= 0 &&
   MODULE_JSON5.indexOf('requestPermissions') <
     MODULE_JSON5.indexOf("name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'"));
-check('the version is 42 / 0.0.42 in both profiles',
-  /versionCode: 42/.test(BUILD_PROFILE) && /versionName: '0\.0\.42'/.test(BUILD_PROFILE) &&
-  /versionCode: 42/.test(APP_JSON5) && /versionName: '0\.0\.42'/.test(APP_JSON5) &&
+check('the version is 43 / 0.0.43 in both profiles',
+  /versionCode: 43/.test(BUILD_PROFILE) && /versionName: '0\.0\.43'/.test(BUILD_PROFILE) &&
+  /versionCode: 43/.test(APP_JSON5) && /versionName: '0\.0\.43'/.test(APP_JSON5) &&
   BUILD_PROFILE.indexOf("'0.0.28'") < 0 && APP_JSON5.indexOf("'0.0.28'") < 0);
 
 // ---- D. the platform callbacks and the resume signal (0.0.21) --------------

@@ -509,9 +509,23 @@ try {
   //     28-character fqdn fits at EVERY wide tier (the floor the review states)
   // -------------------------------------------------------------------------
   check('peer row: the row is the 64 vp two-line form, its chrome budgeted per tier',
+    // 0.0.43 (I8) §2 DELIBERATE UPDATE: the wide meta budget is no longer the 112 vp
+    // placeholder with 14 vp of slack in it. The meta became a COLUMN of the row
+    // body, so its width is the sum of the four parts it renders
+    // (44 + 8 + 28 + 8 + 10 = 98), and the same four parts reproduce the compact
+    // tier's two budgets exactly (18 = dot + gap, 88 = gap + chip + gap + status).
+    // The property is unchanged — chrome budgeted per tier, stated rather than
+    // magic — and the floors are measured against these same numbers below.
     m.PEER_ROW_MIN_HEIGHT_VP === 64 && m.PEER_ROW_LIST_PADDING_VP === 12 &&
-    m.PEER_ROW_META_WIDE_VP === 112 && m.PEER_ROW_META_COMPACT_VP === 18 &&
-    m.PEER_ROW_L2_META_COMPACT_VP === 88 && m.PEER_ROW_IP_MIN_WIDTH_VP === 120);
+    m.PEER_ROW_CHIP_WIDTH_VP === 44 && m.PEER_ROW_STATUS_TEXT_WIDTH_VP === 28 &&
+    m.PEER_ROW_DOT_VP === 10 && m.PEER_ROW_META_GAP_VP === 8 &&
+    m.PEER_ROW_META_WIDE_VP === 98 && m.PEER_ROW_META_COMPACT_VP === 18 &&
+    m.PEER_ROW_L2_META_COMPACT_VP === 88 && m.PEER_ROW_IP_MIN_WIDTH_VP === 120 &&
+    m.PEER_ROW_META_WIDE_VP === m.PEER_ROW_CHIP_WIDTH_VP + m.PEER_ROW_META_GAP_VP +
+      m.PEER_ROW_STATUS_TEXT_WIDTH_VP + m.PEER_ROW_META_GAP_VP + m.PEER_ROW_DOT_VP &&
+    m.PEER_ROW_META_COMPACT_VP === m.PEER_ROW_DOT_VP + m.PEER_ROW_META_GAP_VP &&
+    m.PEER_ROW_L2_META_COMPACT_VP === m.PEER_ROW_META_GAP_VP + m.PEER_ROW_CHIP_WIDTH_VP +
+      m.PEER_ROW_META_GAP_VP + m.PEER_ROW_STATUS_TEXT_WIDTH_VP);
   check('peer row: the name floor is a 28-character fqdn at 14 vp (28 × 7 = 196)',
     m.PEER_ROW_FQDN_CHARS === 28 && m.PEER_ROW_NAME_CHAR_VP === 7 &&
     m.PEER_ROW_NAME_MIN_WIDTH_VP === 196);
@@ -534,7 +548,7 @@ try {
   check('peer row: the compact tier CONDENSES line 1 (chip + status ride line 2)',
     m.peerRowCondensed(840) && m.peerRowCondensed(1023) && !m.peerRowCondensed(1024) &&
     !m.peerRowCondensed(1440) && !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
-    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1024) === 112);
+    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1024) === 98);
   check('peer row: THE 28-CHARACTER FQDN FITS AT EVERY WINDOW OF THE SHELL',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
@@ -543,11 +557,20 @@ try {
       return true;
     })(),
     `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
+  // 0.0.43 (I8) DELIBERATE UPDATE: the name's width now also pays for the COPY slot
+  // (peerRowCopySlotVp: the 16 vp glyph from the medium tier up, 0 at the compact
+  // split tier, where the tier cannot afford it — see the I8 checks below), and the
+  // wide meta is its derived 98. The floors the numbers are checked against are
+  // unchanged.
   check('peer row: the name column at every tier bottom and the measured I3 window',
-    m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 18 &&
-    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112 &&
-    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112 &&
-    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP - 112,
+    m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_COMPACT_VP - 0 &&
+    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP &&
+    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP &&
+    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.PEER_ROW_COPY_SLOT_VP,
     `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
     `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
   check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
@@ -794,7 +817,15 @@ try {
     !PAGE.includes('@State peerAdvancedOpen'));
   check('B: the 域名 duplicate rule, the mono public key and the 720 vp card cap are wired',
     PAGE.includes('peerFqdnDuplicatesTitle(title, field.value)') &&
-    PAGE.includes('DetailRow({ label: field.label, value: field.value, mono: true })') &&
+    // 0.0.43 (I8) §3: the identity row's call grew a copyValue/onCopy pair, so the
+    // mono flag is asserted on the identity section's own call instead of on a
+    // one-line literal.
+    (() => {
+      const identity = PAGE.slice(PAGE.indexOf('if (this.peerIdentityOpen) {'),
+        PAGE.indexOf('pid|'));
+      return identity.includes('mono: true,');
+    })() &&
+    PAGE.includes('DetailRow({ label: field.label, value: field.value })') &&
     PAGE.includes('@Prop mono: boolean = false;') &&
     PAGE.includes('.constraintSize({ maxWidth: DETAIL_CONTENT_MAX_WIDTH_VP })') &&
     PAGE.includes('private peerDetailSectionFields(') &&
@@ -825,12 +856,20 @@ try {
     (() => {
       const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
         PAGE.indexOf('peersTab() {'));
-      // the chip appears in BOTH shapes (line 1 wide / line 2 compact) and the
-      // status text is gated on a non-connected status in both.
+      // the chip appears in BOTH shapes (line 2 compact / the meta column wide) and
+      // the status text is gated on a non-connected status in both.
+      // 0.0.43 (I8) §2 DELIBERATE UPDATE: the wide chip is no longer gated by
+      // `peer.online && !this.peerRowCondensed()` on line 1 — the whole wide meta
+      // moved into its own trailing column, where `if (peer.online)` gates the chip
+      // inside `if (!this.peerRowCondensed())`. The property is unchanged: the chip
+      // renders for an ONLINE peer in both shapes, the status text for a
+      // non-connected one.
       return (row.match(/this\.peerRowCondensed\(\)/g) ?? []).length >= 3 &&
         (row.match(/connectionLabel\(peer.connection\)/g) ?? []).length === 2 &&
         (row.match(/if \(peer\.status !== 'connected'/g) ?? []).length === 2 &&
-        row.indexOf('if (peer.online && !this.peerRowCondensed()) {') > 0;
+        (row.match(/if \(peer\.online\) \{/g) ?? []).length === 2 &&
+        row.indexOf('if (!this.peerRowCondensed()) {') > 0 &&
+        !row.includes("peerStatusText('connected')");
     })());
   check('C: the row renders EXACTLY the fields peerRowKey carries (no new column here)',
     (() => {
@@ -852,7 +891,13 @@ try {
     PAGE.includes('return peerRowCondensed(this.widthVp);') &&
     PAGE.includes('private peerSearchWidth(): Length {') &&
     PAGE.includes('.width(this.peerSearchWidth())') &&
-    PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
+    // 0.0.43 (I8) §1 DELIBERATE UPDATE: the list's 12 vp horizontal padding (I3's C
+    // fix) moved from the List to the ROW, where it is the highlight block's inset —
+    // the same number (PEER_ROW_HIGHLIGHT_INSET_VP === PEER_ROW_LIST_PADDING_VP), so
+    // the card's content geometry and the I6 search-field identity are unchanged.
+    // The card itself no longer pads horizontally; see the I8 §1 checks below.
+    PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })') &&
+    !PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
   check('F: the search field exists only when there is a peer to search',
     PAGE.indexOf('if (this.peersList().length > 0) {') > 0 &&
     PAGE.indexOf('if (this.peersList().length > 0) {') <
@@ -1294,6 +1339,148 @@ try {
     // would rebuild both rows on every pointer move.
     PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))') &&
     !PAGE.includes('peerRowKey(peer, this.peerRowHovered'));
+
+  // =========================================================================
+  // 0.0.43 (I8) §1/§2 — the owner's three findings, as properties of the shipped
+  // sources. (The copy policy and the pasteboard call path are the separate
+  // run-copy-affordance.mts's subject, because they need a stubbed platform.)
+  // =========================================================================
+
+  // ---- (a) the selection/hover highlight is an INSET ROUNDED BLOCK -------------
+  // The owner's frame read the tint as "a band across the whole list card". The
+  // property is three numbers: the inset IS the list's content padding, the radius
+  // is at least the concentric radius of a block nested inside the card, and the
+  // block's corner therefore clears the card's own rounded edge.
+  check('I8 §1: the highlight is inset by the list content padding, radius bounded below',
+    m.PEER_ROW_HIGHLIGHT_INSET_VP === m.PEER_ROW_LIST_PADDING_VP &&
+    m.PEER_ROW_HIGHLIGHT_INSET_VP === 12 &&
+    m.PEER_LIST_CARD_RADIUS_VP === 16 && m.PEER_ROW_HIGHLIGHT_RADIUS_VP === 12 &&
+    m.peerRowHighlightConcentricRadiusVp() ===
+      m.PEER_LIST_CARD_RADIUS_VP - m.PEER_ROW_HIGHLIGHT_INSET_VP &&
+    m.PEER_ROW_HIGHLIGHT_RADIUS_VP >= m.peerRowHighlightConcentricRadiusVp());
+  check('I8 §1: the block\'s corner is clear of the card\'s rounded edge, not tangent to it',
+    m.peerRowHighlightCornerClearanceVp() > 0 &&
+    // a square corner (radius 0) would still clear the arc, but by less — the
+    // radius is what makes the block read as nested rather than as a poking corner
+    m.peerRowHighlightCornerClearanceVp() >
+      (Math.sqrt(2 * m.PEER_ROW_HIGHLIGHT_INSET_VP * m.PEER_ROW_HIGHLIGHT_INSET_VP) -
+        (Math.sqrt(2 * m.PEER_LIST_CARD_RADIUS_VP * m.PEER_LIST_CARD_RADIUS_VP) -
+          m.PEER_LIST_CARD_RADIUS_VP)),
+    `clearance=${m.peerRowHighlightCornerClearanceVp().toFixed(2)} vp`);
+  check('I8 §1: the ROW carries the inset, the BLOCK carries the radius (two nodes)',
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      const markerAt = row.indexOf('.border({');
+      const radiusAt = row.indexOf('.borderRadius(PEER_ROW_HIGHLIGHT_RADIUS_VP)');
+      const insetAt = row.indexOf('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP');
+      const hoverAt = row.indexOf('.onHover(');
+      // order inside the builder: the block's marker → its tint → its radius → the
+      // wrapper's inset → the wrapper's pointer/activation handlers. The tint and the
+      // marker are on the SAME node (checked by the I6 §2 assertions above), so the
+      // radius on that node rounds exactly what the tint paints.
+      return markerAt > 0 && radiusAt > markerAt && insetAt > radiusAt &&
+        hoverAt > insetAt &&
+        row.includes('.borderRadius(PEER_LIST_CARD_RADIUS_VP)') === false;
+    })());
+  check('I8 §1: the LIST card is the named radius and no longer pads horizontally',
+    PAGE.includes('.borderRadius(PEER_LIST_CARD_RADIUS_VP)') &&
+    !PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
+
+  // ---- (b) the chip and the dot are centred on the ROW, in every state ---------
+  // The property is structural: the chip + 空闲/离线 text + dot are a SIBLING of the
+  // two-line text block (so the body's VerticalAlign.Center centres them against
+  // BOTH lines instead of against line 1), and nothing inside that column reads the
+  // selection or the hover — so the centring is the same in all three states.
+  check('I8 §2: the chip+dot are a trailing column AFTER the two-line block (not on line 1)',
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      const ipAt = row.indexOf("Text(peer.ip.length > 0 ? peer.ip : '无 IP')");
+      const metaAt = row.indexOf('if (!this.peerRowCondensed()) {');
+      const centerAt = row.indexOf('.alignItems(VerticalAlign.Center)', metaAt);
+      const bodyPadAt = row.indexOf('.padding({ top: 12, bottom: 12 })');
+      return ipAt > 0 && metaAt > ipAt && centerAt > metaAt && bodyPadAt > centerAt;
+    })());
+  check('I8 §2: the column is STATE-FREE and tier-consistent (colours only, one dot)',
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      const metaAt = row.indexOf('if (!this.peerRowCondensed()) {');
+      const meta = row.slice(metaAt, row.indexOf('.padding({ top: 12, bottom: 12 })'));
+      // no selection/hover term and no VERTICAL placement of its own in the column:
+      // the chip and the dot cannot move between the selected / unselected / hovered
+      // states. (`width` is deliberately not banned: the slice ends after the row
+      // body's own `.width('100%')`, which is horizontal and belongs to the body.)
+      return meta.length > 0 && !/peerRowSelected|peerRowHovered/.test(meta) &&
+        !/\.(height|margin|offset|position|translate)\(/.test(meta) &&
+        // the same chip, the same status gate and the same dot in both tiers
+        (row.match(/Text\(connectionLabel\(peer\.connection\)\)/g) ?? []).length === 2 &&
+        (row.match(/if \(peer\.status !== 'connected'\)/g) ?? []).length === 2 &&
+        (row.match(/Circle\(\{ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP \}\)/g) ?? [])
+          .length === 2;
+    })());
+  check('I8 §2: the compact tier\'s impossibility is arithmetic, and it keeps I4\'s shape',
+    // The compact split tier cannot host a full-height meta column: the name floor
+    // (196) plus that column (>= the dot's own 18) plus line 2's chip+status (88)
+    // plus the IP's floor (120) exceeds the tier's text width at its bottom (221).
+    // So the tier keeps the dot on line 1 and the chip+status on line 2 — and the
+    // shipped row is asserted against the same floors it always was.
+    (() => {
+      const text: number = m.peerRowTextWidthVp(m.peerListNavBarWidthFor(840));
+      const impossible: boolean = m.PEER_ROW_NAME_MIN_WIDTH_VP +
+        m.PEER_ROW_META_COMPACT_VP + m.PEER_ROW_L2_META_COMPACT_VP +
+        m.PEER_ROW_IP_MIN_WIDTH_VP > text;
+      return impossible && text === 221 &&
+        m.peerRowMetaWidthVp(840) === m.PEER_ROW_META_COMPACT_VP &&
+        m.peerRowNameWidthFor(840) >= m.PEER_ROW_NAME_MIN_WIDTH_VP &&
+        m.peerRowIpWidthFor(840) >= m.PEER_ROW_IP_MIN_WIDTH_VP &&
+        m.peerRowCopySlotVp(840) === 0;
+    })(),
+    `text(840)=${m.peerRowTextWidthVp(m.peerListNavBarWidthFor(840))}`);
+
+  // ---- the I8 copy slot's geometry (the policy itself is run-copy-affordance) --
+  check('I8 §3: the copy slot is tier-gated, and the IP keeps its one-line floor',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
+        if (m.peerRowNameWidthFor(w) < m.PEER_ROW_NAME_MIN_WIDTH_VP) { return false; }
+        if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
+      }
+      return m.peerRowCopyVisible(840) === false && m.peerRowCopyVisible(1023) === false &&
+        m.peerRowCopyVisible(1024) === true && m.peerRowCopyVisible(1440) === true &&
+        // the phone / tablet branch has no copy slot in its rows at all
+        m.peerRowCopyVisible(600) === false && m.peerRowCopyVisible(320) === false &&
+        m.peerRowCopySlotVp(1024) === m.PEER_ROW_COPY_SLOT_VP &&
+        m.PEER_ROW_COPY_SLOT_VP === 16 && m.PEER_ROW_COPY_GLYPH_VP === 16 &&
+        m.PEER_ROW_COPY_TOUCH_VP === 40 && m.PEER_ROW_COPY_TOUCH_VP >= 40 &&
+        m.PEER_ROW_COPY_TOUCH_VP > m.PEER_ROW_COPY_GLYPH_VP;
+    })(),
+    `IP floor min: 840→${m.peerRowIpWidthFor(840)} 1024→${m.peerRowIpWidthFor(1024)}`);
+  // The 0.0.43 device frame caught the FIRST version of this: the slot was created
+  // only for the hovered/selected row, so a hidden-then-created node SHORTENED the
+  // row (measured 74 vp against its neighbours' 64 — 96 px vs 83 px pitch at
+  // 1.2964 px/vp) and a pointer entering a row pushed the whole list down. The
+  // properties that prevent it are arithmetic + structural, so they are asserted
+  // here rather than hoped for: the slot is no taller than a caption line box, and
+  // the row's gate is the TIER while only the component's `visible` follows the
+  // pointer.
+  check('I8 §3: the slot cannot reflow the list — tier-gated node, pointer-gated visible',
+    m.PEER_ROW_COPY_SLOT_VP === m.PEER_ROW_COPY_GLYPH_VP &&
+    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_VP * 1.5 &&
+    m.PEER_ROW_COPY_SLOT_VP < m.PEER_ROW_MIN_HEIGHT_VP &&
+    PAGE.includes('private peerRowCopySlotVisible(): boolean {') &&
+    PAGE.includes('return peerRowCopyVisible(this.widthVp);') &&
+    (PAGE.match(/if \(this\.peerRowCopySlotVisible\(\)\) \{/g) ?? []).length === 2 &&
+    (PAGE.match(/visible: this\.peerRowCopyIconVisible\(peer\)/g) ?? []).length === 2 &&
+    // the old shape — an `if` on the pointer state — must not come back
+    !/if \(this\.peerRowCopyIconVisible\(peer\)/.test(PAGE),
+    `slot=${m.PEER_ROW_COPY_SLOT_VP} caption box=${m.TYPE_CAPTION_VP * 1.5}`);
+  check('I8 §3: the rail\'s copied row keeps the value text beside the slot',
+    m.RAIL_INFO_COPY_SLOT_VP === m.PEER_ROW_COPY_SLOT_VP &&
+    m.railInfoValueTextWidthVp(840) ===
+      m.railInfoValueWidthVp(840) - m.RAIL_INFO_COPY_SLOT_VP &&
+    m.railInfoValueTextWidthVp(840) >= m.PEER_ROW_IP_MIN_WIDTH_VP &&
+    PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })'));
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);
