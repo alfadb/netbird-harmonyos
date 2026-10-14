@@ -514,7 +514,7 @@ function peerCarrierText(peer: UiPeerEntry): string {
     return '未知（核心未上报该对端的会话信息）';
   }
   if (peer.on_carrier) {
-    return peer.carrier_attached ? '经中继承载（已附着）' : '经中继承载（未附着）';
+    return peer.carrier_attached ? '中继承载（已附着）' : '中继承载（未附着）';
   }
   return '未使用中继';
 }
@@ -4074,7 +4074,7 @@ struct Index {
       .alignItems(HorizontalAlign.Start)
       Row({ space: 6 }) {
         if (peer.online) {
-          // 主题 (2026-10-09): the 直连/经中继 chip takes its status role from
+          // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
           // the base/dark resources — same role for the ink and the tint.
           Text(connectionLabel(peer.connection))
             .fontSize(12)

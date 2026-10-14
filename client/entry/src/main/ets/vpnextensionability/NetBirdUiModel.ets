@@ -1166,14 +1166,15 @@ export function homeStateText(state: string, pendingStart: boolean,
   return '未连接';
 }
 
-// 连接方式 label for the peers list/detail (2026-10-06: '经中继' — the
-// relayed path goes THROUGH the relay server, 直连 is point-to-point).
+// 连接方式 label for the peers list/detail (2026-10-06; 2026-10-14 renamed to
+// the bare noun 中继 so the pair reads 直连 / 中继 symmetrically — the relayed
+// path goes THROUGH the relay server, 直连 is point-to-point).
 export function connectionLabel(connection: string): string {
   if (connection === 'direct') {
     return '直连';
   }
   if (connection === 'relay') {
-    return '经中继';
+    return '中继';
   }
   return '未知';
 }

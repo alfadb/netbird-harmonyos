@@ -823,7 +823,16 @@ try {
     m.homeStateText('', true, false, false, false, undefined) === '连接中…' &&
     m.homeStateText('', false, false, false, false, undefined) === '未连接');
   check('connection labels', m.connectionLabel('direct') === '直连' &&
-    m.connectionLabel('relay') === '经中继' && m.connectionLabel('unknown') === '未知');
+    m.connectionLabel('relay') === '中继' && m.connectionLabel('unknown') === '未知');
+  // 2026-10-14 rename: the relay path is the bare noun 中继, so the peers page
+  // reads 直连 / 中继 symmetrically. The page AND the model embed the label in
+  // their own strings (chip, details row, bearer line), so the retired 经 form
+  // must not survive anywhere in the shipped UI source — a model-only value pin
+  // would not catch a stale copy.
+  const UI_TEXT = readFileSync(source, 'utf8') +
+    readFileSync(join(here, '..', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
+  check('no shipped UI source still spells the retired relay label',
+    !UI_TEXT.includes('经中继'));
   check('handshake texts', m.lastHandshakeText(null) === '—' &&
     m.lastHandshakeText(5) === '刚刚' && m.lastHandshakeText(42) === '42 秒前' &&
     m.lastHandshakeText(120) === '2 分钟前' && m.lastHandshakeText(7200) === '2 小时前' &&
