@@ -212,11 +212,11 @@ try {
   // 6. the visual scale and the label/value width policy (0.0.37, I2 point 3)
   // -------------------------------------------------------------------------
   check('type: app 22 > page 20 > section 16 > body 15 >= caption 14 (PC floor)',
-    m.TYPE_APP_TITLE_VP === 22 && m.TYPE_PAGE_TITLE_VP === 20 &&
-    m.TYPE_SECTION_TITLE_VP === 16 && m.TYPE_BODY_VP === 15 && m.TYPE_CAPTION_VP === 14);
+    m.TYPE_APP_TITLE_FP === 22 && m.TYPE_PAGE_TITLE_FP === 20 &&
+    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 15 && m.TYPE_CAPTION_FP === 14);
   check('type: body is inside the 14–16 body band and the caption meets both floors',
-    m.TYPE_BODY_VP >= 14 && m.TYPE_BODY_VP <= 16 && m.TYPE_CAPTION_VP >= 14 &&
-    m.TYPE_PAGE_TITLE_VP >= 20 && m.TYPE_PAGE_TITLE_VP <= 22);
+    m.TYPE_BODY_FP >= 14 && m.TYPE_BODY_FP <= 16 && m.TYPE_CAPTION_FP >= 14 &&
+    m.TYPE_PAGE_TITLE_FP >= 20 && m.TYPE_PAGE_TITLE_FP <= 22);
   check('spacing: the rail paddings are on the 8 vp grid (16 / 16)',
     m.RAIL_PAGE_PADDING_VP === 16 && m.RAIL_CARD_PADDING_VP === 16 &&
     m.RAIL_PAGE_PADDING_VP % 8 === 0 && m.RAIL_CARD_PADDING_VP % 8 === 0);
@@ -290,7 +290,11 @@ try {
     PAGE.includes('const max: number = contentMaxWidthVp(this.widthVp);'));
   check('rail: the round connect control is kept, sized to the rail on the wide branch',
     PAGE.includes('private connectButtonSize(): number {') &&
-    PAGE.includes('return this.wideLayout() ? 104 : 132;') &&
+    // 0.0.46 (I11) DELIBERATE UPDATE: the two shells' 104/132 go through the layout
+    // module now, because the disc's LABEL CEILING is derived from them
+    // (connectLabelFitsDiscVp) — the numbers themselves are pinned in the module and
+    // re-asserted here so the page cannot silently drift from that arithmetic.
+    PAGE.includes('this.wideLayout() ? CONNECT_DISC_WIDE_SIZE_VP : CONNECT_DISC_NARROW_SIZE_VP;') &&
     PAGE.includes('.width(this.connectButtonSize())') && (() => {
       // Scoped to the rail's own block: the 后台保活 card elsewhere on the page
       // legitimately uses a Toggle (a binary setting), the CONNECT control must not.
@@ -678,7 +682,7 @@ try {
     !PAGE.includes("'连接时长'"));
   check('overview: the offline list is capped at 5 and the tile geometry is the review\'s',
     m.OVERVIEW_OFFLINE_MAX_ROWS === 5 && m.OVERVIEW_TILE_HEIGHT_VP === 96 &&
-    m.TYPE_STAT_VALUE_VP === 24);
+    m.TYPE_STAT_VALUE_FP === 24);
 
   // -------------------------------------------------------------------------
   // 16. 0.0.39 (I4) P1.7 — THE PEER DETAIL's FOUR SECTIONS
@@ -820,7 +824,7 @@ try {
         pane.includes('this.lastErrorLine()') &&
         pane.includes("Text('已连接')") && pane.includes("Text('直连')") &&
         pane.includes("Text('中继')") &&
-        pane.includes('OVERVIEW_TILE_HEIGHT_VP') && pane.includes('TYPE_STAT_VALUE_VP') &&
+        pane.includes('OVERVIEW_TILE_HEIGHT_VP') && pane.includes('TYPE_STAT_VALUE_FP') &&
         pane.includes('OV_TILE_CONNECTED') && pane.includes('OV_HERO_ADDRESS') &&
         pane.includes('OV_ROW_RELAY_IN_USE') && pane.includes('OV_ROW_OFFLINE') &&
         pane.includes('OV_ROW_ERROR') && pane.includes('OV_ROW_NONE');
@@ -950,7 +954,9 @@ try {
       const card = PAGE.slice(PAGE.indexOf('serverConfigCard() {'),
         PAGE.indexOf('logoutAction() {'));
       return card.includes('.width(BUTTON_INLINE_WIDTH_VP)') &&
-        !card.includes("Button('更改配置')\n        .fontSize(TYPE_BODY_VP)\n        .height(40)\n        .width('100%')");
+        card.includes('.maxFontScale(TYPE_SCALE_MAX_ROW)') &&
+        !card.includes("Button('更改配置')\n        .fontSize(TYPE_BODY_FP)\n" +
+          ".maxFontScale(TYPE_SCALE_MAX_ROW)\n        .height(40)\n        .width('100%')");
     })());
   check('D: 注销 lives INSIDE the server card, behind a 1 vp divider (no orphan red row)',
     (() => {
@@ -969,14 +975,19 @@ try {
     // users: the 关于 card's two read-only rows and the pane's four sections.
     (PAGE.match(/valueEnd: true/g) ?? []).length === 6 &&
     PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',"));
-  check('D: the settings surface has NO text literal below the 14 vp PC floor',
+  // 0.0.46 (I11) DELIBERATE UPDATE: this check used to require at least ONE numeric
+  // font literal in the settings surface (the three '›' chevrons' bare `18`) and then
+  // held it above the 14 vp PC floor. Those literals are TYPE_CHEVRON_FP now, so the
+  // settings surface has NO ad-hoc font size left at all — the floor question moved
+  // to the module's own constants, which are asserted here and in run-font-scale.mts.
+  check('D: the settings surface has NO ad-hoc (numeric) font size left',
     (() => {
       const from = PAGE.indexOf('setupFormCard() {');
       const to = PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择');
       const settings = PAGE.slice(from, to);
       const sizes = settings.match(/\.fontSize\((\d+)\)/g) ?? [];
-      return sizes.length > 0 &&
-        sizes.every((site) => Number(site.replace(/\D/g, '')) >= 14);
+      return sizes.length === 0 && m.TYPE_CHEVRON_FP >= 14 &&
+        m.TYPE_CAPTION_FP >= 14 && m.TYPE_CHEVRON_FP === 18;
     })());
   check('D: the 诊断日志 explanation is behind a collapsed 说明, not a grey wall',
     PAGE.includes('@State diagnosticsNoteOpen: boolean = false;') &&
@@ -1063,8 +1074,13 @@ try {
     !PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP') &&
     !PAGE.includes('private toggleColor()') &&
     !PAGE.includes('private toggleBusy()') &&
-    PAGE.includes('return this.wideLayout() ? 104 : 132;') &&
-    PAGE.includes('return this.wideLayout() ? 18 : 22;'));
+    // 0.0.46 (I11) DELIBERATE UPDATE: the two shells' 104/132 and 18/22 moved into the
+    // layout module (CONNECT_DISC_*), where the disc's label ceiling is derived from
+    // them — the values themselves are pinned in run-font-scale.mts.
+    PAGE.includes('this.wideLayout() ? CONNECT_DISC_WIDE_SIZE_VP : ' +
+      'CONNECT_DISC_NARROW_SIZE_VP;') &&
+    PAGE.includes('this.wideLayout() ? CONNECT_DISC_WIDE_FONT_FP : ' +
+      'CONNECT_DISC_NARROW_FONT_FP;'));
   // 0.0.40 (I5) DELIBERATE UPDATE (§3): the row now paints one more nb_primary — the
   // selected row's own 3 vp marker (2 chips + 1 marker; the marker is transparent
   // until that row is the selected one).
@@ -1197,7 +1213,7 @@ try {
   // connected list's, so "the page starts in the same place" is checkable.
   check('I5 §5: the guide pane opens with the SAME 对端 header the list uses',
     (() => {
-      const header = ["Text('对端')", '.fontSize(TYPE_PAGE_TITLE_VP)',
+      const header = ["Text('对端')", '.fontSize(TYPE_PAGE_TITLE_FP)',
         '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))",
         ".width('100%')"].join('\n            ');
       // exactly TWO occurrences: the peer list's header and the guide's.
@@ -1210,13 +1226,13 @@ try {
     })());
   check('I5 §5: the empty-state block is BORDERLESS, width-capped and 72 vp under the title',
     m.GUIDE_EMPTY_MAX_WIDTH_VP === 480 && m.GUIDE_BLOCK_TOP_GAP_VP === 72 &&
-    m.GUIDE_BODY_LINE_HEIGHT_VP === 22 &&
+    m.GUIDE_BODY_LINE_HEIGHT_FP === 22 &&
     (() => {
       const guide = PAGE.slice(PAGE.indexOf('wideGuidePane() {'),
         PAGE.indexOf('connectionOverviewPane() {'));
       return guide.includes('.constraintSize({ maxWidth: GUIDE_EMPTY_MAX_WIDTH_VP })') &&
         guide.includes('.margin({ top: GUIDE_BLOCK_TOP_GAP_VP })') &&
-        guide.includes('.lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)') &&
+        guide.includes('.lineHeight(GUIDE_BODY_LINE_HEIGHT_FP)') &&
         // the small centred card is gone: no card fill, no stroke, no centring
         !guide.includes('nb_card_background') && !guide.includes('.border(') &&
         !guide.includes('justifyContent(FlexAlign.Center)') &&
@@ -1509,7 +1525,7 @@ try {
   // pointer.
   check('I8 §3: the slot cannot reflow the list — tier-gated node, pointer-gated visible',
     m.PEER_ROW_COPY_SLOT_VP === m.PEER_ROW_COPY_GLYPH_VP &&
-    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_VP * 1.5 &&
+    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_FP * 1.5 &&
     m.PEER_ROW_COPY_SLOT_VP < m.PEER_ROW_MIN_HEIGHT_VP &&
     PAGE.includes('private peerRowCopySlotVisible(): boolean {') &&
     PAGE.includes('return peerRowCopyVisible(this.widthVp);') &&
@@ -1517,7 +1533,7 @@ try {
     (PAGE.match(/visible: this\.peerRowCopyIconVisible\(peer\)/g) ?? []).length === 2 &&
     // the old shape — an `if` on the pointer state — must not come back
     !/if \(this\.peerRowCopyIconVisible\(peer\)/.test(PAGE),
-    `slot=${m.PEER_ROW_COPY_SLOT_VP} caption box=${m.TYPE_CAPTION_VP * 1.5}`);
+    `slot=${m.PEER_ROW_COPY_SLOT_VP} caption box=${m.TYPE_CAPTION_FP * 1.5}`);
   check('I8 §3: the rail\'s copied row keeps the value text beside the slot',
     m.RAIL_INFO_COPY_SLOT_VP === m.PEER_ROW_COPY_SLOT_VP &&
     // 0.0.45 (I10): the value text now also pays the 5 vp that puts the mark after

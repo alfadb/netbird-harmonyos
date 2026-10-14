@@ -169,14 +169,16 @@ import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
 // the pane's state-driven DEFAULT destination, the xl indent limit and the visual
 // scale (type sizes / rail paddings). The page still only asks it.
 import {
-  BUTTON_INLINE_WIDTH_VP, CONNECT_RING_WIDTH_VP, contentMaxWidthVp, COPY_ICON_GAP_VP,
+  BUTTON_INLINE_WIDTH_VP, CONNECT_DISC_NARROW_FONT_FP, CONNECT_DISC_NARROW_SIZE_VP,
+  CONNECT_DISC_WIDE_FONT_FP, CONNECT_DISC_WIDE_SIZE_VP, CONNECT_RING_WIDTH_VP,
+  contentMaxWidthVp, COPY_ICON_GAP_VP,
   DETAIL_CONTENT_MAX_WIDTH_VP, DETAIL_ICON_BRANCH, DETAIL_ICON_CLOCK,
   DETAIL_ICON_COPY, DETAIL_ICON_DOWN, DETAIL_ICON_EXIT, DETAIL_ICON_GLOBE,
   DETAIL_ICON_KEY, DETAIL_ICON_LINK, DETAIL_ICON_NODE,
   DETAIL_ICON_PIN, DETAIL_ICON_SHIELD, DETAIL_ICON_STATUS, DETAIL_ICON_UP,
   DETAIL_ROW_CARD_PADDING_VP, DETAIL_ROW_GAP_VP, DETAIL_ROW_ICON_GAP_VP,
   DETAIL_ROW_ICON_SLOT_VP, DETAIL_ROW_LABEL_WIDTH_VP, DETAIL_ROW_MIN_HEIGHT_VP,
-  DETAIL_ROW_PAGE_PADDING_VP, GUIDE_BLOCK_TOP_GAP_VP, GUIDE_BODY_LINE_HEIGHT_VP,
+  DETAIL_ROW_PAGE_PADDING_VP, GUIDE_BLOCK_TOP_GAP_VP, GUIDE_BODY_LINE_HEIGHT_FP,
   GUIDE_EMPTY_MAX_WIDTH_VP, GUIDE_LOGIN,
   OV_HERO_ADDRESS, OV_HERO_FQDN, OV_ROW_ERROR, OV_ROW_NONE, OV_ROW_OFFLINE,
   OV_ROW_RELAY_IN_USE, OV_TILE_CONNECTED, OV_TILE_DIRECT, OV_TILE_RELAY,
@@ -199,8 +201,9 @@ import {
   railConnectionMaxHeightVp, railInfoValueTextWidthFor, railTrafficVisible,
   railWidthFor, SECTION_CHEVRON_SLOT_VP, SECTION_HEADER_GAP_VP,
   settingsContentMaxWidthVp, splitPaneWidthVp,
-  TYPE_APP_TITLE_VP, TYPE_BODY_VP, TYPE_CAPTION_VP, TYPE_PAGE_TITLE_VP,
-  TYPE_SECTION_TITLE_VP, TYPE_STAT_VALUE_VP, WidePaneFacts, wideGuideKind,
+  TYPE_APP_TITLE_FP, TYPE_BODY_FP, TYPE_CAPTION_FP, TYPE_CHEVRON_FP, TYPE_PAGE_TITLE_FP,
+  TYPE_SCALE_MAX_DISC, TYPE_SCALE_MAX_ROW, TYPE_SECTION_TITLE_FP, TYPE_STAT_VALUE_FP,
+  WidePaneFacts, wideGuideKind,
   widePaneDestination
 } from './NetBirdHarmonyLayout';
 
@@ -1252,7 +1255,8 @@ struct DetailRow {
           FieldIcon({ kind: this.iconKind })
         }
         Text(this.label)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .fontColor($r('app.color.nb_text_muted'))
           .width(DETAIL_ROW_LABEL_WIDTH_VP)
       }
@@ -1268,7 +1272,8 @@ struct DetailRow {
         // Truthiness (not .length): a value that slipped through as null or
         // undefined renders '—' instead of throwing inside the render pass.
         Text(this.value ? this.value : '—')
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .fontColor($r('app.color.nb_text_primary'))
           .fontFamily(this.mono ? 'Noto Sans Mono' : 'HarmonyOS Sans')
           .textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)
@@ -1316,18 +1321,18 @@ struct DetailSectionHeader {
     // the click target.
     Row({ space: SECTION_HEADER_GAP_VP }) {
       Text(this.title ? this.title : '')
-        .fontSize(TYPE_SECTION_TITLE_VP)
+        .fontSize(TYPE_SECTION_TITLE_FP)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.nb_text_secondary'))
       Text(this.summary ? this.summary : '')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .layoutWeight(1)
         .maxLines(1)
         .textAlign(TextAlign.End)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       Text(this.expanded ? '▾' : '▸')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width(SECTION_CHEVRON_SLOT_VP)
         .textAlign(TextAlign.Center)
@@ -1372,7 +1377,8 @@ struct RailInfoRow {
   build() {
     Column({ space: 2 }) {
       Text(this.label)
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
         .maxLines(1)
@@ -1384,7 +1390,8 @@ struct RailInfoRow {
       // the narrow branch's home card.
       Row({ space: COPY_ICON_GAP_VP }) {
         Text(this.value ? this.value : '—')
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .fontColor($r('app.color.nb_text_primary'))
           .constraintSize({ maxWidth: this.valueMaxWidth })
           .maxLines(1)
@@ -1454,21 +1461,22 @@ struct PaneEmptyState {
       .borderRadius(24)
       .backgroundColor($r('app.color.nb_page_background'))
       Text(this.title)
-        .fontSize(TYPE_PAGE_TITLE_VP)
+        .fontSize(TYPE_PAGE_TITLE_FP)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.toneColor())
         .width('100%')
         .maxLines(2)
         .textAlign(TextAlign.Center)
       Text(this.message)
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
         .maxLines(4)
         .textAlign(TextAlign.Center)
       if (this.actionLabel.length > 0) {
         Button(this.actionLabel)
-          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontSize(TYPE_SECTION_TITLE_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(40)
           .width('100%')
           .backgroundColor($r('app.color.nb_primary'))
@@ -4811,7 +4819,7 @@ struct Index {
   @Builder
   sectionTitle(title: string) {
     Text(title)
-      .fontSize(TYPE_SECTION_TITLE_VP)
+      .fontSize(TYPE_SECTION_TITLE_FP)
       .fontWeight(FontWeight.Medium)
       .fontColor($r('app.color.nb_text_secondary'))
       .width('100%')
@@ -4844,7 +4852,7 @@ struct Index {
         // fought each other. The connect disc below stays centred (the column keeps
         // its default centre alignment); only the text moves onto the axis.
         Text('NetBird')
-          .fontSize(TYPE_APP_TITLE_VP)
+          .fontSize(TYPE_APP_TITLE_FP)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_text_primary'))
           .width('100%')
@@ -4858,15 +4866,16 @@ struct Index {
         if (!this.configured) {
           Column({ space: 8 }) {
             Text('尚未配置服务器')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
               .fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.nb_status_warning'))
             Text('请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_secondary'))
               .textAlign(TextAlign.Center)
             Button('去设置')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
+              .maxFontScale(TYPE_SCALE_MAX_ROW)
               .height(40)
               .backgroundColor($r('app.color.nb_primary'))
               .fontColor($r('app.color.nb_on_primary'))
@@ -4904,6 +4913,7 @@ struct Index {
         // untouched (连接中… / 正在断开… / the force-cancel window).
         Button(this.toggleLabel())
           .fontSize(this.connectButtonFontSize())
+          .maxFontScale(TYPE_SCALE_MAX_DISC)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_on_primary'))
           .width(this.connectButtonSize())
@@ -4958,7 +4968,7 @@ struct Index {
             Circle({ width: 12, height: 12 })
               .fill(this.stateColor())
             Text(this.stateText())
-              .fontSize(TYPE_PAGE_TITLE_VP)
+              .fontSize(TYPE_PAGE_TITLE_FP)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.stateColor())
           }
@@ -5025,17 +5035,17 @@ struct Index {
           if (this.wideLayout() && this.railTrafficRowVisible()) {
             Column({ space: 2 }) {
               Text('流量')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
                 .fontColor($r('app.color.nb_text_muted'))
                 .width('100%')
                 .maxLines(1)
               Text(`发 ${this.railTrafficText(true)}`)
-                .fontSize(TYPE_BODY_VP)
+                .fontSize(TYPE_BODY_FP)
                 .fontColor($r('app.color.nb_text_primary'))
                 .width('100%')
                 .maxLines(1)
               Text(`收 ${this.railTrafficText(false)}`)
-                .fontSize(TYPE_BODY_VP)
+                .fontSize(TYPE_BODY_FP)
                 .fontColor($r('app.color.nb_text_primary'))
                 .width('100%')
                 .maxLines(1)
@@ -5046,7 +5056,7 @@ struct Index {
           }
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .margin({ top: 6 })
@@ -5066,11 +5076,11 @@ struct Index {
           Row({ space: 8 }) {
             Column({ space: 2 }) {
               Text('详细状态')
-                .fontSize(TYPE_BODY_VP)
+                .fontSize(TYPE_BODY_FP)
                 .fontColor($r('app.color.nb_text_primary'))
                 .width('100%')
               Text('中继 · DNS · 路由 · 流量')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
                 .fontColor($r('app.color.nb_text_muted'))
                 .width('100%')
                 .maxLines(1)
@@ -5078,7 +5088,7 @@ struct Index {
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Start)
             Text('›')
-              .fontSize(18)
+              .fontSize(TYPE_CHEVRON_FP)
               .fontColor($r('app.color.nb_text_muted'))
           }
           .width('100%')
@@ -5109,14 +5119,14 @@ struct Index {
             Row({ space: 8 }) {
               Column({ space: 2 }) {
                 Text(this.sessionRowText())
-                  .fontSize(TYPE_SECTION_TITLE_VP)
+                  .fontSize(TYPE_SECTION_TITLE_FP)
                   .fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.nb_text_primary'))
                   .width('100%')
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(this.sessionRowHint())
-                  .fontSize(TYPE_CAPTION_VP)
+                  .fontSize(TYPE_CAPTION_FP)
                   .fontColor($r('app.color.nb_text_muted'))
                   .width('100%')
                   .maxLines(2)
@@ -5124,7 +5134,7 @@ struct Index {
               .layoutWeight(1)
               .alignItems(HorizontalAlign.Start)
               Text('›')
-                .fontSize(18)
+                .fontSize(TYPE_CHEVRON_FP)
                 .fontColor($r('app.color.nb_text_muted'))
             }
             .width('100%')
@@ -5226,7 +5236,8 @@ struct Index {
           Row() {
             Row({ space: COPY_ICON_GAP_VP }) {
               Text(peer.name)
-                .fontSize(TYPE_BODY_VP)
+                .fontSize(TYPE_BODY_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_primary'))
                 // Content-sized and ellipsised AT ITS BUDGET: >= 196 vp at every
                 // window of the shell (the 28-character fqdn floor), so no name is
@@ -5276,7 +5287,8 @@ struct Index {
           Row() {
             Row({ space: COPY_ICON_GAP_VP }) {
               Text(peer.ip.length > 0 ? peer.ip : '无 IP')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_muted'))
                 .constraintSize({ maxWidth: peerRowIpWidthFor(this.widthVp) })
                 .maxLines(1)
@@ -5309,7 +5321,8 @@ struct Index {
                   // (nb_status_info_background), so orange means "something needs
                   // you" and nothing else.
                   Text(connectionLabel(peer.connection))
-                    .fontSize(TYPE_CAPTION_VP)
+                    .fontSize(TYPE_CAPTION_FP)
+                    .maxFontScale(TYPE_SCALE_MAX_ROW)
                     .fontColor(peer.connection === 'direct'
                       ? $r('app.color.nb_status_success')
                       : $r('app.color.nb_primary'))
@@ -5324,7 +5337,8 @@ struct Index {
                 // for the two states that need words (see the header comment).
                 if (peer.status !== 'connected') {
                   Text(peerStatusText(peer.status))
-                    .fontSize(TYPE_CAPTION_VP)
+                    .fontSize(TYPE_CAPTION_FP)
+                    .maxFontScale(TYPE_SCALE_MAX_ROW)
                     .fontColor(this.peerStatusResource(peer.status))
                 }
               }
@@ -5352,7 +5366,8 @@ struct Index {
           Row({ space: 8 }) {
             if (peer.online) {
               Text(connectionLabel(peer.connection))
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor(peer.connection === 'direct'
                   ? $r('app.color.nb_status_success')
                   : $r('app.color.nb_primary'))
@@ -5364,7 +5379,8 @@ struct Index {
             }
             if (peer.status !== 'connected') {
               Text(peerStatusText(peer.status))
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor(this.peerStatusResource(peer.status))
             }
             Circle({ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP })
@@ -5507,7 +5523,8 @@ struct Index {
       Column({ space: 8 }) {
         Row({ space: 12 }) {
           Button('返回')
-            .fontSize(TYPE_BODY_VP)
+            .fontSize(TYPE_BODY_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
             .height(40)
             .backgroundColor($r('app.color.nb_neutral_button_background'))
             .fontColor($r('app.color.nb_on_neutral_button'))
@@ -5516,7 +5533,7 @@ struct Index {
               this.closeVisibleSubflow();
             })
           Text('对端详情')
-            .fontSize(TYPE_PAGE_TITLE_VP)
+            .fontSize(TYPE_PAGE_TITLE_FP)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.nb_text_primary'))
         }
@@ -5533,7 +5550,7 @@ struct Index {
               Circle({ width: 12, height: 12 })
                 .fill(this.selectedPeerColor())
               Text(this.selectedPeerName())
-                .fontSize(TYPE_PAGE_TITLE_VP)
+                .fontSize(TYPE_PAGE_TITLE_FP)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.nb_text_primary'))
                 .layoutWeight(1)
@@ -5579,7 +5596,7 @@ struct Index {
                 // under the card, then one advanced row).
                 Text('发送/接收为本对端的明文 IP 载荷字节（自该对端隧道建立以来累计）；' +
                   '「流量统计」的发送计加密后的传输字节，口径不同。')
-                  .fontSize(TYPE_CAPTION_VP)
+                  .fontSize(TYPE_CAPTION_FP)
                   .fontColor($r('app.color.nb_text_muted'))
                   .width('100%')
                   .padding({ top: 8 })
@@ -5656,7 +5673,7 @@ struct Index {
                   }, (field: DetailField) => `pi|${field.label}=${field.value}`)
                 Text('ICE 各行只描述候选路径与端点应用情况（断开后仍可能保留上次选中的地址），' +
                   '实际承载以「承载 / 中继通道地址」为准，ICE 已连接不代表流量直连。')
-                  .fontSize(TYPE_CAPTION_VP)
+                  .fontSize(TYPE_CAPTION_FP)
                   .fontColor($r('app.color.nb_text_muted'))
                   .width('100%')
                   .padding({ top: 8 })
@@ -5751,12 +5768,12 @@ struct Index {
         // never break a word.
         Column({ space: 2 }) {
           Text('对端')
-            .fontSize(TYPE_PAGE_TITLE_VP)
+            .fontSize(TYPE_PAGE_TITLE_FP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
           Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_secondary'))
             .width('100%')
             .maxLines(1)
@@ -5774,7 +5791,8 @@ struct Index {
         // full width ('100%').
         if (this.peersList().length > 0) {
           TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
-            .fontSize(TYPE_BODY_VP)
+            .fontSize(TYPE_BODY_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
             .height(42)
             .width(this.peerSearchWidth())
             // 0.0.39 (I4) P2 (review §5.3): radius 12 — one octave below the cards'
@@ -5887,12 +5905,13 @@ struct Index {
   setupFormCard() {
     Column({ space: 12 }) {
       Text(this.configured ? '更改服务器配置' : '服务器配置')
-        .fontSize(TYPE_SECTION_TITLE_VP)
+        .fontSize(TYPE_SECTION_TITLE_FP)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.nb_text_primary'))
         .width('100%')
       TextInput({ text: this.urlInput, placeholder: '服务器地址（https://…）' })
-        .fontSize(TYPE_BODY_VP)
+        .fontSize(TYPE_BODY_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
         .height(44)
         .width('100%')
         .backgroundColor($r('app.color.nb_input_background'))
@@ -5905,7 +5924,8 @@ struct Index {
         // with the EXPLICIT on-primary ink, unselected the card role with the
         // primary ink; the outline is the primary role in both states.
         Button('账户登录')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(40)
           .layoutWeight(1)
           .backgroundColor(this.authMode === ACCOUNT_MODE_ACCOUNT
@@ -5916,7 +5936,8 @@ struct Index {
           .enabled(!this.accountModeSwitchBlocked() && !this.accountLoginBusy)
           .onClick(() => this.selectAuthMode(ACCOUNT_MODE_ACCOUNT))
         Button('Setup Key')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(40)
           .layoutWeight(1)
           .backgroundColor(this.authMode === ACCOUNT_MODE_SETUP_KEY
@@ -5930,7 +5951,8 @@ struct Index {
       .width('100%')
       if (this.authMode === ACCOUNT_MODE_SETUP_KEY) {
         TextInput({ text: this.keyInput, placeholder: 'Setup Key' })
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(44)
           .width('100%')
           .backgroundColor($r('app.color.nb_input_background'))
@@ -5941,12 +5963,13 @@ struct Index {
           })
       } else if (this.accountLoginBusy) {
         Text(this.accountLoginCommitting ? '正在保存账户凭据…' : '正在验证账户…')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_tertiary'))
           .width('100%')
         if (!this.accountLoginCommitting) {
           Button('取消登录')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
             .height(36)
             .backgroundColor($r('app.color.nb_neutral_button_background'))
             .fontColor($r('app.color.nb_on_neutral_button'))
@@ -5955,25 +5978,25 @@ struct Index {
       }
       if (this.accountModeSwitchBlocked()) {
         Text('断开 VPN 后可更改配置')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
       }
       if (this.accountLoginError.length > 0) {
         Text(this.accountLoginError)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_error'))
           .width('100%')
       }
       if (this.formError.length > 0) {
         Text(this.formError)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_error'))
           .width('100%')
       }
       if (this.formHint.length > 0) {
         Text(this.formHint)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
           .maxLines(2)
@@ -5981,7 +6004,8 @@ struct Index {
       Button(this.authMode === ACCOUNT_MODE_ACCOUNT
         ? (this.accountLoginBusy ? '正在登录…' : '登录并连接')
         : '保存并连接')
-        .fontSize(TYPE_BODY_VP)
+        .fontSize(TYPE_BODY_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
         .height(42)
         .width('100%')
         .backgroundColor($r('app.color.nb_primary'))
@@ -5998,7 +6022,8 @@ struct Index {
         })
       if (this.configured) {
         Button('取消')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(36)
           .width('100%')
           .backgroundColor($r('app.color.nb_card_background'))
@@ -6022,36 +6047,37 @@ struct Index {
   serverConfigCard() {
     Column({ space: 10 }) {
       Text('当前配置')
-        .fontSize(TYPE_SECTION_TITLE_VP)
+        .fontSize(TYPE_SECTION_TITLE_FP)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.nb_text_primary'))
         .width('100%')
       Text('服务器地址')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
       Text(this.configuredUrl)
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
         .maxLines(3)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       Text('登录方式')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
       Text(this.authMode === ACCOUNT_MODE_ACCOUNT ? '账户登录' : 'Setup Key')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       if (this.authMode === ACCOUNT_MODE_ACCOUNT) {
         Text('账户凭据过期时，可重新登录。')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_tertiary'))
           .width('100%')
       }
       Button('更改配置')
-        .fontSize(TYPE_BODY_VP)
+        .fontSize(TYPE_BODY_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
         .height(40)
         // 0.0.38 (I3) D: a normal-width button, not a card-wide bar. 更改配置 is a
         // secondary edit entry; stretched across the card it read as the page's
@@ -6065,7 +6091,7 @@ struct Index {
         .onClick(() => this.beginConfigurationEdit())
       if (this.accountModeSwitchBlocked()) {
         Text('断开 VPN 后可更改配置')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
       }
@@ -6098,7 +6124,7 @@ struct Index {
   @Builder
   logoutAction() {
     Text(this.logoutRemoteActive() ? '注销并从管理端移除本设备' : '清除本机配置')
-      .fontSize(TYPE_CAPTION_VP)
+      .fontSize(TYPE_CAPTION_FP)
       .fontColor($r('app.color.nb_status_error'))
       .width('100%')
       .padding({ left: 8, right: 8, top: 8, bottom: 8 })
@@ -6124,7 +6150,7 @@ struct Index {
   diagnosticsLogCard() {
     Column({ space: 10 }) {
       Text('日志只写在本机应用目录，不会自动上传。')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       // 0.0.38 (I3) D: the two long grey paragraphs that used to be the first
@@ -6144,12 +6170,12 @@ struct Index {
       if (this.diagnosticsNoteOpen) {
         Text('滚动保留：界面日志 4 段 × 512 KiB ≈ 2 MiB，VPN/原生日志 4 段 × 2 MiB ≈ 8 MiB，' +
           '合计约 10 MiB；写满后最旧的段被覆盖，另外每 60 秒记录一次本进程内存采样。')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_secondary'))
           .width('100%')
         Text('导出只做复制（不改动本机日志）：导出期间日志仍在写，每个文件最多取 2 MiB、总量最多 12 MiB，' +
           '超出部分在文件里标记为截断；系统强制结束进程时，还没落盘的日志尾部可能丢失。')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_secondary'))
           .width('100%')
       }
@@ -6158,7 +6184,8 @@ struct Index {
       // same condition — nb_on_primary is a dark ink in dark mode and would read as
       // "disabled" on the neutral fill, the defect the 返回 control had.
       Button(this.logExportBusy ? '正在导出…' : '导出日志')
-        .fontSize(TYPE_BODY_VP)
+        .fontSize(TYPE_BODY_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
         .height(38)
         .width('100%')
         .backgroundColor(this.logExportBusy
@@ -6173,20 +6200,20 @@ struct Index {
         })
       if (this.logExportHeadline.length > 0) {
         Text(this.logExportHeadline)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.logExportToneColor())
           .width('100%')
       }
       if (this.logExportBody.length > 0) {
         Text(this.logExportBody)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_secondary'))
           .width('100%')
       }
       if (this.logExportUri.length > 0) {
         Text(`目标文档：${this.logExportUri}`)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
       }
@@ -6214,7 +6241,8 @@ struct Index {
     Column({ space: 4 }) {
       Row({ space: 12 }) {
         Button('返回')
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(36)
           .backgroundColor($r('app.color.nb_neutral_button_background'))
           .fontColor($r('app.color.nb_on_neutral_button'))
@@ -6222,7 +6250,7 @@ struct Index {
             this.closeVisibleSubflow();
           })
         Text('详细状态')
-          .fontSize(TYPE_PAGE_TITLE_VP)
+          .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_text_primary'))
       }
@@ -6232,12 +6260,12 @@ struct Index {
       if (this.published === null) {
         Column({ space: 4 }) {
           Text('当前没有可用的状态文档（VPN 未运行，或状态已过期）。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_status_warning'))
             .width('100%')
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .maxLines(3)
@@ -6369,7 +6397,7 @@ struct Index {
           // counts ENCAPSULATED wire bytes, so the two must not be read as one.
           Text('对端发送/接收为明文 IP 载荷字节（自该对端隧道建立以来累计）；' +
             '「流量统计」的发送计加密后的传输字节，口径不同。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .padding({ top: 8 })
@@ -6379,17 +6407,17 @@ struct Index {
           Text('ICE 明细只描述候选路径与端点应用情况（断开后仍可能保留上次选中的地址）；' +
             '各对端实际承载以其「状态 / 连接方式 / 承载 / 中继通道地址」为准，' +
             'ICE 已连接不代表当前流量直连。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .padding({ top: 8 })
           Row({ space: 8 }) {
             Text('点按「对端」标签页可查看并搜索单个对端')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_muted'))
               .layoutWeight(1)
             Text('前往 ›')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_primary'))
           }
           .width('100%')
@@ -6418,7 +6446,7 @@ struct Index {
     Scroll() {
       Column({ space: 0 }) {
         Text('设置')
-          .fontSize(TYPE_PAGE_TITLE_VP)
+          .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.nb_text_primary'))
           .width('100%')
@@ -6471,11 +6499,11 @@ struct Index {
           this.sectionTitle('详细状态')
           Row({ space: 8 }) {
             Text('详细状态')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
               .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
             Text('›')
-              .fontSize(18)
+              .fontSize(TYPE_CHEVRON_FP)
               .fontColor($r('app.color.nb_text_muted'))
           }
           .width('100%')
@@ -6493,16 +6521,16 @@ struct Index {
           this.sectionTitle('路由选择')
           Row({ space: 8 }) {
             Text('路由选择')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
               .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
             Text(this.routeSummaryText())
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_muted'))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text('›')
-              .fontSize(18)
+              .fontSize(TYPE_CHEVRON_FP)
               .fontColor($r('app.color.nb_text_muted'))
           }
           .width('100%')
@@ -6525,11 +6553,11 @@ struct Index {
           this.sectionTitle('应用')
           Row({ space: 8 }) {
             Text('退出应用（断开 VPN）')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
               .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
             Text('›')
-              .fontSize(18)
+              .fontSize(TYPE_CHEVRON_FP)
               .fontColor($r('app.color.nb_text_muted'))
           }
           .width('100%')
@@ -6544,7 +6572,7 @@ struct Index {
             this.beginExplicitQuit(QUIT_REASON_SETTINGS);
           })
           Text('关闭窗口只是隐藏到后台，连接保持；「退出应用」和状态栏图标菜单里的「退出」都会先断开 VPN 并停止后台保活，再结束应用。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .margin({ top: 6 })
@@ -6583,17 +6611,17 @@ struct Index {
     Row({ space: 12 }) {
       Column({ space: 2 }) {
         Text(routeNetName(entry.net_id))
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
           .fontColor($r('app.color.nb_text_primary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(routePrefixesText(entry.networks))
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_secondary'))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(routeCandidateText(entry.candidate_count))
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
       }
       .layoutWeight(1)
@@ -6621,7 +6649,8 @@ struct Index {
     Column({ space: 10 }) {
       Row({ space: 12 }) {
         Button('返回')
-          .fontSize(TYPE_BODY_VP)
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(36)
           .backgroundColor($r('app.color.nb_neutral_button_background'))
           .fontColor($r('app.color.nb_on_neutral_button'))
@@ -6629,7 +6658,7 @@ struct Index {
             this.closeVisibleSubflow();
           })
         Text('路由选择')
-          .fontSize(TYPE_PAGE_TITLE_VP)
+          .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_text_primary'))
       }
@@ -6639,25 +6668,26 @@ struct Index {
       Text('按网络（NetID）选择要走隧道的 IPv4 路由；同一网络的高可用候选始终一起开关。' +
         '改动立即保存并通知当前连接，离线时下次连接生效；切换瞬间可能短暂中断数据。' +
         '当前版本不处理 DNS / IPv6，也不自动调整出口节点。')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       Text(`管理服务器：${this.configuredUrl}`)
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       if (this.routeCatalogNote().length > 0) {
         Text(this.routeCatalogNote())
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
       }
 
       Row({ space: 12 }) {
         Button('全部启用')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(38)
           .layoutWeight(1)
           .backgroundColor($r('app.color.nb_card_background'))
@@ -6666,7 +6696,8 @@ struct Index {
           .enabled(!this.routeLoadError)
           .onClick(() => this.routeEnableAll())
         Button('全部停用')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(38)
           .layoutWeight(1)
           .backgroundColor($r('app.color.nb_card_background'))
@@ -6677,26 +6708,26 @@ struct Index {
       }
       .width('100%')
       Text('全部停用也适用于以后新增的路由')
-        .fontSize(TYPE_CAPTION_VP)
+        .fontSize(TYPE_CAPTION_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
 
       if (this.routeLoadError) {
         Text(this.routeLoadErrorText)
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_error'))
           .width('100%')
       }
 
       if (this.routeCatalog === null) {
         Text(this.routeEmptyText())
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
           .margin({ top: 20 })
       } else if (this.routeRows().length === 0) {
         Text(this.routeNoRowsText())
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
           .margin({ top: 20 })
@@ -6736,7 +6767,7 @@ struct Index {
       // 「保存」/「放弃更改」按钮，也没有任何停止/启动动作。
       if (this.routeStatusText().length > 0) {
         Text(this.routeStatusText())
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor(this.routeStatusColor())
           .width('100%')
       }
@@ -7332,11 +7363,16 @@ struct Index {
    * still holds 连接中… / 正在断开… at the label size below.
    */
   private connectButtonSize(): number {
-    return this.wideLayout() ? 104 : 132;
+    // 0.0.46 (I11): the two shells' geometry lives in NetBirdHarmonyLayout with the
+    // label-ceiling arithmetic that reads it (connectLabelFitsDiscVp), so the disc's
+    // size and its label cap cannot drift apart.
+    return this.wideLayout() ? CONNECT_DISC_WIDE_SIZE_VP : CONNECT_DISC_NARROW_SIZE_VP;
   }
 
   private connectButtonFontSize(): number {
-    return this.wideLayout() ? 18 : 22;
+    // 0.0.46 (I11): fp, and its own cap — TYPE_SCALE_MAX_DISC (the disc's label is
+    // part of a fixed circular control; see the scale note in the layout module).
+    return this.wideLayout() ? CONNECT_DISC_WIDE_FONT_FP : CONNECT_DISC_NARROW_FONT_FP;
   }
 
   /**
@@ -7659,7 +7695,8 @@ struct Index {
           .backgroundColor(this.wideDestination() === PANE_DEST_PEERS
             ? $r('app.color.nb_primary') : Color.Transparent)
         Text('对端')
-          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontSize(TYPE_SECTION_TITLE_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .fontWeight(this.wideDestination() === PANE_DEST_PEERS
             ? FontWeight.Medium : FontWeight.Normal)
           .fontColor(this.wideDestination() === PANE_DEST_PEERS
@@ -7707,7 +7744,8 @@ struct Index {
           .backgroundColor(this.wideDestination() === PANE_DEST_SETTINGS
             ? $r('app.color.nb_primary') : Color.Transparent)
         Text('设置')
-          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontSize(TYPE_SECTION_TITLE_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
           .fontWeight(this.wideDestination() === PANE_DEST_SETTINGS
             ? FontWeight.Medium : FontWeight.Normal)
           .fontColor(this.wideDestination() === PANE_DEST_SETTINGS
@@ -7898,7 +7936,7 @@ struct Index {
   // floating in the middle of the large empty area — "更像孤立通知 … 缺少页面归属"
   // — so it is now a real 对端 WORKSPACE, composed exactly like the connected one:
   //
-  //   * the SAME header block the peer list opens with (对端 at TYPE_PAGE_TITLE_VP /
+  //   * the SAME header block the peer list opens with (对端 at TYPE_PAGE_TITLE_FP /
   //     Bold, then a 14 vp secondary caption line, the same 8 vp top margin, the same
   //     16 vp page padding). A header that moves when the tunnel comes up is what
   //     made the empty state read as a different page; this one does not move.
@@ -7920,12 +7958,12 @@ struct Index {
         // starts in the same place whether the tunnel is up or down.
         Column({ space: 2 }) {
           Text('对端')
-            .fontSize(TYPE_PAGE_TITLE_VP)
+            .fontSize(TYPE_PAGE_TITLE_FP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
           Text('连接后可在此搜索对端并查看详情。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_secondary'))
             .width('100%')
             .maxLines(1)
@@ -7940,7 +7978,7 @@ struct Index {
             Circle({ width: 12, height: 12 })
               .fill(this.stateColor())
             Text(this.configured ? this.stateText() : '尚未配置服务器')
-              .fontSize(TYPE_PAGE_TITLE_VP)
+              .fontSize(TYPE_PAGE_TITLE_FP)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.stateColor())
               .layoutWeight(1)
@@ -7953,20 +7991,21 @@ struct Index {
           // 需要登录, the headline).
           if (this.lastErrorLine().length > 0 && this.lastErrorLine() !== this.stateText()) {
             Text(this.lastErrorLine())
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .maxLines(3)
           }
           if (this.wideGuideKind() === GUIDE_LOGIN) {
             Text('账户会话已过期或本设备未在管理端注册。重新登录后即可连接；连接成功后这里会显示对端列表。')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_secondary'))
               .width('100%')
-              .lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)
+              .lineHeight(GUIDE_BODY_LINE_HEIGHT_FP)
               .maxLines(3)
             Button(this.accountLoginBusy ? '正在登录…' : '账户登录')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
+              .maxFontScale(TYPE_SCALE_MAX_ROW)
               .height(44)
               .width('100%')
               .backgroundColor($r('app.color.nb_primary'))
@@ -7981,15 +8020,16 @@ struct Index {
             Text(this.configured
               ? '连接开关位于左栏，点按圆形按钮即可连接。连接成功后这里会显示对端列表。'
               : '请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_secondary'))
               .width('100%')
-              .lineHeight(GUIDE_BODY_LINE_HEIGHT_VP)
+              .lineHeight(GUIDE_BODY_LINE_HEIGHT_FP)
               .maxLines(3)
           }
           if (!this.configured || this.wideGuideKind() === GUIDE_LOGIN) {
             Button('去设置')
-              .fontSize(TYPE_SECTION_TITLE_VP)
+              .fontSize(TYPE_SECTION_TITLE_FP)
+              .maxFontScale(TYPE_SCALE_MAX_ROW)
               .height(44)
               .width('100%')
               // The app's existing SECONDARY action role (the same pair 对端详情's
@@ -8055,7 +8095,7 @@ struct Index {
     Scroll() {
       Column({ space: 12 }) {
         Text('连接概览')
-          .fontSize(TYPE_PAGE_TITLE_VP)
+          .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.nb_text_primary'))
           .width('100%')
@@ -8063,7 +8103,7 @@ struct Index {
         // ---- the hero: the own overlay address, then the fqdn ----
         if (this.overviewHas(OV_HERO_ADDRESS)) {
           Text(this.homeAddressText())
-            .fontSize(TYPE_PAGE_TITLE_VP)
+            .fontSize(TYPE_PAGE_TITLE_FP)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
@@ -8072,7 +8112,7 @@ struct Index {
         }
         if (this.overviewHas(OV_HERO_FQDN)) {
           Text(this.homeFqdnText())
-            .fontSize(TYPE_BODY_VP)
+            .fontSize(TYPE_BODY_FP)
             .fontColor($r('app.color.nb_text_secondary'))
             .width('100%')
             .maxLines(1)
@@ -8087,12 +8127,14 @@ struct Index {
           Row({ space: 8 }) {
             Column({ space: 4 }) {
               Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length}`)
-                .fontSize(TYPE_STAT_VALUE_VP)
+                .fontSize(TYPE_STAT_VALUE_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.nb_text_primary'))
                 .maxLines(1)
               Text('已连接')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_muted'))
                 .maxLines(1)
             }
@@ -8104,12 +8146,14 @@ struct Index {
             .backgroundColor($r('app.color.nb_card_background'))
             Column({ space: 4 }) {
               Text(`${this.overviewDirectCount()}`)
-                .fontSize(TYPE_STAT_VALUE_VP)
+                .fontSize(TYPE_STAT_VALUE_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.nb_text_primary'))
                 .maxLines(1)
               Text('直连')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_muted'))
                 .maxLines(1)
             }
@@ -8121,12 +8165,14 @@ struct Index {
             .backgroundColor($r('app.color.nb_card_background'))
             Column({ space: 4 }) {
               Text(`${this.overviewRelayCount()}`)
-                .fontSize(TYPE_STAT_VALUE_VP)
+                .fontSize(TYPE_STAT_VALUE_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontWeight(FontWeight.Medium)
                 .fontColor($r('app.color.nb_text_primary'))
                 .maxLines(1)
               Text('中继')
-                .fontSize(TYPE_CAPTION_VP)
+                .fontSize(TYPE_CAPTION_FP)
+                .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_muted'))
                 .maxLines(1)
             }
@@ -8143,11 +8189,11 @@ struct Index {
         if (this.overviewHas(OV_ROW_RELAY_IN_USE)) {
           Column({ space: 2 }) {
             Text('中继')
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_muted'))
               .width('100%')
             Text(this.relayUrlText())
-              .fontSize(TYPE_BODY_VP)
+              .fontSize(TYPE_BODY_FP)
               .fontColor($r('app.color.nb_text_secondary'))
               .width('100%')
               .maxLines(2)
@@ -8160,7 +8206,7 @@ struct Index {
         if (this.overviewHas(OV_ROW_OFFLINE)) {
           Column({ space: 6 }) {
             Text(`离线对端（${this.overviewOfflineCount()}）`)
-              .fontSize(TYPE_CAPTION_VP)
+              .fontSize(TYPE_CAPTION_FP)
               .fontColor($r('app.color.nb_text_muted'))
               .width('100%')
             // The key is peerRowKey, which carries every field these rows render —
@@ -8170,13 +8216,13 @@ struct Index {
             ForEach(this.overviewOfflinePeers(), (peer: UiPeerEntry) => {
               Row({ space: 8 }) {
                 Text(peer.name)
-                  .fontSize(TYPE_BODY_VP)
+                  .fontSize(TYPE_BODY_FP)
                   .fontColor($r('app.color.nb_text_secondary'))
                   .layoutWeight(1)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(lastHandshakeText(peer.last_handshake_s))
-                  .fontSize(TYPE_CAPTION_VP)
+                  .fontSize(TYPE_CAPTION_FP)
                   .fontColor($r('app.color.nb_text_muted'))
                   .maxLines(1)
               }
@@ -8190,7 +8236,7 @@ struct Index {
         // ---- the recorded last error, only when one exists ----
         if (this.overviewHas(OV_ROW_ERROR)) {
           Text(this.lastErrorLine())
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_status_error'))
             .width('100%')
             .maxLines(3)
@@ -8198,7 +8244,7 @@ struct Index {
         // ---- nothing to show yet (an explicit 对端 choice with the tunnel down) ----
         if (this.overviewHas(OV_ROW_NONE)) {
           Text('连接后可在此查看本机 IP、对端与中继数据。')
-            .fontSize(TYPE_CAPTION_VP)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .maxLines(2)
@@ -8228,10 +8274,10 @@ struct Index {
     Row({ space: 12 }) {
       Column({ space: 2 }) {
         Text('后台保活（实验）')
-          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontSize(TYPE_SECTION_TITLE_FP)
           .fontColor($r('app.color.nb_text_primary'))
         Text('通过系统长时任务保持 VPN 在后台运行，通知栏会常驻流量通知')
-          .fontSize(TYPE_CAPTION_VP)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_text_muted'))
       }
       .layoutWeight(1)

@@ -344,18 +344,102 @@ export function wideGuideKind(facts: WidePaneFacts): string {
 // as below the PC recommendation. One scale, used by the page, keeps the PC floor
 // and the phone floor satisfied by the same numbers instead of drifting per call
 // site.
+//
+// ---------------------------------------------------------------------------
+// 0.0.46 (I11) — THE UNIT IS fp, AND THE APP NOW FOLLOWS THE SYSTEM SCALE
+// ---------------------------------------------------------------------------
+// These six numbers are FONT sizes, so they are fp (font pixels) and NOT vp: a
+// plain number handed to `fontSize()` resolves to fp (local SDK,
+// ets/component/text.d.ts:146 — "If fontSize is of the number type, the unit fp is
+// used"), and fp is the unit that grows with the system font-size setting. They were
+// named `_VP` while this app pinned the scale at 1 (where 1 fp = 1 vp), and that is
+// why 设置 → 显示和亮度 → 字体大小 had NO effect on the app at all: a HarmonyOS
+// application does not follow the system font size unless AppScope/app.json5
+// declares `"configuration": "$profile:configuration"` and that profile sets
+// `configuration.fontSizeScale = "followSystem"` (OpenHarmony app.json5 reference,
+// `configuration` tag — initial value `nonFollowSystem`; schema:
+// sdk/default/openharmony/toolchains/modulecheck/configuration.json). The app
+// shipped neither, so every fp size rendered at 1 fp = 1 vp, i.e. fixed. 0.0.46
+// adds both and keeps the scale's RELATIVE values verbatim: only the unit — and
+// therefore the name — changes.
+//
+// WHAT BOUNDS THE FOLLOWED SCALE. The system's 档位 are 1 / 1.15 / 1.3 / 1.45 /
+// 1.75 / 2 / 3.2 (ArkUI 适老化 guide "各档位对应参数"), and three ceilings bound
+// this app:
+//
+//   * TYPE_SCALE_MAX_APP (1.75) — the app-level ceiling in
+//     AppScope/resources/base/profile/configuration.json (`fontSizeMaxScale`). The
+//     适老化 guide's own recommendation is "最大应调整至 1.75 倍，但部分组件可调整至 2
+//     倍"; text in an auto-height container takes it as-is (no attribute).
+//   * TYPE_SCALE_MAX_ROW (1.3) — the ceiling every text inside a fixed-height row,
+//     a fixed-height tile or a width-bounded row (the peer row's name/IP, the
+//     detail row's value, the rail's copied value) carries as its own
+//     `.maxFontScale(...)`. It is DERIVED, not chosen: at the narrowest split tier
+//     (840 vp) the peer row's IP line is 133 vp wide (peerRowIpWidthFor) while a
+//     dotted quad at the caption size needs 98 vp at 1x, so the largest 档位 that
+//     still renders the address on ONE line is 1.3 (98 x 1.3 = 127.4 <= 133; 1.45
+//     already needs 142 vp). The same cap keeps the 64-character mono public key
+//     inside the detail row's DETAIL_ROW_VALUE_MAX_LINES at the narrowest pane (7
+//     lines of the 8 allowed) and keeps every 36…48 vp fixed row holding its tallest
+//     line box (16 fp x 1.3 x 1.5 em = 31.2 <= 36 — see typeFitsFixedHeightVp).
+//   * TYPE_SCALE_MAX_DISC (1) — the connect disc's label. The disc is a fixed
+//     104/132 vp circle and its widest label (正在断开…: 4 CJK glyphs + the
+//     full-width ellipsis = 5 em) already spends 110 of the disc's 126 vp inner
+//     width at 22 fp on the narrow shell (90 of 98 at 18 fp on the wide one), so any
+//     scale above 1 clips it. That is also the platform's own convention for a fixed
+//     circular control: `Button.maxFontScale` (local SDK
+//     ets/component/button.d.ts:775, @since 18) states that a circular button's
+//     default maximum scale is 1. The disc therefore follows the 适老化 guide's ICON
+//     rule ("图标及图片不会随着字体的变大而变化") rather than its text rule — the
+//     label is part of the control's geometry.
+//
+// `typeLineBoxVp` / `typeFitsFixedHeightVp` below are the arithmetic the host check
+// uses to hold those claims; the page reads only the three caps.
 /** The app title inside the rail ("NetBird"). */
-export const TYPE_APP_TITLE_VP: number = 22;
+export const TYPE_APP_TITLE_FP: number = 22;
 /** A page/section headline (对端, 设置, 对端详情, the guide's state). */
-export const TYPE_PAGE_TITLE_VP: number = 20;
+export const TYPE_PAGE_TITLE_FP: number = 20;
 /** A settings group header above its cards. */
-export const TYPE_SECTION_TITLE_VP: number = 16;
+export const TYPE_SECTION_TITLE_FP: number = 16;
 /** Body text and the primary value of a label/value row. */
-export const TYPE_BODY_VP: number = 15;
+export const TYPE_BODY_FP: number = 15;
 /** Secondary/caption text: ≥ 12 vp everywhere, ≥ 14 vp on the PC (this value). */
-export const TYPE_CAPTION_VP: number = 14;
+export const TYPE_CAPTION_FP: number = 14;
 /** The 连接概览 pane's stat-tile number (the review's 24 vp Medium tile figure). */
-export const TYPE_STAT_VALUE_VP: number = 24;
+export const TYPE_STAT_VALUE_FP: number = 24;
+/**
+ * A row's disclosure mark ('›', '▾'/'▸'): 18 fp, on the same scale as the row's
+ * label. It used to be a bare `18` literal at five call sites.
+ */
+export const TYPE_CHEVRON_FP: number = 18;
+
+// ---- the three ceilings (0.0.46) -------------------------------------------
+/** The app's ceiling — AppScope/resources/base/profile/configuration.json. */
+export const TYPE_SCALE_MAX_APP: number = 1.75;
+/** The ceiling of any text in a fixed-height or width-bounded row (see above). */
+export const TYPE_SCALE_MAX_ROW: number = 1.3;
+/** The connect disc's label ceiling (1 = the platform's circular-button default). */
+export const TYPE_SCALE_MAX_DISC: number = 1;
+
+/**
+ * The line box (vp) a `sizeFp` run occupies at `scale`: 1.5 em, the rule this file
+ * already uses for the copy slot versus a caption line (`PEER_ROW_COPY_SLOT_VP <=
+ * TYPE_CAPTION_FP * 1.5`). 1 fp is 1 vp at scale 1, so this is the height a row
+ * really has to hold once the system scale is applied.
+ */
+export function typeLineBoxVp(sizeFp: number, scale: number): number {
+  return sizeFp * scale * 1.5;
+}
+
+/**
+ * Does a fixed-height container of `heightVp` still hold the `sizeFp` line box at
+ * `scale`? This is the question every `.height(36…48)` row in the page answers with
+ * `TYPE_SCALE_MAX_ROW`, and the host check sweeps it for the shortest of them.
+ */
+export function typeFitsFixedHeightVp(heightVp: number, sizeFp: number,
+  scale: number): boolean {
+  return heightVp >= typeLineBoxVp(sizeFp, scale);
+}
 
 // ---- the rail's inner width and the label/value policy ----------------------
 /**
@@ -408,6 +492,30 @@ export const RAIL_SEAM_WIDTH_VP: number = 1;
 // ("保持圆盘尺寸与文字"), so it is deliberately NOT taken.
 /** The connect disc's state ring (vp). */
 export const CONNECT_RING_WIDTH_VP: number = 3;
+
+// ---- the connect disc's own geometry and its label ceiling (0.0.46) ---------
+/** The disc's size (vp) on the wide (split) shell — the page's connectButtonSize(). */
+export const CONNECT_DISC_WIDE_SIZE_VP: number = 104;
+/** The disc's label size (fp) on the wide shell — the page's connectButtonFontSize(). */
+export const CONNECT_DISC_WIDE_FONT_FP: number = 18;
+/** The disc's size (vp) on the narrow shell (byte-identical to the pre-I2 phone). */
+export const CONNECT_DISC_NARROW_SIZE_VP: number = 132;
+/** The disc's label size (fp) on the narrow shell. */
+export const CONNECT_DISC_NARROW_FONT_FP: number = 22;
+/**
+ * The widest label the disc ever draws, in em: 正在断开… (and 连接中…) — four CJK
+ * glyphs at 1 em each plus the full-width ellipsis.
+ */
+export const CONNECT_LABEL_WIDEST_EM: number = 5;
+/**
+ * Does the disc's INNER width (the box less the ring, which ArkUI draws inside it)
+ * still hold that label at `scale`? False for both shells at 1.15 (the next system
+ * 档位), which is why TYPE_SCALE_MAX_DISC is 1 — see the scale note at the top.
+ */
+export function connectLabelFitsDiscVp(sizeVp: number, sizeFp: number,
+  scale: number): boolean {
+  return sizeFp * CONNECT_LABEL_WIDEST_EM * scale <= sizeVp - 2 * CONNECT_RING_WIDTH_VP;
+}
 
 /**
  * The width (vp) an info row's VALUE gets in the rail's card: the rail width
@@ -466,6 +574,20 @@ export function railInfoValueTextWidthFor(windowVp: number): number {
   return width > 0 ? width : 0;
 }
 
+/**
+ * 0.0.46 (I11) — DOES THE RAIL'S COPIED VALUE COLUMN STILL HOLD A DOTTED QUAD AT THE
+ * ROW CAP? The rail's rows are the identity card's NetBird IP and 域名, so the
+ * widest thing they ever render is an address; at TYPE_SCALE_MAX_ROW the address's
+ * advance grows by that factor while the column does not (the rail is a fixed 240…
+ * 320 vp), so this is the statement that keeps "the rail never ellipsises an IP"
+ * true on a large system font as well as on the standard one. The value is the body
+ * size, so it pays the body advance (0.5 em), not the caption's.
+ */
+export function railInfoValueHoldsIpAtCap(windowVp: number): boolean {
+  return railInfoValueTextWidthVp(windowVp) >=
+    DETAIL_ROW_VALUE_CHARS * (TYPE_BODY_FP / 2) * TYPE_SCALE_MAX_ROW;
+}
+
 // ---------------------------------------------------------------------------
 // 0.0.40 (I5) §1 — the rail's traffic summary: OMIT the zero, bound the value
 // ---------------------------------------------------------------------------
@@ -493,9 +615,9 @@ export function railInfoValueTextWidthFor(windowVp: number): number {
 /** The widest `formatBytes()` output ("1023.9 PB"): 9 glyphs. */
 export const RAIL_TRAFFIC_VALUE_CHARS: number = 9;
 /** One glyph of that value at the body size (0.5 em, proportional-Latin rule). */
-export const RAIL_TRAFFIC_CHAR_VP: number = TYPE_BODY_VP * 0.5;
+export const RAIL_TRAFFIC_CHAR_VP: number = TYPE_BODY_FP * 0.5;
 /** The 发/收 prefix and its space (one CJK glyph at the body size, plus 4 vp). */
-export const RAIL_TRAFFIC_PREFIX_VP: number = TYPE_BODY_VP + 4;
+export const RAIL_TRAFFIC_PREFIX_VP: number = TYPE_BODY_FP + 4;
 /** The width (vp) one stacked traffic line can need — the row's own ceiling. */
 export function railTrafficLineWidthVp(): number {
   return RAIL_TRAFFIC_PREFIX_VP + RAIL_TRAFFIC_VALUE_CHARS * RAIL_TRAFFIC_CHAR_VP;
@@ -992,6 +1114,17 @@ export function peerRowIpWidthFor(windowVp: number): number {
   return text - peerRowMetaWidthVp(windowVp) - peerRowCopyTakeVp(windowVp);
 }
 
+/**
+ * 0.0.46 (I11) — THE WIDTH THE ADDRESS NEEDS AT THE ROW CAP: a dotted quad (14
+ * characters, DETAIL_ROW_VALUE_CHARS) at the caption size, 0.5 em per character
+ * (PEER_ROW_NAME_CHAR_VP's rule), multiplied by TYPE_SCALE_MAX_ROW. 98 vp at 1x and
+ * 127.4 vp at the cap, against the 133 vp the IP line owns at the narrowest split
+ * tier (peerRowIpWidthFor(840)) — the two numbers the cap of 1.3 was derived from.
+ */
+export function peerRowIpOneLineAtCapVp(): number {
+  return DETAIL_ROW_VALUE_CHARS * (TYPE_CAPTION_FP / 2) * TYPE_SCALE_MAX_ROW;
+}
+
 // ---------------------------------------------------------------------------
 // 0.0.43 (I8) §1 — the row highlight is an INSET ROUNDED BLOCK
 // ---------------------------------------------------------------------------
@@ -1105,7 +1238,7 @@ export const GUIDE_EMPTY_MAX_WIDTH_VP: number = 480;
 /** The gap between the 对端 title block and that empty-state block (vp). */
 export const GUIDE_BLOCK_TOP_GAP_VP: number = 72;
 /** The guide body's line height (vp) — the review's §5 "行高 22 vp". */
-export const GUIDE_BODY_LINE_HEIGHT_VP: number = 22;
+export const GUIDE_BODY_LINE_HEIGHT_FP: number = 22;
 
 // §8: the review could not tell the collapsed sections' chevron from the preview
 // text's own punctuation. The preview stays (it is a useful content hint) and the
@@ -1547,17 +1680,17 @@ export const DETAIL_ROW_PANE_MIN_WIDTH_VP: number = PEER_LIST_CONTENT_MIN_COMPAC
 /** The characters the value column must fit on ONE line: the overlay IPv4 it leads with. */
 export const DETAIL_ROW_VALUE_CHARS: number = 14;
 /**
- * The width budget of one value character at TYPE_BODY_VP — 0.5 em, the same
+ * The width budget of one value character at TYPE_BODY_FP — 0.5 em, the same
  * proportional-Latin rule PEER_ROW_NAME_CHAR_VP states at 14 vp.
  */
-export const DETAIL_ROW_VALUE_CHAR_VP: number = TYPE_BODY_VP / 2;
+export const DETAIL_ROW_VALUE_CHAR_VP: number = TYPE_BODY_FP / 2;
 /** The floor the value column must clear: that IPv4 (14 × 7.5 = 105 vp) on one line. */
 export const DETAIL_ROW_VALUE_MIN_WIDTH_VP: number =
   DETAIL_ROW_VALUE_CHARS * DETAIL_ROW_VALUE_CHAR_VP;
 /** The longest value the pane renders: the 64-character public key, in mono. */
 export const DETAIL_ROW_LONGEST_VALUE_CHARS: number = 64;
-/** A monospace glyph's advance (vp) at TYPE_BODY_VP — the 0.6 em rule. */
-export const DETAIL_ROW_MONO_CHAR_VP: number = TYPE_BODY_VP * 0.6;
+/** A monospace glyph's advance (vp) at TYPE_BODY_FP — the 0.6 em rule. */
+export const DETAIL_ROW_MONO_CHAR_VP: number = TYPE_BODY_FP * 0.6;
 /** The line cap the peer detail's rows are mounted with (DetailRow's own default). */
 export const DETAIL_ROW_VALUE_MAX_LINES: number = 8;
 
@@ -1816,4 +1949,18 @@ export function detailRowValueLines(chars: number, charVp: number,
     return 0;
   }
   return Math.ceil((chars * charVp) / valueWidthVp);
+}
+
+/**
+ * 0.0.46 (I11) — THE LINES THE LONGEST VALUE WRAPS TO AT THE ROW CAP: the 64-char
+ * monospace public key in a pane's value column, with the mono advance paid at
+ * TYPE_SCALE_MAX_ROW. `<= DETAIL_ROW_VALUE_MAX_LINES` is exactly "the row's value is
+ * never ellipsised", and it is the second of the two statements the cap of 1.3 was
+ * derived from (7 lines of the 8 allowed at the narrowest 320 vp pane; 11 at 1.75).
+ */
+export function detailRowLongestValueLinesAtCap(paneWidthVp: number,
+  copyable: boolean): number {
+  return detailRowValueLines(DETAIL_ROW_LONGEST_VALUE_CHARS,
+    DETAIL_ROW_MONO_CHAR_VP * TYPE_SCALE_MAX_ROW,
+    detailRowValueWidthVp(paneWidthVp, copyable));
 }

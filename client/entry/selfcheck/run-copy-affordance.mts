@@ -375,7 +375,7 @@ try {
     // the slot is the 16 vp glyph — under the caption line box and the 64 vp row — and
     // it is present for the whole tier, so hovering cannot resize anything
     m.PEER_ROW_COPY_SLOT_VP === m.PEER_ROW_COPY_GLYPH_VP &&
-    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_VP * 1.5 &&
+    m.PEER_ROW_COPY_SLOT_VP <= m.TYPE_CAPTION_FP * 1.5 &&
     m.PEER_ROW_COPY_SLOT_VP < m.PEER_ROW_MIN_HEIGHT_VP &&
     icon.includes('.visibility(this.visible ? Visibility.Visible : Visibility.Hidden)') &&
     !icon.includes('Visibility.None') &&

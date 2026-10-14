@@ -4,6 +4,12 @@
 import { webview } from '@kit.ArkWeb';
 import { CALLBACK_KIND_CODE, CALLBACK_KIND_ERROR, PkceSession, classifyCallback,
   matchCallbackUri } from './NetBirdAccountAuthCore';
+// 0.0.46 (I11): the login chrome's two type sizes are the app's own scale, so this
+// surface follows the system font size like every other page (fp) instead of
+// carrying two bare numeric literals. All three of its containers are auto-height
+// (a padded Row and a padded Text), so they need no per-component cap — the app's
+// 1.75 ceiling in AppScope/app.json5 applies.
+import { TYPE_CAPTION_FP, TYPE_PAGE_TITLE_FP } from '../pages/NetBirdHarmonyLayout';
 
 @Component
 export struct NetBirdAccountWebView {
@@ -104,7 +110,7 @@ export struct NetBirdAccountWebView {
     Column() {
       Row() {
         Text('账户登录')
-          .fontSize(20)
+          .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_text_primary'))
           .layoutWeight(1)
@@ -124,7 +130,7 @@ export struct NetBirdAccountWebView {
             .width(20)
             .height(20)
           Text('正在加载登录页面…')
-            .fontSize(14)
+            .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_tertiary'))
             .margin({ left: 10 })
         }
@@ -135,7 +141,7 @@ export struct NetBirdAccountWebView {
 
       if (this.message.length > 0) {
         Text(this.message)
-          .fontSize(14)
+          .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_error'))
           .padding({ left: 16, right: 16, top: 8, bottom: 8 })
       }

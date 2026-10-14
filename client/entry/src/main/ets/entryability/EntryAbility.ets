@@ -203,6 +203,24 @@ export default class EntryAbility extends UIAbility {
         String((error as BusinessFailure).code ?? 'none'));
     });
     hilog.info(DOMAIN, TAG, 'ENTRY_ONCREATE|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
+    // 0.0.46 (I11) 字体大小跟随: the scale this process actually OBSERVED — one
+    // bounded line (a number, or 'undefined'), never free-form configuration text.
+    // It is what makes "the app follows 设置 → 显示和亮度 → 字体大小" checkable from a
+    // log instead of by eye: with AppScope/app.json5's `configuration` profile this
+    // reads the system's 档位 (1 / 1.15 / 1.3 / 1.45 / 1.75), and on a build without
+    // that profile it reads 1. Source: UIAbilityContext.config.fontSizeScale (local
+    // SDK ets/api/application/UIAbilityContext.d.ts:82 +
+    // @ohos.app.ability.Configuration.d.ts:160, @since 12) — the same field the ArkUI
+    // 适老化 guide reads on a cold start (`context.config?.fontSizeScale ?? 1`).
+    let startupFontScale: number | undefined = undefined;
+    try {
+      startupFontScale = this.context.config.fontSizeScale;
+    } catch (_error) {
+      // `config` is non-optional in the SDK d.ts; a ROM that answers nothing here
+      // leaves the line's value at 'undefined' rather than failing a launch.
+    }
+    hilog.info(DOMAIN, TAG, 'FONT_SCALE_OBSERVED|fontSizeScale=%{public}s|note=app-followSystem',
+      startupFontScale === undefined ? 'undefined' : String(startupFontScale));
     this.recordLifecycle('onCreate');
     // LaunchParam, SDK fields by their exact names: `lastExitReason` is the
     // LastExitReason enum identifying how the PREVIOUS run of this UI process
@@ -705,6 +723,13 @@ export default class EntryAbility extends UIAbility {
     const colorMode: ConfigurationConstant.ColorMode | undefined = newConfig.colorMode;
     hilog.info(DOMAIN, TAG, 'THEME_CONFIG_UPDATE|colorMode=%{public}s|note=system-bar-refresh',
       colorMode === undefined ? 'undefined' : String(colorMode));
+    // 0.0.46 (I11): the SAME callback carries the system font-size 档位
+    // (Configuration.fontSizeScale, @since 12), so a 字体大小 change made while the
+    // app is in the foreground is visible in the log too — one bounded number, and
+    // nothing else from the configuration record is read or stored.
+    const fontScale: number | undefined = newConfig.fontSizeScale;
+    hilog.info(DOMAIN, TAG, 'FONT_SCALE_UPDATE|fontSizeScale=%{public}s',
+      fontScale === undefined ? 'undefined' : String(fontScale));
     this.refreshSystemBarTheme();
   }
 
