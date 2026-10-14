@@ -37,6 +37,10 @@
       "value": "#4A5A66"
     },
     {
+      "name": "nb_card_border",
+      "value": "#3C4B57"
+    },
+    {
       "name": "nb_primary",
       "value": "#7FB2D9"
     },

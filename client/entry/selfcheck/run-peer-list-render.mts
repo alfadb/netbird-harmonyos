@@ -155,9 +155,20 @@ try {
     PAGE.includes('.fill(this.stateColor())') &&
     PAGE.includes('.fill(this.selectedPeerColor())') &&
     PAGE.includes('.fill(this.peerStatusResource(peer.status))'));
+  // 0.0.37 (I2) DELIBERATE UPDATE: the home card's three info rows became the
+  // STACKED RailInfoRow @Component (the I1 device defect: the fixed 96 vp label
+  // column squeezed "0/0 已连接" into 已连/接). The freshness contract this check
+  // exists to protect is UNCHANGED — each row is still constructed from a METHOD
+  // CALL on the observed document at the call site, and the '—' fallback still
+  // happens inside the child on the live value (never a frozen by-value @Builder
+  // argument, never a snapshot taken at tap time).
   check('wiring: the home card keeps its inline (fresh) document reads',
-    PAGE.includes("Text(this.homeAddressText().length > 0 ? this.homeAddressText() : '—')") &&
-    PAGE.includes('Text(this.homePeersText())'));
+    PAGE.includes("label: 'NetBird IP',") &&
+    PAGE.includes('value: this.homeAddressText()') &&
+    PAGE.includes("label: '对端',") &&
+    PAGE.includes('value: this.homePeersText()') &&
+    PAGE.includes("Text(this.value ? this.value : '—')") &&
+    PAGE.includes('struct RailInfoRow {'));
   check('wiring: the routes rows read this.routeDraft inside their own element',
     PAGE.includes('isOn: routeSelectionIsEnabled(this.routeDraft, entry.net_id) })'));
 } catch (error) {

@@ -10,8 +10,8 @@
         compatibleSdkVersion: '26.0.0',
         targetSdkVersion: '26.0.0',
         bundleType: 'app',
-        versionCode: 36,
-        versionName: '0.0.36'
+        versionCode: 37,
+        versionName: '0.0.37'
       }
     ],
     buildModeSet: [

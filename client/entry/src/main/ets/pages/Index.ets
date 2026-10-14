@@ -7,6 +7,10 @@ import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
 import common from '@ohos.app.ability.common';
 import window from '@ohos.window';
+// 0.0.37 (I2) keyboard affordance on the PC: the rail's navigation rows are
+// focusable and activate on Enter / Numpad-Enter / Space, so the first-level
+// destinations are reachable without a pointer. Public API, no permission.
+import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
   removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus, shouldReapplyPublishedStatus, statusDocumentStamp }
@@ -157,8 +161,16 @@ import { QUIT_REASON_SETTINGS, requestQuit, setQuitDisconnect }
 // selfcheck/run-harmony-layout.mts imports it byte-identical and pins every
 // boundary. This page only feeds it the window's width (vp) and renders the branch
 // it names; it never re-derives a threshold here.
-import { MIN_CONTENT_WIDTH_VP, NAV_BAR_WIDTH_VP, RAIL_WIDTH_VP, paneLayoutOf }
-  from './NetBirdHarmonyLayout';
+//
+// 0.0.37 (I2): the same module now also owns the rail's three-tier width table,
+// the pane's state-driven DEFAULT destination, the xl indent limit and the visual
+// scale (type sizes / rail paddings). The page still only asks it.
+import {
+  contentMaxWidthVp, GUIDE_LOGIN, MIN_CONTENT_WIDTH_VP, NAV_BAR_WIDTH_VP, PANE_DEST_GUIDE,
+  PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf, RAIL_CARD_PADDING_VP, RAIL_PAGE_PADDING_VP,
+  railWidthFor, TYPE_APP_TITLE_VP, TYPE_BODY_VP, TYPE_CAPTION_VP, TYPE_PAGE_TITLE_VP,
+  TYPE_SECTION_TITLE_VP, WidePaneFacts, wideGuideKind, widePaneDestination
+} from './NetBirdHarmonyLayout';
 
 // 0.0.36: the wide pane's two routes. The pane's BASE route is a real
 // NavDestination (the "no peer selected" page), because split mode shows an EMPTY
@@ -843,13 +855,13 @@ struct DetailRow {
   build() {
     Row({ space: 8 }) {
       Text(this.label)
-        .fontSize(13)
+        .fontSize(TYPE_CAPTION_VP)
         .fontColor($r('app.color.nb_text_muted'))
         .width(96)
       // Truthiness (not .length): a value that slipped through as null or
       // undefined renders '—' instead of throwing inside the render pass.
       Text(this.value ? this.value : '—')
-        .fontSize(14)
+        .fontSize(TYPE_BODY_VP)
         .fontColor($r('app.color.nb_text_primary'))
         .layoutWeight(1)
         .maxLines(this.maxLines)
@@ -875,18 +887,18 @@ struct DetailSectionHeader {
   build() {
     Row({ space: 8 }) {
       Text(this.title ? this.title : '')
-        .fontSize(15)
+        .fontSize(TYPE_SECTION_TITLE_VP)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.nb_text_secondary'))
       Text(this.summary ? this.summary : '')
-        .fontSize(12)
+        .fontSize(TYPE_CAPTION_VP)
         .fontColor($r('app.color.nb_text_muted'))
         .layoutWeight(1)
         .maxLines(1)
         .textAlign(TextAlign.End)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       Text(this.expanded ? '▾' : '▸')
-        .fontSize(14)
+        .fontSize(TYPE_CAPTION_VP)
         .fontColor($r('app.color.nb_text_muted'))
     }
     .width('100%')
@@ -894,6 +906,125 @@ struct DetailSectionHeader {
     .onClick(() => {
       this.onToggle();
     })
+  }
+}
+
+// 0.0.37 (I2) — THE RAIL'S LABEL/VALUE ROW, STACKED so a value can never be
+// broken mid-word. The I1 device screenshot showed the rail's 对端 row rendering
+// "0/0 已连接" as "0/0 已连" + "接": the old shape was
+// `Row { Text(label).width(96); Text(value).layoutWeight(1) }`, so the fixed
+// 96 vp label column was carved out of a 240-ish vp rail and the CJK value broke
+// between 已 and 连 (ArkUI's WordBreak.NORMAL breaks CJK between any two glyphs).
+// The caption now sits ABOVE the value, so the value owns the row's full width —
+// railInfoValueWidthVp() in NetBirdHarmonyLayout is exactly that width, and its
+// selfcheck pins the floor at every rail tier. A @Component with @Prop (the
+// DetailRow pattern), NOT a @Builder: by-value @Builder arguments freeze at mount
+// in ArkUI and the peer count is live state.
+@Component
+struct RailInfoRow {
+  @Prop label: string = '';
+  @Prop value: string = '';
+
+  build() {
+    Column({ space: 2 }) {
+      Text(this.label)
+        .fontSize(TYPE_CAPTION_VP)
+        .fontColor($r('app.color.nb_text_muted'))
+        .width('100%')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(this.value ? this.value : '—')
+        .fontSize(TYPE_BODY_VP)
+        .fontColor($r('app.color.nb_text_primary'))
+        .width('100%')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ top: 6, bottom: 6 })
+  }
+}
+
+// 0.0.37 (I2) — THE PANE'S EMPTY / ERROR STATE, as real content.
+// Before this, a pane with nothing to show rendered ONE bare centred muted line
+// ("VPN 未连接，对端信息在连接后可用" / "暂无对端"), which reads as a missing list
+// rather than as a state. This block is a card carrying the same verdict dot the
+// status card uses, a title, an honest one-sentence body and — when there is
+// something the user can do about it — exactly ONE action (去连接 / 清除搜索).
+// @Prop strings + the callback member (the DetailSectionHeader pattern) keep it
+// live: the page re-renders it from observed state on every publish tick.
+@Component
+struct PaneEmptyState {
+  @Prop title: string = '';
+  @Prop message: string = '';
+  // The verdict role: 'muted' (nothing wrong), 'warning' (needs the user),
+  // 'error' (a failure was recorded), 'success' (a healthy but empty result).
+  @Prop tone: string = 'muted';
+  @Prop actionLabel: string = '';
+  onAction: () => void = (): void => {
+  };
+
+  private toneColor(): ResourceColor {
+    if (this.tone === 'error') {
+      return $r('app.color.nb_status_error');
+    }
+    if (this.tone === 'warning') {
+      return $r('app.color.nb_status_warning');
+    }
+    if (this.tone === 'success') {
+      return $r('app.color.nb_status_success');
+    }
+    return $r('app.color.nb_text_secondary');
+  }
+
+  build() {
+    Column({ space: 12 }) {
+      // The verdict dot at empty-state scale: a 48 vp disc holding the same 12 vp
+      // dot the status cards use, so the block reads as STATE, not as an error.
+      Row() {
+        Circle({ width: 12, height: 12 })
+          .fill(this.toneColor())
+      }
+      .width(48)
+      .height(48)
+      .justifyContent(FlexAlign.Center)
+      .borderRadius(24)
+      .backgroundColor($r('app.color.nb_page_background'))
+      Text(this.title)
+        .fontSize(TYPE_PAGE_TITLE_VP)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.toneColor())
+        .width('100%')
+        .maxLines(2)
+        .textAlign(TextAlign.Center)
+      Text(this.message)
+        .fontSize(TYPE_CAPTION_VP)
+        .fontColor($r('app.color.nb_text_muted'))
+        .width('100%')
+        .maxLines(4)
+        .textAlign(TextAlign.Center)
+      if (this.actionLabel.length > 0) {
+        Button(this.actionLabel)
+          .fontSize(TYPE_SECTION_TITLE_VP)
+          .height(40)
+          .width('100%')
+          .backgroundColor($r('app.color.nb_primary'))
+          .fontColor($r('app.color.nb_on_primary'))
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
+          .onClick((): void => {
+            this.onAction();
+          })
+      }
+    }
+    .width('100%')
+    .constraintSize({ maxWidth: 400 })
+    .padding(24)
+    .borderRadius(16)
+    .border({ width: 1, color: $r('app.color.nb_card_border') })
+    .backgroundColor($r('app.color.nb_card_background'))
+    .alignItems(HorizontalAlign.Center)
   }
 }
 
@@ -959,6 +1090,11 @@ struct Index {
   // for layout (see NetBirdHarmonyLayout's header): a resized desktop window walks
   // through every tier.
   @State widthVp: number = 0;
+  // 0.0.37 (I2) pointer affordance: which rail navigation row the pointer is over
+  // (0 = none — the same value PANE_DEST_GUIDE carries, since the guide is what
+  // "no destination" means). @State because it paints: hoverEffect gives the
+  // framework's own highlight, and this drives the row's surface tint as well.
+  @State hoveredDestination: number = 0;
   // The wide pane's route stacks: ONE per destination (k3 correction 4 / §E R6),
   // so the mode/hideNavBar of a live Navigation is never flipped and the back
   // authority can consult only the VISIBLE destination's stack. 设置 is empty in
@@ -3966,11 +4102,11 @@ struct Index {
   @Builder
   sectionTitle(title: string) {
     Text(title)
-      .fontSize(15)
+      .fontSize(TYPE_SECTION_TITLE_VP)
       .fontWeight(FontWeight.Medium)
       .fontColor($r('app.color.nb_text_secondary'))
       .width('100%')
-      .margin({ top: 18, bottom: 6 })
+      .margin({ top: 16, bottom: 8 })
   }
 
   // 主题 (2026-10-09): the dot takes a resolved colour (Resource or literal) —
@@ -3992,22 +4128,22 @@ struct Index {
     Scroll() {
       Column({ space: 16 }) {
         Text('NetBird')
-          .fontSize(28)
+          .fontSize(TYPE_APP_TITLE_VP)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.nb_text_primary'))
-          .margin({ top: 12 })
+          .margin({ top: 8 })
         if (!this.configured) {
-          Column({ space: 10 }) {
+          Column({ space: 8 }) {
             Text('尚未配置服务器')
-              .fontSize(17)
+              .fontSize(TYPE_SECTION_TITLE_VP)
               .fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.nb_status_warning'))
             Text('请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
-              .fontSize(14)
+              .fontSize(TYPE_CAPTION_VP)
               .fontColor($r('app.color.nb_text_secondary'))
               .textAlign(TextAlign.Center)
             Button('去设置')
-              .fontSize(16)
+              .fontSize(TYPE_SECTION_TITLE_VP)
               .height(40)
               .backgroundColor($r('app.color.nb_primary'))
               .fontColor($r('app.color.nb_on_primary'))
@@ -4016,8 +4152,9 @@ struct Index {
               })
           }
           .width('100%')
-          .padding(16)
+          .padding(RAIL_CARD_PADDING_VP)
           .borderRadius(16)
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Center)
         }
@@ -4026,13 +4163,21 @@ struct Index {
         // button previously relied on the platform default font color, which
         // cannot follow the base/dark split (nb_on_primary flips to a dark ink
         // in dark mode because nb_primary flips to a light blue there).
+        // 0.0.37 (I2): the ROUND BUTTON STAYS (the design review rejected a
+        // 66×36 switch: connect is a multi-second command with a painted
+        // transition and a 2 s force-cancel window, not a binary state), but on
+        // the wide branch it is sized to the rail instead of to the phone:
+        // connectButtonSize() is 132 vp on the narrow shell (byte-identical to
+        // today) and 104 vp in the rail, still enough for 连接中… / 正在断开….
         Button(this.toggleLabel())
-          .fontSize(22)
+          .fontSize(this.connectButtonFontSize())
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.nb_on_primary'))
-          .width(132)
-          .height(132)
-          .borderRadius(66)
+          .width(this.connectButtonSize())
+          .height(this.connectButtonSize())
+          .borderRadius(this.connectButtonSize() / 2)
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
           .backgroundColor(this.toggleColor())
           .enabled(this.toggleEnabled())
           .onClick(() => {
@@ -4073,56 +4218,29 @@ struct Index {
             Circle({ width: 12, height: 12 })
               .fill(this.stateColor())
             Text(this.stateText())
-              .fontSize(20)
+              .fontSize(TYPE_PAGE_TITLE_VP)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.stateColor())
           }
           .margin({ bottom: 6 })
-          Row({ space: 8 }) {
-            Text('NetBird IP')
-              .fontSize(13)
-              .fontColor($r('app.color.nb_text_muted'))
-              .width(96)
-            Text(this.homeAddressText().length > 0 ? this.homeAddressText() : '—')
-              .fontSize(14)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-              .maxLines(3)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-          .padding({ top: 6, bottom: 6 })
-          Row({ space: 8 }) {
-            Text('域名')
-              .fontSize(13)
-              .fontColor($r('app.color.nb_text_muted'))
-              .width(96)
-            Text(this.homeFqdnText().length > 0 ? this.homeFqdnText() : '—')
-              .fontSize(14)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-              .maxLines(3)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-          .padding({ top: 6, bottom: 6 })
-          Row({ space: 8 }) {
-            Text('对端')
-              .fontSize(13)
-              .fontColor($r('app.color.nb_text_muted'))
-              .width(96)
-            Text(this.homePeersText())
-              .fontSize(14)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-              .maxLines(3)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-          .padding({ top: 6, bottom: 6 })
+          // 0.0.37 (I2): the three info rows are STACKED label-above-value
+          // (RailInfoRow) — the I1 device screenshot broke "0/0 已连接" between
+          // 已 and 连 because the label's fixed 96 vp column squeezed the value.
+          RailInfoRow({
+            label: 'NetBird IP',
+            value: this.homeAddressText()
+          })
+          RailInfoRow({
+            label: '域名',
+            value: this.homeFqdnText()
+          })
+          RailInfoRow({
+            label: '对端',
+            value: this.homePeersText()
+          })
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
-              .fontSize(13)
+              .fontSize(TYPE_CAPTION_VP)
               .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .margin({ top: 6 })
@@ -4131,19 +4249,26 @@ struct Index {
           // 2026-10-07: discoverable entry to the detailed status screen
           // (netbird status -d equivalent) straight from the main card — the
           // one-line rows above stay concise, the detail is one tap away.
-          Row({ space: 8 }) {
+          // 0.0.37 (I2): the trailing summary is a SECOND LINE rather than a
+          // squeezed inline column, so it reads instead of truncating at 路… in
+          // a 240 vp rail (the I1 screenshot), and the row is a 48 vp target.
+          Column({ space: 2 }) {
             Text('详细状态')
-              .fontSize(14)
+              .fontSize(TYPE_BODY_VP)
               .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
+              .width('100%')
             Text('端点 / 中继 / 流量 / DNS / 路由 / 会话 ›')
-              .fontSize(12)
+              .fontSize(TYPE_CAPTION_VP)
               .fontColor($r('app.color.nb_text_muted'))
+              .width('100%')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
           .width('100%')
-          .padding({ top: 10, bottom: 2 })
+          .alignItems(HorizontalAlign.Start)
+          .padding({ top: 10, bottom: 10 })
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
           .onClick(() => {
             hilog.info(DOMAIN, TAG, 'UI_DETAIL_STATUS_OPENED|from=home');
             this.detailStatusOriginTab = 0;
@@ -4161,14 +4286,14 @@ struct Index {
             Row({ space: 8 }) {
               Column({ space: 2 }) {
                 Text(this.sessionRowText())
-                  .fontSize(15)
+                  .fontSize(TYPE_SECTION_TITLE_VP)
                   .fontWeight(FontWeight.Medium)
                   .fontColor($r('app.color.nb_text_primary'))
                   .width('100%')
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                 Text(this.sessionRowHint())
-                  .fontSize(13)
+                  .fontSize(TYPE_CAPTION_VP)
                   .fontColor($r('app.color.nb_text_muted'))
                   .width('100%')
                   .maxLines(2)
@@ -4180,8 +4305,10 @@ struct Index {
                 .fontColor($r('app.color.nb_text_muted'))
             }
             .width('100%')
-            .padding({ top: 10, bottom: 2 })
+            .padding({ top: 10, bottom: 10 })
             .enabled(!this.sessionExtendBusy && !this.accountLoginBusy)
+            .hoverEffect(HoverEffect.Highlight)
+            .focusable(true)
             .onClick((): void => {
               hilog.info(DOMAIN, TAG, 'UI_SESSION_ROW_CLICKED|bundle=%{public}s', BUNDLE_NAME);
               this.beginSessionExtend();
@@ -4189,13 +4316,17 @@ struct Index {
           }
         }
         .width('100%')
-        .padding(16)
+        .padding(RAIL_CARD_PADDING_VP)
         .borderRadius(16)
+        // 0.0.37 (I2): a 1 vp role stroke. The I1 dark-mode screenshot showed the
+        // cards nearly vanishing into the page (#1B242C on #10171D); the stroke
+        // is what makes a card a card without inventing a second surface colour.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
-      .padding(20)
+      .padding(RAIL_PAGE_PADDING_VP)
     }
     .width('100%')
     .height('100%')
@@ -4211,12 +4342,12 @@ struct Index {
     Row({ space: 12 }) {
       Column({ space: 2 }) {
         Text(peer.name)
-          .fontSize(16)
+          .fontSize(TYPE_SECTION_TITLE_VP)
           .fontColor($r('app.color.nb_text_primary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(peer.ip.length > 0 ? peer.ip : '无 IP')
-          .fontSize(13)
+          .fontSize(TYPE_CAPTION_VP)
           .fontColor($r('app.color.nb_text_muted'))
       }
       .layoutWeight(1)
@@ -4226,7 +4357,7 @@ struct Index {
           // 主题 (2026-10-09): the 直连/中继 chip takes its status role from
           // the base/dark resources — same role for the ink and the tint.
           Text(connectionLabel(peer.connection))
-            .fontSize(12)
+            .fontSize(TYPE_CAPTION_VP)
             .fontColor(peer.connection === 'direct'
               ? $r('app.color.nb_status_success')
               : $r('app.color.nb_status_warning'))
@@ -4239,7 +4370,7 @@ struct Index {
         // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机
         // 暂无 WG 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。
         Text(peerStatusText(peer.status))
-          .fontSize(12)
+          .fontSize(TYPE_CAPTION_VP)
           .fontColor(this.peerStatusResource(peer.status))
         Circle({ width: 10, height: 10 })
           .fill(this.peerStatusResource(peer.status))
@@ -4247,16 +4378,40 @@ struct Index {
       .alignItems(VerticalAlign.Center)
     }
     .width('100%')
-    .padding({ top: 12, bottom: 12 })
+    // 0.0.37 (I2): 12+12 vp measured ≈44 vp; the UX standard wants ≥40 vp (必须)
+    // and ≥48 vp (推荐) for a touch/pointer target, so the row padding is 14+14
+    // (≈48 vp). Unconditional on both branches: it is a target-size fix, not a
+    // layout change (K3-REVIEW-HARMONY §2.4).
+    .padding({ top: 14, bottom: 14 })
+    // 0.0.37 (I2): pointer affordances on the PC. hoverEffect.Highlight is the
+    // framework's own hover tint (no per-row @State, so the ForEach key/reuse
+    // contract of 0.0.35 is untouched); focusable makes the row reachable in the
+    // keyboard tab order. No custom cursor: `mouseStyle` is not in the public API.
+    .hoverEffect(HoverEffect.Highlight)
+    .focusable(true)
     .onClick(() => {
       this.selectedPeer = peer;
       // 0.0.36 wide branch: the detail is a NavDestination in the pane's content
       // area, so the list keeps its node and its scroll position. On the narrow
       // branch this is a no-op and today's page swap (the selectedPeer branch of
       // peersTab) is byte-for-byte what it was. The row itself renders exactly the
-      // same fields as before — no column was added.
-      if (paneLayoutOf(this.widthVp) === 'split' && this.activeTab === 1) {
+      // same fields as before — no column was added (so peerRowKey is unchanged).
+      //
+      // 0.0.37 (I2): the gate is the RESOLVED destination, not `activeTab === 1`:
+      // with no explicit choice the pane shows the peer list whenever the tunnel
+      // is up, and a row tapped there must still open the in-pane detail.
+      if (this.peerPaneVisible()) {
         this.openPeerDetailRoute();
+      }
+    })
+    // 0.0.37 (I2): the same activation the rail's rows have — a focused peer row
+    // opens on Enter / Space, so the PC pane is usable from the keyboard.
+    .onKeyEvent((event: KeyEvent): void => {
+      if (this.isActivationKey(event)) {
+        this.selectedPeer = peer;
+        if (this.peerPaneVisible()) {
+          this.openPeerDetailRoute();
+        }
       }
     })
   }
@@ -4280,15 +4435,16 @@ struct Index {
       Column({ space: 8 }) {
         Row({ space: 12 }) {
           Button('返回')
-            .fontSize(15)
-            .height(36)
+            .fontSize(TYPE_BODY_VP)
+            .height(40)
             .backgroundColor($r('app.color.nb_neutral_button_background'))
             .fontColor($r('app.color.nb_on_primary'))
+            .hoverEffect(HoverEffect.Highlight)
             .onClick(() => {
               this.closeVisibleSubflow();
             })
           Text('对端详情')
-            .fontSize(20)
+            .fontSize(TYPE_PAGE_TITLE_VP)
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.nb_text_primary'))
         }
@@ -4325,17 +4481,22 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Start)
         }
         .width('100%')
         .layoutWeight(1)
         .align(Alignment.Top)
-        .scrollBar(BarState.Off)
+        // 0.0.37 (I2): a mouse needs the position cue; a finger does not.
+        .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
       }
       .width('100%')
       .height('100%')
-      .padding(20)
+      .padding(RAIL_PAGE_PADDING_VP)
       .backgroundColor($r('app.color.nb_page_background'))
   }
 
@@ -4347,37 +4508,75 @@ struct Index {
   // on both branches, which is what keeps run-peer-list-render.mts green unedited.
   @Builder
   peerListBody() {
-      Column({ space: 12 }) {
-        Row({ space: 10 }) {
+      Column({ space: 16 }) {
+        // 0.0.37 (I2): the header is STACKED (title above the count) instead of
+        // `Row { title.layoutWeight(1); count }`. In the I1 rail the count's
+        // share of the row was what squeezed "0/0 已连接" into 已连/接; here the
+        // count owns the full pane width and is capped to one line, so it can
+        // never break a word.
+        Column({ space: 2 }) {
           Text('对端')
-            .fontSize(24)
+            .fontSize(TYPE_PAGE_TITLE_VP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
-            .layoutWeight(1)
+            .width('100%')
           Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
-            .fontSize(14)
+            .fontSize(TYPE_CAPTION_VP)
             .fontColor($r('app.color.nb_text_secondary'))
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         .width('100%')
+        .alignItems(HorizontalAlign.Start)
         .margin({ top: 8 })
         TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
-          .fontSize(15)
+          .fontSize(TYPE_BODY_VP)
           .height(42)
           .width('100%')
-          .backgroundColor($r('app.color.nb_card_background'))
+          .backgroundColor($r('app.color.nb_input_background'))
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .onChange((value: string): void => {
             this.peerQuery = value;
           })
         if (this.published === null) {
-          Text('VPN 未连接，对端信息在连接后可用')
-            .fontSize(14)
-            .fontColor($r('app.color.nb_text_muted'))
-            .margin({ top: 32 })
+          // A real empty block, not a bare centred line (the I1 shape): the
+          // state, what it means, and the ONE relevant action. The connect
+          // control itself stays where it is — in the rail on the wide branch,
+          // on the 主页 tab on the phone — and 去连接 navigates to it.
+          Column() {
+            PaneEmptyState({
+              title: 'VPN 未连接',
+              message: '连接成功后可在此查看对端列表。连接开关在左栏；手机在「主页」。',
+              tone: 'warning',
+              actionLabel: '去连接',
+              onAction: (): void => {
+                this.activeTab = 0;
+              }
+            })
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
         } else if (this.visiblePeers().length === 0) {
-          Text(this.peerQuery.length > 0 ? '没有匹配的对端' : '暂无对端')
-            .fontSize(14)
-            .fontColor($r('app.color.nb_text_muted'))
-            .margin({ top: 32 })
+          Column() {
+            PaneEmptyState({
+              title: this.peerQuery.length > 0 ? '没有匹配的对端' : '暂无对端',
+              message: this.peerQuery.length > 0
+                ? `没有名称或 IP 匹配「${this.peerQuery}」。`
+                : '管理端尚未下发任何对端。',
+              tone: 'muted',
+              actionLabel: this.peerQuery.length > 0 ? '清除搜索' : '',
+              onAction: (): void => {
+                this.peerQuery = '';
+              }
+            })
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
         } else {
           List({ space: 0 }) {
             // 0.0.35 对端列表重绘 (device report 2026-10-14): the key carries what
@@ -4396,15 +4595,18 @@ struct Index {
           }
           .width('100%')
           .layoutWeight(1)
-          .backgroundColor($r('app.color.nb_card_background'))
           .borderRadius(16)
-          .padding({ left: 16, right: 16 })
-          .scrollBar(BarState.Off)
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
+          .backgroundColor($r('app.color.nb_card_background'))
+          .padding({ left: RAIL_CARD_PADDING_VP, right: RAIL_CARD_PADDING_VP })
+          // A mouse needs a scroll position cue; a finger does not, so the wide
+          // branch shows the bar and the phone keeps today's BarState.Off.
+          .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
         }
       }
       .width('100%')
       .height('100%')
-      .padding(20)
+      .padding(RAIL_PAGE_PADDING_VP)
       .backgroundColor($r('app.color.nb_page_background'))
   }
 
@@ -4537,7 +4739,10 @@ struct Index {
     }
     .width('100%')
     .padding(16)
-    .borderRadius(8)
+    // 0.0.37 (I2): radius 8 → 16 and the shared role stroke: one card look for
+    // every card on every page (these two were the only 8 vp-radius outliers).
+    .borderRadius(16)
+    .border({ width: 1, color: $r('app.color.nb_card_border') })
     .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
@@ -4591,7 +4796,10 @@ struct Index {
     }
     .width('100%')
     .padding(16)
-    .borderRadius(8)
+    // 0.0.37 (I2): radius 8 → 16 and the shared role stroke: one card look for
+    // every card on every page (these two were the only 8 vp-radius outliers).
+    .borderRadius(16)
+    .border({ width: 1, color: $r('app.color.nb_card_border') })
     .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
@@ -4674,6 +4882,9 @@ struct Index {
     .width('100%')
     .padding(16)
     .borderRadius(16)
+    // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+    // status card), so a card stays a card in dark mode.
+    .border({ width: 1, color: $r('app.color.nb_card_border') })
     .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
@@ -4745,6 +4956,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
       }
 
@@ -4766,6 +4980,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
       }
 
@@ -4787,6 +5004,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
       }
 
@@ -4808,6 +5028,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
       }
 
@@ -4867,6 +5090,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
       }
     }
@@ -4880,7 +5106,7 @@ struct Index {
     Scroll() {
       Column({ space: 0 }) {
         Text('设置')
-          .fontSize(24)
+          .fontSize(TYPE_PAGE_TITLE_VP)
           .fontWeight(FontWeight.Bold)
           .fontColor($r('app.color.nb_text_primary'))
           .width('100%')
@@ -4910,6 +5136,10 @@ struct Index {
           .width('100%')
           .padding({ left: 16, right: 16, top: 10, bottom: 10 })
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Start)
           this.sectionTitle('诊断日志')
@@ -4927,6 +5157,10 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .onClick(() => {
             this.detailStatusOriginTab = 2;
@@ -4950,6 +5184,10 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .onClick(() => {
             this.openRouteSelection();
@@ -4973,6 +5211,10 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .onClick(() => {
             this.beginExplicitQuit(QUIT_REASON_SETTINGS);
@@ -4985,13 +5227,13 @@ struct Index {
         }
       }
       .width('100%')
-      .padding(20)
+      .padding(RAIL_PAGE_PADDING_VP)
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.nb_page_background'))
     .align(Alignment.Top)
-    .scrollBar(BarState.Off)
+    .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
   }
 
   // ---- 路由选择 (设置 → 路由选择, internal page) ------------------------------
@@ -5136,6 +5378,9 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 4 })
         .borderRadius(16)
+        // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+        // status card), so a card stays a card in dark mode.
+        .border({ width: 1, color: $r('app.color.nb_card_border') })
         .backgroundColor($r('app.color.nb_card_background'))
         if (this.routeSectionRows(true).length > 0) {
           this.sectionTitle('出口节点')
@@ -5147,6 +5392,10 @@ struct Index {
           .width('100%')
           .padding({ left: 16, right: 16, top: 4, bottom: 4 })
           .borderRadius(16)
+          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
+          // in dark mode instead of a slightly-different dark rectangle (the I1
+          // screenshot's complaint). One role, both themes, no second surface.
+          .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
         }
       }
@@ -5539,13 +5788,20 @@ struct Index {
   }
 
   private closeVisibleSubflow(): boolean {
+    // 0.0.37 (I2): the peer-detail fact is the RESOLVED pane, so a detail opened
+    // from the state-driven default (activeTab still 0, tunnel up) consumes one
+    // back exactly like an explicitly chosen one. On the narrow branch
+    // peerPaneVisible() is false, so the first clause is the only one that can
+    // hold and the phone's decision is byte-for-byte the old one.
+    const peerDetailOpen: boolean = (this.activeTab === 1 && this.selectedPeer !== null) ||
+      (this.peerPaneVisible() && this.selectedPeer !== null);
     const action: string = navigationBackDecision(
       this.accountLoginOpen,
       this.accountLoginBusy,
       this.accountLoginCommitting,
       this.activeTab === 2 && !this.showDiagnostics && this.configured && this.showSetupForm,
       this.activeTab === 2 && this.showDiagnostics,
-      this.activeTab === 1 && this.selectedPeer !== null,
+      peerDetailOpen,
       this.activeTab === 2 && !this.showDiagnostics && this.routeSelectionOpen);
     if (action === 'account-webview') {
       this.cancelAccountLogin(false);
@@ -5596,24 +5852,109 @@ struct Index {
     return this.closeVisibleSubflow();
   }
 
-  // ---- lg+ 两栏外壳 (0.0.36, DESIGN-HARMONY I1) --------------------------------
+  // ---- lg+ 两栏外壳 (0.0.36 I1, 0.0.37 I2) -------------------------------------
   //
   // A RE-PARENTING, not a rewrite: connectionRail() renders TODAY'S homeTab() body,
-  // the 对端 pane's navBar renders TODAY'S peersTab() list body and its content area
-  // renders TODAY'S peersTab() detail body, and the 设置 pane renders TODAY'S
+  // the 对端 pane's navBar renders TODAY'S peerListBody() and its content area
+  // renders TODAY'S peerDetailBody(), and the 设置 pane renders TODAY'S
   // settingsTab() body. The narrow branch (build()'s else, the Tabs with
-  // barPosition End and the three bodies) is untouched — run-peer-list-render.mts
-  // passes UNEDITED, which is the mechanical proof of that.
+  // barPosition End and the three bodies) keeps its information architecture:
+  // bottom tabs, one column, no destination remapping.
   //
-  // WIDTH BUDGET (NetBirdHarmonyLayout): the rail is 240 vp and the pane's own
-  // Navigation splits at a hard >= 600 vp (NavigationMode.Auto), so a 840 vp window
-  // leaves the pane exactly 600 vp = navBarWidth 240 + minContentWidth 360 and the
-  // split is live from the very bottom of the lg tier. That is the k3 1.3
-  // correction: with the design's original 320/320/360 the pane would need 1000 vp
-  // and the bottom ~fifth of lg (plus some tablet-landscape windows) would run
-  // Stack-in-pane, blanking the list on a row tap — the exact defect this shell
-  // exists to kill. For the same reason the pane carries NO outer horizontal
-  // margin: 24 vp of margin would move the requirement to 864 vp.
+  // WIDTH BUDGET (NetBirdHarmonyLayout, 0.0.37 tier table): the rail is now
+  // 240 / 280 / 320 vp by window tier and the pane's own Navigation splits at a
+  // hard >= 600 vp (NavigationMode.Auto). The binding case is still the bottom of
+  // the split shell — 240 + 600 = 840 — and the rail only grows where the pane has
+  // 744 / 1120 vp to spare, so the split is live at EVERY width in the shell (the
+  // k3 1.3 correction; with the design's original 320/320/360 the pane would need
+  // 1000 vp and the bottom fifth of lg would run Stack-in-pane, blanking the list
+  // on a row tap). For the same reason the pane carries NO outer horizontal
+  // margin; from xl its content is indent-limited (maxWidth 1200, centred).
+  //
+  // The rail width, the pane's default destination and the visual scale are all
+  // read from that pure module — nothing below re-derives a threshold.
+
+  // ---- layout/state helpers the builders below read --------------------------
+
+  /** True when the split shell (rail + pane) is mounted for the current width. */
+  private wideLayout(): boolean {
+    return paneLayoutOf(this.widthVp) === 'split';
+  }
+
+  /** The rail's tier width in vp (240 / 280 / 320) — the pure table's answer. */
+  private railWidth(): number {
+    return railWidthFor(this.widthVp);
+  }
+
+  /**
+   * The pane's xl indent limit as a ConstraintSizeOptions: the pane's own 100%
+   * below xl (no limit at all) and `maxWidth: 1200` from xl, so the pane centres
+   * its content instead of stretching a card across a 2560 vp desktop window.
+   */
+  private paneConstraint(): ConstraintSizeOptions {
+    const max: number = contentMaxWidthVp(this.widthVp);
+    return { maxWidth: max > 0 ? max : '100%' };
+  }
+
+  /**
+   * The round connect control's diameter: 132 vp on the narrow shell (unchanged
+   * from 0.0.36 — the phone keeps its size) and 104 vp inside the rail, where a
+   * 132 vp circle would dominate a 240 vp column. One wide size rather than one
+   * per rail tier, so the control does not jump while the window is dragged; 104
+   * still holds 连接中… / 正在断开… at the label size below.
+   */
+  private connectButtonSize(): number {
+    return this.wideLayout() ? 104 : 132;
+  }
+
+  private connectButtonFontSize(): number {
+    return this.wideLayout() ? 18 : 22;
+  }
+
+  /**
+   * 0.0.37 (I2) keyboard activation for the focusable custom rows: Enter,
+   * Numpad-Enter and Space on the key-DOWN edge. `onClick` alone is not enough for
+   * a plain Row (the framework synthesises a click for a Button, not for a
+   * container), so the rail's navigation rows and the peer rows route the key here.
+   */
+  private isActivationKey(event: KeyEvent): boolean {
+    if (event.type !== KeyType.Down) {
+      return false;
+    }
+    return event.keyCode === KeyCode.KEYCODE_ENTER ||
+      event.keyCode === KeyCode.KEYCODE_NUMPAD_ENTER ||
+      event.keyCode === KeyCode.KEYCODE_SPACE;
+  }
+
+  /** The facts the pure default-pane rule needs, read from the live document. */
+  private widePaneFacts(): WidePaneFacts {
+    const facts: WidePaneFacts = {
+      activeTab: this.activeTab,
+      connected: this.fullyConnected(),
+      needsLogin: this.loginRequired()
+    };
+    return facts;
+  }
+
+  /**
+   * 0.0.37 state-driven default (see NetBirdHarmonyLayout.widePaneDestination):
+   * the rail's selected item AND the pane's content are both decided by this one
+   * number. An explicit choice (activeTab 1/2) wins for the session; with no
+   * choice (activeTab 0) the pane follows the connection state.
+   */
+  private wideDestination(): number {
+    return widePaneDestination(this.widePaneFacts());
+  }
+
+  /** `'login'` or `'connect'`: which guide the default pane renders. */
+  private wideGuideKind(): string {
+    return wideGuideKind(this.widePaneFacts());
+  }
+
+  /** True when the 对端 pane (list + in-pane detail) is the one on screen. */
+  private peerPaneVisible(): boolean {
+    return this.wideLayout() && this.wideDestination() === PANE_DEST_PEERS;
+  }
 
   // The root container's width observer, shared by both branches: the mounted root
   // reports the page's area in vp, so a 2in1 freeform drag re-classifies the shell
@@ -5658,13 +5999,15 @@ struct Index {
   // pane's BASE route (the "no peer selected" page); a peer that was selected while
   // the narrow branch was showing keeps the same detail after the crossing, and a
   // detail closed on the narrow branch is dropped here rather than replayed.
+  //
+  // 0.0.37 (I2): the gate is the RESOLVED destination, not `activeTab === 1` — with
+  // no explicit choice the pane shows the peer list whenever the tunnel is up, and
+  // that list needs its base route exactly as the explicitly-chosen one does.
   private syncWidePaneBaseRoutes(): void {
-    if (paneLayoutOf(this.widthVp) !== 'split' || this.activeTab !== 1) {
+    if (!this.peerPaneVisible()) {
       return;
     }
-    if (this.peersNavStack.size() === 0) {
-      this.peersNavStack.pushPath({ name: PEER_PANE_HOME_ROUTE });
-    }
+    this.ensurePeerPaneBaseRoute();
     const detailOpen: boolean = this.peersNavStack.size() > 1;
     if (this.selectedPeer !== null && !detailOpen) {
       this.peersNavStack.pushPath({ name: PEER_DETAIL_ROUTE });
@@ -5673,11 +6016,29 @@ struct Index {
     }
   }
 
-  // The rail's two destination items. The state rule (k3 correction 2): 主页 is the
-  // rail ITSELF — the connection block above is always visible — so the rail has
-  // exactly two selectable items, and activeTab === 0 means "no item selected, the
-  // pane shows the hint". activeTab is never mutated by a width crossing, so a
-  // window that narrows again puts 主页 back exactly as the user left it.
+  // The pane's base route, guaranteed whenever the 对端 pane is on screen — no
+  // matter WHICH way it got there: an explicit rail tap (selectWideDestination), a
+  // width change, or the state-driven default flipping to 对端 the moment the
+  // tunnel comes up (activeTab is 0 then, and nothing else would have pushed a
+  // route). peersPane() calls this from the Navigation's onAppear, which is the
+  // one hook that fires exactly when that container is mounted, so the content
+  // area can never be the blank "stack is empty" surface for the default pane.
+  private ensurePeerPaneBaseRoute(): void {
+    if (!this.peerPaneVisible()) {
+      return;
+    }
+    if (this.peersNavStack.size() === 0) {
+      this.peersNavStack.pushPath({ name: PEER_PANE_HOME_ROUTE });
+    }
+  }
+
+  // The rail's two destination items. The state rule (k3 correction 2, extended by
+  // I2): 主页 is the rail ITSELF — the connection block above is always visible —
+  // so the rail has exactly two selectable items, and activeTab === 0 means "the
+  // user has not chosen a destination": the pane then shows the state-driven
+  // default (the peer list when connected, otherwise the guide). activeTab is never
+  // mutated by a width crossing, so a window that narrows again puts 主页 back
+  // exactly as the user left it.
   //
   // The destination semantics are the narrow bar's: leaving 对端 drops the
   // drill-down (`if (index !== 1) { this.selectedPeer = null; }` in the Tabs
@@ -5717,16 +6078,19 @@ struct Index {
   // the page's own rules — exactly like back on the narrow 对端 list, which exits
   // normally. The settings stack is empty in this increment; the rule lives here so
   // that I3's 设置 sub-views are governed by the same single authority.
+  //
+  // 0.0.37 (I2): the 对端 gate is the RESOLVED pane, so a detail opened from the
+  // state-driven default (activeTab 0) still consumes exactly one back.
   private closeWidePaneRoute(): boolean {
-    if (paneLayoutOf(this.widthVp) !== 'split') {
+    if (!this.wideLayout()) {
       return false;
     }
-    if (this.activeTab === 1 && this.selectedPeer !== null && this.peersNavStack.size() > 0) {
+    if (this.peerPaneVisible() && this.selectedPeer !== null && this.peersNavStack.size() > 0) {
       this.peersNavStack.pop();
       this.selectedPeer = null;
       return true;
     }
-    if (this.activeTab === 2 && this.settingsNavStack.size() > 0) {
+    if (this.wideDestination() === PANE_DEST_SETTINGS && this.settingsNavStack.size() > 0) {
       this.settingsNavStack.pop();
       return true;
     }
@@ -5752,84 +6116,185 @@ struct Index {
     Column() {
       // TODAY'S 主页 body, re-parented unchanged. homeTab() keeps its own Scroll
       // (height 100%), so it gets a weighted wrapper: inside this Column its 100%
-      // would otherwise take the whole rail and push the destination rows out.
+      // would otherwise take the whole rail and push the navigation block out.
       Column() {
         this.homeTab()
       }
       .width('100%')
       .layoutWeight(1)
-      // k3 correction 1: the destination switcher lives HERE, in the rail — never as
-      // a horizontal tab strip above the pane's content. Two 48 vp rows (the touch
-      // target standard) rather than Tabs.vertical: two items need no index binding,
-      // and the vertical Tabs height budget (design §E R8/R9) is not a risk worth
-      // taking for two rows.
+      // Region boundary (0.0.37): the connection block above is the app's live
+      // state and scrolls on its own; the navigation block below never moves. The
+      // 1 vp role stroke is what makes the two regions read as two groups instead
+      // of one column of text.
+      Row() {
+        Row()
+          .width('100%')
+          .height(1)
+          .backgroundColor($r('app.color.nb_card_border'))
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12 })
       this.railDestinations()
     }
-    .width(RAIL_WIDTH_VP)
+    // 0.0.37 (I2) DYNAMIC RAIL: the width follows the window tier (240 / 280 /
+    // 320 vp — NetBirdHarmonyLayout's table), and the pane's Navigation auto-split
+    // stays valid at every one of them.
+    .width(this.railWidth())
     .height('100%')
     .backgroundColor($r('app.color.nb_page_background'))
   }
 
   @Builder
   railDestinations() {
+    // The rail's NAVIGATION BLOCK. Placed directly under the connection block (the
+    // bottom of the rail), which is the deliberate relationship: the connection
+    // surface owns the top of the column — it is the app's identity and the one
+    // thing that must never scroll away — while the first-level destinations keep
+    // a stable, thumb-reachable position under the 1 vp boundary above. A caption
+    // makes the block read as a group rather than as two loose rows.
+    //
+    // 48 vp rows with a 3 vp selected accent bar (a clear selected state that does
+    // not depend on colour alone), a hover tint from the framework's own
+    // hoverEffect plus an explicit hover background, focus and a tab order. Both
+    // rows are written INLINE, not as a @Builder(index, label): a @Builder with two
+    // or more by-value parameters never refreshes in ArkUI (the 0.0.35 statusDot
+    // defect), and every attribute below is a function of observed state.
     Column({ space: 4 }) {
-      // Written INLINE, not as a @Builder(index, label): a @Builder with two or more
-      // by-value parameters never refreshes in ArkUI (the 0.0.35 statusDot defect),
-      // and both rows' appearance is a function of this.activeTab.
+      Text('导航')
+        .fontSize(TYPE_CAPTION_VP)
+        .fontColor($r('app.color.nb_text_muted'))
+        .width('100%')
+        .padding({ left: 12, bottom: 4 })
       Row() {
+        Row()
+          .width(3)
+          .height(20)
+          .borderRadius(2)
+          .backgroundColor(this.wideDestination() === PANE_DEST_PEERS
+            ? $r('app.color.nb_primary') : Color.Transparent)
         Text('对端')
-          .fontSize(16)
-          .fontColor(this.activeTab === 1 ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
+          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontWeight(this.wideDestination() === PANE_DEST_PEERS
+            ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(this.wideDestination() === PANE_DEST_PEERS
+            ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
           .layoutWeight(1)
+          .margin({ left: 12 })
       }
       .width('100%')
       .height(48)
-      .padding({ left: 16, right: 16 })
+      .padding({ left: 8, right: 12 })
       .borderRadius(12)
-      .backgroundColor(this.activeTab === 1
+      .backgroundColor(this.wideDestination() === PANE_DEST_PEERS ||
+        this.hoveredDestination === PANE_DEST_PEERS
         ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
+      .border({
+        width: 1,
+        color: this.wideDestination() === PANE_DEST_PEERS
+          ? $r('app.color.nb_card_border') : Color.Transparent
+      })
+      .hoverEffect(HoverEffect.Highlight)
+      .focusable(true)
+      .tabIndex(2)
+      .onHover((isHover: boolean): void => {
+        // Only clears when THIS row is the one currently tinted: a leave event that
+        // arrives after the other row's enter event must not clear that row.
+        if (isHover) {
+          this.hoveredDestination = PANE_DEST_PEERS;
+        } else if (this.hoveredDestination === PANE_DEST_PEERS) {
+          this.hoveredDestination = PANE_DEST_GUIDE;
+        }
+      })
+      .onKeyEvent((event: KeyEvent): void => {
+        if (this.isActivationKey(event)) {
+          this.selectWideDestination(PANE_DEST_PEERS);
+        }
+      })
       .onClick((): void => {
-        this.selectWideDestination(1);
+        this.selectWideDestination(PANE_DEST_PEERS);
       })
       Row() {
+        Row()
+          .width(3)
+          .height(20)
+          .borderRadius(2)
+          .backgroundColor(this.wideDestination() === PANE_DEST_SETTINGS
+            ? $r('app.color.nb_primary') : Color.Transparent)
         Text('设置')
-          .fontSize(16)
-          .fontColor(this.activeTab === 2 ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
+          .fontSize(TYPE_SECTION_TITLE_VP)
+          .fontWeight(this.wideDestination() === PANE_DEST_SETTINGS
+            ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(this.wideDestination() === PANE_DEST_SETTINGS
+            ? $r('app.color.nb_primary') : $r('app.color.nb_text_primary'))
           .layoutWeight(1)
+          .margin({ left: 12 })
       }
       .width('100%')
       .height(48)
-      .padding({ left: 16, right: 16 })
+      .padding({ left: 8, right: 12 })
       .borderRadius(12)
-      .backgroundColor(this.activeTab === 2
+      .backgroundColor(this.wideDestination() === PANE_DEST_SETTINGS ||
+        this.hoveredDestination === PANE_DEST_SETTINGS
         ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
+      .border({
+        width: 1,
+        color: this.wideDestination() === PANE_DEST_SETTINGS
+          ? $r('app.color.nb_card_border') : Color.Transparent
+      })
+      .hoverEffect(HoverEffect.Highlight)
+      .focusable(true)
+      .tabIndex(3)
+      .onHover((isHover: boolean): void => {
+        if (isHover) {
+          this.hoveredDestination = PANE_DEST_SETTINGS;
+        } else if (this.hoveredDestination === PANE_DEST_SETTINGS) {
+          this.hoveredDestination = PANE_DEST_GUIDE;
+        }
+      })
+      .onKeyEvent((event: KeyEvent): void => {
+        if (this.isActivationKey(event)) {
+          this.selectWideDestination(PANE_DEST_SETTINGS);
+        }
+      })
       .onClick((): void => {
-        this.selectWideDestination(2);
+        this.selectWideDestination(PANE_DEST_SETTINGS);
       })
     }
     .width('100%')
-    .padding({ left: 12, right: 12, top: 4, bottom: 12 })
+    .padding({ left: 12, right: 12, top: 8, bottom: 12 })
   }
 
   @Builder
   contentPane() {
-    Column() {
-      // k3 correction 4 / §E R6: one container PER destination, each with its own
-      // NavPathStack — a live Navigation's mode/hideNavBar is never flipped between
-      // destinations, and two destinations' routes never share one stack.
-      if (this.activeTab === 1) {
-        this.peersPane()
-      } else if (this.activeTab === 2) {
-        this.settingsPane()
-      } else {
-        // activeTab === 0: 主页 IS the rail, so the pane has nothing of its own to
-        // show. A neutral hint — and activeTab is NOT mutated (k3 correction 2), so
-        // crossing back to a narrow window restores 主页 exactly.
-        this.wideHintPane()
+    Row() {
+      Column() {
+        // k3 correction 4 / §E R6: one container PER destination, each with its own
+        // NavPathStack — a live Navigation's mode/hideNavBar is never flipped between
+        // destinations, and two destinations' routes never share one stack.
+        //
+        // 0.0.37 (I2) STATE-DRIVEN DEFAULT: the branch is this.wideDestination(),
+        // not raw activeTab. With no explicit user choice that number follows the
+        // connection state (对端 when the tunnel is fully up, otherwise the guide
+        // for the state), and activeTab itself is NEVER mutated — so crossing back
+        // to a narrow window still restores 主页 exactly (k3 correction 2).
+        if (this.wideDestination() === PANE_DEST_PEERS) {
+          this.peersPane()
+        } else if (this.wideDestination() === PANE_DEST_SETTINGS) {
+          this.settingsPane()
+        } else {
+          this.wideGuidePane()
+        }
       }
+      .width('100%')
+      .height('100%')
+      // From xl the pane is indent-limited (maxWidth 1200); below xl the
+      // constraint is empty and the pane fills the row.
+      .constraintSize(this.paneConstraint())
     }
     .layoutWeight(1)
     .height('100%')
+    // 缩进布局: the limited pane is CENTRED in the space the rail left.
+    .justifyContent(FlexAlign.Center)
     .backgroundColor($r('app.color.nb_page_background'))
   }
 
@@ -5841,9 +6306,10 @@ struct Index {
     // scroll position while the detail is open.
     //
     // mode(Auto), not Split: the framework's own >= 600 vp rule then governs the
-    // pane, so if our classifier and the framework ever disagree inside the lg tier
-    // the pane degrades to today's list-then-detail behaviour instead of showing a
-    // broken split.
+    // pane, and NetBirdHarmonyLayout's tier table guarantees the pane is never
+    // below it — 600 vp at the very bottom of lg, 744 vp from 1024, 1120 vp from
+    // 1440. If our classifier and the framework ever disagree the pane degrades to
+    // today's list-then-detail behaviour instead of showing a broken split.
     Navigation(this.peersNavStack) {
       this.peerListBody()
     }
@@ -5854,6 +6320,13 @@ struct Index {
     .hideTitleBar(true)
     .width('100%')
     .height('100%')
+    // 0.0.37 (I2): the base route must exist whichever way this pane appeared —
+    // including the state-driven default, where activeTab is still 0 and nothing
+    // else would have pushed it. onAppear fires exactly when this container mounts,
+    // so the content area can never be the blank "empty stack" surface.
+    .onAppear((): void => {
+      this.ensurePeerPaneBaseRoute();
+    })
   }
 
   // The pane's pushed pages. ONE parameter, not two: the official example's shape
@@ -5901,15 +6374,97 @@ struct Index {
     .backgroundColor($r('app.color.nb_page_background'))
   }
 
+  // 0.0.37 (I2) — THE STATE-DRIVEN DEFAULT PANE. Shown when the user has NOT
+  // chosen a destination and the tunnel is not fully up, i.e. exactly when an
+  // empty peer list would be the least useful thing to show. It is a real block,
+  // not the I1 placeholder line ("选择左侧的「对端」或「设置」"):
+  //
+  //   needs-login            → 需要登录 + the reason + the ACCOUNT LOGIN entry
+  //                            (beginConnectLogin — the SAME flow the rail's
+  //                            connect tap and 设置's 登录并连接 run; no new
+  //                            mechanism) + 去设置 to change credentials
+  //   未连接 / 连接中… /      → the honest state text + 上一次失败原因 when one is
+  //     正在断开…              recorded + how to connect. The connect CONTROL stays
+  //                            in the rail (the phone has it on the 主页 tab), so
+  //                            the guide points at it instead of duplicating it.
+  //   尚未配置服务器           → 去设置, because there is nothing to connect with yet.
   @Builder
-  wideHintPane() {
-    Column({ space: 10 }) {
-      Text('选择左侧的「对端」或「设置」')
-        .fontSize(16)
-        .fontColor($r('app.color.nb_text_secondary'))
-      Text('连接状态与开关始终显示在左栏。')
-        .fontSize(14)
-        .fontColor($r('app.color.nb_text_muted'))
+  wideGuidePane() {
+    Column() {
+      Column({ space: 16 }) {
+        Row({ space: 10 }) {
+          Circle({ width: 12, height: 12 })
+            .fill(this.stateColor())
+          Text(this.configured ? this.stateText() : '尚未配置服务器')
+            .fontSize(TYPE_PAGE_TITLE_VP)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.stateColor())
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+        // 0.0.37: 上一次失败原因, when one is recorded — and only when it says
+        // something the headline does not (for needs-login lastErrorLine() IS
+        // 需要登录, the headline).
+        if (this.lastErrorLine().length > 0 && this.lastErrorLine() !== this.stateText()) {
+          Text(this.lastErrorLine())
+            .fontSize(TYPE_CAPTION_VP)
+            .fontColor($r('app.color.nb_status_error'))
+            .width('100%')
+            .maxLines(3)
+        }
+        if (this.wideGuideKind() === GUIDE_LOGIN) {
+          Text('账户会话已过期或本设备未在管理端注册。重新登录后即可连接；连接成功后这里会显示对端列表。')
+            .fontSize(TYPE_CAPTION_VP)
+            .fontColor($r('app.color.nb_text_secondary'))
+            .width('100%')
+            .maxLines(4)
+          Button(this.accountLoginBusy ? '正在登录…' : '账户登录')
+            .fontSize(TYPE_SECTION_TITLE_VP)
+            .height(44)
+            .width('100%')
+            .backgroundColor($r('app.color.nb_primary'))
+            .fontColor($r('app.color.nb_on_primary'))
+            .enabled(!this.accountLoginBusy)
+            .hoverEffect(HoverEffect.Highlight)
+            .focusable(true)
+            .onClick((): void => {
+              this.beginConnectLogin();
+            })
+        } else {
+          Text(this.configured
+            ? '连接开关位于左栏，点按圆形按钮即可连接。连接成功后这里会显示对端列表。'
+            : '请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
+            .fontSize(TYPE_CAPTION_VP)
+            .fontColor($r('app.color.nb_text_secondary'))
+            .width('100%')
+            .maxLines(4)
+        }
+        if (!this.configured || this.wideGuideKind() === GUIDE_LOGIN) {
+          Button('去设置')
+            .fontSize(TYPE_SECTION_TITLE_VP)
+            .height(44)
+            .width('100%')
+            // The app's existing SECONDARY action role (the same pair 对端详情's
+            // 返回 uses), not a hand-rolled outline: one neutral fill + its explicit
+            // on-role ink, from the base/dark palette.
+            .backgroundColor($r('app.color.nb_neutral_button_background'))
+            .fontColor($r('app.color.nb_on_primary'))
+            .hoverEffect(HoverEffect.Highlight)
+            .focusable(true)
+            .onClick((): void => {
+              this.activeTab = 2;
+            })
+        }
+      }
+      .width('100%')
+      .constraintSize({ maxWidth: 480 })
+      .padding(24)
+      .borderRadius(16)
+      .border({ width: 1, color: $r('app.color.nb_card_border') })
+      .backgroundColor($r('app.color.nb_card_background'))
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
@@ -5923,10 +6478,10 @@ struct Index {
   widePeerHint() {
     Column({ space: 10 }) {
       Text('选择一个对端查看详情')
-        .fontSize(16)
+        .fontSize(TYPE_SECTION_TITLE_VP)
         .fontColor($r('app.color.nb_text_secondary'))
       Text('列表会保持显示，点击左侧的任意对端即可查看详情。')
-        .fontSize(14)
+        .fontSize(TYPE_CAPTION_VP)
         .fontColor($r('app.color.nb_text_muted'))
         .textAlign(TextAlign.Center)
     }
@@ -5972,6 +6527,9 @@ struct Index {
     .width('100%')
     .padding(16)
     .borderRadius(16)
+    // 0.0.37 (I2): the same role stroke as every other card (see the rail's
+    // status card), so a card stays a card in dark mode.
+    .border({ width: 1, color: $r('app.color.nb_card_border') })
     .backgroundColor($r('app.color.nb_card_background'))
   }
 
