@@ -1,6 +1,12 @@
 // Host-side checks for the responsive shell — DESIGN-HARMONY I1 (0.0.36), I2
 // (0.0.37), I3 (0.0.38) and I4 (0.0.39). No device, no build.
 //
+// 0.0.41 (I6) / 0.0.42 (I7) §1 add the rail's vertical rhythm: the connection
+// content is TOP-ANCHORED at its 24 vp gap (I6's number, unchanged) and the
+// 对端/设置 block is PINNED TO THE RAIL'S BOTTOM with 24 vp under it (I7), one
+// layoutWeight(1) spacer carrying the slack BETWEEN them, with the same
+// ceiling/scroll policy that keeps the pinned block on screen in a short window.
+//
 // Run: node client/entry/selfcheck/run-harmony-layout.mts
 //
 // Two halves, both pinned against the byte-identical production sources:
@@ -673,14 +679,19 @@ try {
   // the identity block's head and scrolls the rest. A percentage could not see the
   // slack the ASTRA review measured under the card — it clipped the 详细状态 entry
   // with ~132 px of it sitting right there.
+  // 0.0.42 (I7) §1 DELIBERATE UPDATE: the bottom region grows from 121 to 133 vp
+  // because the pinned nav's 24 vp bottom padding (RAIL_NAV_BOTTOM_PADDING_VP) is
+  // part of the budget. That is the whole point of the pin: the ceiling still ends
+  // exactly at the nav's top edge, so a short window scrolls the connection region
+  // and never clips the nav.
   check('rail: the connection region\'s ceiling is the rail minus its bottom region',
     m.RAIL_DESTINATIONS_HEIGHT_VP ===
       m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP + m.RAIL_NAV_ROW_HEIGHT_VP +
-        m.RAIL_NAV_ROW_GAP_VP + m.RAIL_NAV_ROW_HEIGHT_VP + m.RAIL_DESTINATIONS_PAD_BOTTOM_VP &&
-    m.RAIL_DESTINATIONS_HEIGHT_VP === 121 &&
-    m.railConnectionMaxHeightVp(833) === 833 - 121 &&
-    m.railConnectionMaxHeightVp(1080) === 1080 - 121 &&
-    m.railConnectionMaxHeightVp(400) === 400 - 121 &&
+        m.RAIL_NAV_ROW_GAP_VP + m.RAIL_NAV_ROW_HEIGHT_VP + m.RAIL_NAV_BOTTOM_PADDING_VP &&
+    m.RAIL_DESTINATIONS_HEIGHT_VP === 133 &&
+    m.railConnectionMaxHeightVp(833) === 833 - 133 &&
+    m.railConnectionMaxHeightVp(1080) === 1080 - 133 &&
+    m.railConnectionMaxHeightVp(400) === 400 - 133 &&
     m.railConnectionMaxHeightVp(300) === m.RAIL_CONNECTION_MIN_VP &&
     m.railConnectionMaxHeightVp(0) === m.RAIL_CONNECTION_MIN_VP &&
     m.railConnectionMaxHeightVp(Number.NaN) === m.RAIL_CONNECTION_MIN_VP &&
@@ -897,7 +908,11 @@ try {
   // never about centring: the identity block is a DIRECT child of the rail (so its
   // ceiling is expressed in the RAIL's height, not in a leftover), it keeps that
   // absolute ceiling, and the nav block follows it.
-  check('E (I6): the identity block is a direct child of the rail, nav right below it',
+  // 0.0.42 (I7) §1 DELIBERATE UPDATE: pinning the nav back to the bottom needs ONE
+  // layoutWeight(1) spacer, so 0 is no longer the expected count — exactly ONE is,
+  // and the block must still NOT be wrapped in a weighted container (that, not the
+  // spacer, is what would break the ceiling's arithmetic).
+  check('E (I7): the identity block is a direct child of the rail, its ceiling intact',
     PAGE.includes('private homeBodyHeight(): Length {') &&
     PAGE.includes("return this.wideLayout() ? 'auto' : '100%';") &&
     PAGE.includes('.height(this.homeBodyHeight())') &&
@@ -905,12 +920,13 @@ try {
     (() => {
       const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
         PAGE.indexOf('railDestinations() {'));
-      // no spacer left: the attribute cannot be on any line of the rail any more
+      // I7: exactly ONE spacer — the slack between the top-anchored content and the
+      // bottom-pinned nav (see the §1 checks above); the block itself is unwrapped.
       const spacers = rail.match(/^\s*\.layoutWeight\(1\)/gm) ?? [];
       const nested = /Column\(\)\s*\{\s*Column\(\)/;
       return rail.includes('.height(\'auto\')') &&
         rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
-        spacers.length === 0 && !nested.test(rail) &&
+        spacers.length === 1 && !nested.test(rail) &&
         rail.indexOf('this.homeTab()') < rail.indexOf('this.railDestinations()');
     })());
   check('E: the 详细状态 row is a proper entry (short subtitle + chevron, no 路… artefact)',
@@ -1034,15 +1050,16 @@ try {
   // Scroll when the rail genuinely cannot hold the card.
   check('I5 §2: the ceiling clears the card at the captured windows and keeps the nav room',
     // the ASTRA frame's rail height and the 19:53 capture window's:
-    m.railConnectionMaxHeightVp(833) === 712 && m.railConnectionMaxHeightVp(1240) === 1119 &&
+    // 0.0.42 (I7): −133, not −121 — the pinned nav's own 24 vp is in the budget.
+    m.railConnectionMaxHeightVp(833) === 700 && m.railConnectionMaxHeightVp(1240) === 1107 &&
     m.railConnectionMaxHeightVp(833) >= m.RAIL_CONNECTION_MIN_VP &&
     m.railConnectionMaxHeightVp(833) + m.RAIL_DESTINATIONS_HEIGHT_VP === 833);
   check('I5 §2: the ceiling is STRICTLY roomier than the retired 60 % cap',
     // The monotonicity that makes the fix safe at every window, not just the
-    // captured one: H - 121 > 0.6 H for every rail taller than 302.5 vp, i.e. the
+    // captured one: H - 133 > 0.6 H for every rail taller than 332.5 vp, i.e. the
     // new ceiling can only ever give the region MORE room than the percentage did.
     (() => {
-      for (let h = 303; h <= 3000; h += 1) {
+      for (let h = 333; h <= 3000; h += 1) {
         if (m.railConnectionMaxHeightVp(h) <= 0.6 * h) { return false; }
       }
       return true;
@@ -1166,42 +1183,74 @@ try {
     })());
 
   // -------------------------------------------------------------------------
-  // 20. 0.0.41 (I6) — THE PRODUCT OWNER'S THREE FINDINGS
+  // 20. 0.0.41 (I6) / 0.0.42 (I7) — THE PRODUCT OWNER'S FINDINGS
   // -------------------------------------------------------------------------
 
-  // §1 — THE RAIL'S VERTICAL RHYTHM. The owner's 0.0.40 frame measured ~360 px
-  // from the window's top to the wordmark and ~340 px between the status card and
-  // the 对端 row: I4's two EQUAL layoutWeight(1) spacers were centring the identity
-  // block in the slack above the nav block. The geometry is expressible — the rail
-  // starts at a known 24 vp top gap and the destination block is one seam + its own
-  // padding under the card — and the page must carry no spacer at all.
-  check('I6 §1: the rail is top-anchored at a 24 vp page padding (16 + the wordmark\'s 8)',
+  // §1 — THE RAIL'S VERTICAL RHYTHM. I6 removed I4's two EQUAL layoutWeight(1)
+  // spacers (they centred the identity block in the slack ABOVE the wordmark) and
+  // top-anchored the content. The owner's I7 decision KEEPS that top anchor and
+  // PINS the 对端/设置 block to the rail's BOTTOM with 24 vp under it, so the slack
+  // ends up BETWEEN the connection content and the nav. The geometry is
+  // expressible: the content's top gap is 24 vp, the nav's bottom padding is 24 vp,
+  // the card→row distance is 9 vp at its minimum, and the bottom region the
+  // ceiling's budget carries is 133 vp.
+  check('I7 §1: the content\'s top anchor is unchanged (24 vp page padding, 16 + 8)',
     m.RAIL_PAGE_PADDING_VP === 16 && m.RAIL_WORDMARK_MARGIN_VP === 8 &&
     m.RAIL_TOP_GAP_VP === 24 &&
     PAGE.includes('.margin({ top: RAIL_WORDMARK_MARGIN_VP })') &&
     PAGE.includes('RAIL_WORDMARK_MARGIN_VP,'));
-  check('I6 §1: the nav block follows the connection card directly (seam + 8 vp pad)',
-    m.RAIL_DESTINATION_GAP_VP === 9 &&
-    m.RAIL_DESTINATION_GAP_VP === m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP &&
-    PAGE.includes('RAIL_DESTINATION_GAP_VP'));
-  check('I6 §1: NO centring spacer is left in the rail (the I4 shape is gone)',
+  check('I7 §1: the nav is pinned to the bottom with the owner\'s 24 vp under it',
+    // the block's own bottom padding IS that distance, and I5's 12 vp
+    // RAIL_DESTINATIONS_PAD_BOTTOM_VP is retired (no two numbers can drift apart).
+    m.RAIL_NAV_BOTTOM_PADDING_VP === 24 &&
+    m.RAIL_DESTINATIONS_PAD_BOTTOM_VP === undefined &&
+    PAGE.includes('bottom: RAIL_NAV_BOTTOM_PADDING_VP'));
+  check('I7 §1: exactly ONE weighted spacer, BELOW the content (no re-centring)',
     (() => {
       const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
         PAGE.indexOf('railDestinations() {'));
-      // lines, not substrings: the rail's own comment still NAMES the retired
-      // spacers (layoutWeight(1)) and that is documentation, not layout.
-      return rail.length > 0 && !/^\s*\.layoutWeight\(/m.test(rail) &&
+      if (rail.length === 0) { return false; }
+      // lines, not substrings: the rail's own comments NAME layoutWeight(1) and the
+      // retired spacer, and that is documentation, not layout.
+      const spacers = rail.match(/^\s*\.layoutWeight\(/gm) ?? [];
+      // the spacer sits AFTER this.homeTab() and BEFORE the destinations, i.e.
+      // between the top-anchored content and the bottom-pinned block
+      const contentAt = rail.indexOf('this.homeTab()');
+      const spacerAt = rail.indexOf('.layoutWeight(1)');
+      const navAt = rail.indexOf('this.railDestinations()');
+      // …and the 1 vp seam stays directly ABOVE the nav: inside the tail between the
+      // spacer and the destinations, with the block's own horizontal padding.
+      const tail = rail.slice(spacerAt, navAt);
+      return spacers.length === 1 &&
         !/^\s*\.justifyContent\(FlexAlign\.Center\)/m.test(rail) &&
-        // …and the connection region is still the ceilinged, scrolling block, so a
-        // short window scrolls it instead of pushing the destinations out
         rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
-        rail.includes('this.homeTab()') &&
-        rail.indexOf('this.homeTab()') < rail.indexOf('this.railDestinations()');
+        contentAt > 0 && contentAt < spacerAt && spacerAt < navAt &&
+        tail.includes('.height(1)') &&
+        tail.includes("backgroundColor($r('app.color.nb_card_border'))") &&
+        tail.includes('padding({ left: RAIL_DESTINATIONS_PADDING_VP, ' +
+          'right: RAIL_DESTINATIONS_PADDING_VP })');
     })());
-  check('I6 §1: a short window still reserves the whole bottom region (unchanged ceiling)',
-    m.railConnectionMaxHeightVp(833) === 833 - m.RAIL_DESTINATIONS_HEIGHT_VP &&
-    m.RAIL_DESTINATIONS_HEIGHT_VP === 121 &&
-    m.railConnectionMaxHeightVp(361) === m.RAIL_CONNECTION_MIN_VP);
+  check('I7 §1: the card→row distance is 9 vp at its MINIMUM (the spacer adds the rest)',
+    m.RAIL_DESTINATION_GAP_VP === 9 &&
+    m.RAIL_DESTINATION_GAP_VP === m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP &&
+    PAGE.includes('RAIL_DESTINATION_GAP_VP'));
+  check('I7 §1: a short window still reserves the pinned nav (the 24 vp is in the budget)',
+    // For EVERY rail height above the floor the ceiling + the bottom region is the
+    // rail exactly: the spacer spends to 0 and the nav's bottom edge is the rail's
+    // bottom edge — the nav can never be pushed out or clipped.
+    m.RAIL_DESTINATIONS_HEIGHT_VP === 133 &&
+    m.RAIL_DESTINATIONS_HEIGHT_VP ===
+      m.RAIL_SEAM_WIDTH_VP + m.RAIL_DESTINATIONS_PAD_TOP_VP + m.RAIL_NAV_ROW_HEIGHT_VP +
+        m.RAIL_NAV_ROW_GAP_VP + m.RAIL_NAV_ROW_HEIGHT_VP + m.RAIL_NAV_BOTTOM_PADDING_VP &&
+    (() => {
+      for (let h = 373; h <= 3000; h += 1) {
+        if (m.railConnectionMaxHeightVp(h) + m.RAIL_DESTINATIONS_HEIGHT_VP !== h) {
+          return false;
+        }
+      }
+      return m.railConnectionMaxHeightVp(833) === 833 - 133 &&
+        m.railConnectionMaxHeightVp(372) === m.RAIL_CONNECTION_MIN_VP;
+    })());
 
   // §2 — HOVER vs SELECTION. The pinning the brief asks for is a NEGATIVE property
   // of the marker: the 3 vp bar's colour expression may read the SELECTION and

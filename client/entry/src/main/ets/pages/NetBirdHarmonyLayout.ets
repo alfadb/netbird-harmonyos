@@ -784,17 +784,26 @@ export const RAIL_NAV_ROW_HEIGHT_VP: number = 48;
 export const RAIL_NAV_ROW_GAP_VP: number = 4;
 /** The destination block's own top padding (vp) — 8 vp grid. */
 export const RAIL_DESTINATIONS_PAD_TOP_VP: number = 8;
-/** The destination block's own bottom padding (vp) — 8 vp grid. */
-export const RAIL_DESTINATIONS_PAD_BOTTOM_VP: number = 12;
 /**
- * What the rail's bottom region always takes (vp): the seam, the block's
- * paddings, the two rows and the gap between them. 1 + 8 + 48 + 4 + 48 + 12 =
- * 121. I5 removed the 导航 caption, so the block is these numbers and nothing
+ * 0.0.42 (I7) §1: the padding (vp) under the pinned nav — between 设置's row and
+ * the rail's bottom edge. This is the owner's "modest bottom padding (~24 vp)"
+ * for the pinned arrangement, and it is the block's own bottom padding, so the
+ * measured nav → rail-bottom gap IS this number. It retires I5's
+ * RAIL_DESTINATIONS_PAD_BOTTOM_VP (12): the bottom padding is no longer an
+ * internal 8 vp-grid value but the rail's bottom breathing room, and the ceiling's
+ * budget below carries it so the nav can never be the thing a short window clips.
+ */
+export const RAIL_NAV_BOTTOM_PADDING_VP: number = 24;
+/**
+ * What the rail's bottom region always takes (vp): the seam, the block's top
+ * padding, the two rows, the gap between them and the pinned nav's 24 vp bottom
+ * padding. 1 + 8 + 48 + 4 + 48 + 24 = 133 (I6 summed to 121 before the nav was
+ * pinned). I5 removed the 导航 caption, so the block is these numbers and nothing
  * else.
  */
 export const RAIL_DESTINATIONS_HEIGHT_VP: number =
   RAIL_SEAM_WIDTH_VP + RAIL_DESTINATIONS_PAD_TOP_VP + RAIL_NAV_ROW_HEIGHT_VP +
-    RAIL_NAV_ROW_GAP_VP + RAIL_NAV_ROW_HEIGHT_VP + RAIL_DESTINATIONS_PAD_BOTTOM_VP;
+    RAIL_NAV_ROW_GAP_VP + RAIL_NAV_ROW_HEIGHT_VP + RAIL_NAV_BOTTOM_PADDING_VP;
 /**
  * The connection region's floor (vp). The identity block's own head — the 16 vp
  * page padding, the wordmark and the 104 vp disc — needs ~190 vp; 240 keeps the
@@ -808,8 +817,9 @@ export const RAIL_CONNECTION_MIN_VP: number = 240;
  * The connection region's ceiling (vp) for a rail height in vp: everything but
  * the bottom region, floored at RAIL_CONNECTION_MIN_VP so a degenerate height can
  * never produce a negative or collapsing constraint. The floor is what a rail
- * shorter than `RAIL_DESTINATIONS_HEIGHT_VP + RAIL_CONNECTION_MIN_VP` (361 vp)
- * gets; an UNMEASURED height never reaches this function — the page answers
+ * shorter than `RAIL_DESTINATIONS_HEIGHT_VP + RAIL_CONNECTION_MIN_VP` (373 vp with
+ * I7's 133 vp bottom region; it was 361 vp) gets; an UNMEASURED height never
+ * reaches this function — the page answers
  * '100%' (no ceiling at all) for it, because the failure direction that matters is
  * the card closing at its own bottom edge rather than being cut in the middle of
  * a row.
@@ -826,45 +836,52 @@ export function railConnectionMaxHeightVp(railHeightVp: number): number {
 export const RAIL_ENTRY_MIN_HEIGHT_VP: number = 48;
 
 // ---------------------------------------------------------------------------
-// 0.0.41 (I6) §1 — THE RAIL'S VERTICAL RHYTHM: top-anchored, no centring spacer
+// 0.0.41 (I6) §1 / 0.0.42 (I7) §1 — THE RAIL'S VERTICAL RHYTHM: content
+// TOP-ANCHORED, nav PINNED TO THE BOTTOM
 // ---------------------------------------------------------------------------
-// The product owner's 0.0.40 frame measured the rail as ~360 px from the window's
-// top edge to the NetBird wordmark and ~340 px between the status card and the
-// 对端 row, with only ~60 px under 设置 — i.e. more than half the column was
-// empty and the rail's controls were spread over the full height.
+// The product owner measured the 0.0.40 frame as ~360 px from the window's top to
+// the NetBird wordmark and ~340 px between the status card and the 对端 row, i.e.
+// more than half the column empty and the rail's controls spread over the full
+// height. The cause was I4's VERTICAL CENTRING: the identity block sat between two
+// EQUAL layoutWeight(1) spacers with the destination block pinned to the bottom,
+// so all of the rail's slack collected ABOVE the wordmark (and half of the
+// remainder under the card). I6 removed both spacers and top-anchored everything —
+// which put the whole void under the nav.
 //
-// The cause was I4's centring: the identity block sat between two EQUAL
-// layoutWeight(1) spacers with the destination block pinned to the bottom, so all
-// of the rail's slack collected ABOVE the wordmark (and half of the remainder
-// under the card). The block is TOP-ANCHORED now — no spacer exists at all — and
-// the destination block follows the connection block directly, one seam and one
-// block padding below it. The slack that is left over in a tall window belongs
-// BELOW the nav, which is where a sidebar's free space reads as free space
-// instead of as a hole between two groups.
+// The owner has now CHOSEN the other arrangement I6's brief offered, and it is the
+// one implemented here:
+//   * the connection content stays TOP-ANCHORED — its top gap is unchanged from
+//     I6 (RAIL_TOP_GAP_VP = 24 vp: the page padding 16 + the wordmark's own 8);
+//   * the 对端 / 设置 block is PINNED TO THE BOTTOM of the rail with a modest
+//     24 vp under it (RAIL_NAV_BOTTOM_PADDING_VP);
+//   * the empty space therefore ends up BETWEEN the connection content and the nav
+//     — one layoutWeight(1) spacer carries it, and there is NO spacer above the
+//     content, so vertical centring is NOT re-introduced.
 //
-// The alternative the brief also allows (nav pinned to the bottom with ~24 vp
-// under it) is deliberately NOT taken: it is the I2 shape whose middle void the
-// I4 review named ("到下方导航分隔线之间仍有明显空白"), and it would put the two
-// destinations ~200 vp away from the 连接 command they belong to.
-//
-// A SHORT window is unchanged and still safe: the connection region keeps its
-// absolute ceiling (railConnectionMaxHeightVp = rail height − the bottom region),
-// so the region's own Scroll gives way and the destination block is never pushed
-// out or clipped. Top-anchoring does not touch that arithmetic — it only removes
-// the spacers that were spending the slack.
+// A SHORT window is unchanged in kind and still safe: the connection region keeps
+// its absolute ceiling (railConnectionMaxHeightVp = the rail's measured height
+// minus the whole bottom region, RAIL_DESTINATIONS_HEIGHT_VP), so the region's own
+// Scroll gives way first and the pinned nav is never pushed out or clipped; the
+// weighted spacer collapses to 0 before anything else moves. Because the 24 vp now
+// belongs to the bottom region, that ceiling's budget includes it — which is
+// exactly what "the nav stays visible" costs.
 /** The wordmark's own top margin inside the rail's page padding (vp, 8 vp grid). */
 export const RAIL_WORDMARK_MARGIN_VP: number = 8;
 /**
  * The rail's TOP GAP (vp): from the rail's top edge to the wordmark's top edge —
  * the page padding plus the wordmark's own margin, 16 + 8 = 24. This is the
  * "consistent page padding (~24 vp)" the owner asked for, expressed as the sum
- * the page actually lays out rather than as a number in a comment.
+ * the page actually lays out rather than as a number in a comment. I7 keeps it
+ * verbatim: pinning the nav to the bottom does not move the content's top.
  */
 export const RAIL_TOP_GAP_VP: number = RAIL_PAGE_PADDING_VP + RAIL_WORDMARK_MARGIN_VP;
 /**
- * The gap (vp) between the connection card's bottom edge and the first
- * destination row's top edge in the top-anchored rail: the 1 vp region seam plus
- * the destination block's own top padding. 1 + 8 = 9.
+ * The MINIMUM gap (vp) between the connection card's bottom edge and the first
+ * destination row's top edge: the 1 vp region seam plus the destination block's
+ * own top padding. 1 + 8 = 9. I7 makes this the FLOOR of that distance rather than
+ * the distance itself — the flexible spacer above the seam adds the rail's slack,
+ * so the real gap is 9 vp plus whatever the spacer takes and it is exactly 9 vp
+ * only in a window too short to have any slack at all.
  */
 export const RAIL_DESTINATION_GAP_VP: number =
   RAIL_SEAM_WIDTH_VP + RAIL_DESTINATIONS_PAD_TOP_VP;

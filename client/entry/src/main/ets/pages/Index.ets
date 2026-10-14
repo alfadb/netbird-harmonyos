@@ -178,9 +178,8 @@ import {
   peerDetailSectionOf, peerFqdnDuplicatesTitle, PEER_ROW_LIST_PADDING_VP,
   PEER_ROW_MIN_HEIGHT_VP, PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
   peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, RAIL_CARD_PADDING_VP,
-  RAIL_DESTINATIONS_PAD_BOTTOM_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
-  RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
+  RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_BOTTOM_PADDING_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
   RAIL_WORDMARK_MARGIN_VP,
   railConnectionMaxHeightVp, railTrafficVisible,
@@ -4648,10 +4647,11 @@ struct Index {
       .padding(RAIL_PAGE_PADDING_VP)
     }
     .width('100%')
-    // 0.0.38 (I3) E: inside the rail this page must be CONTENT height, so the
-    // navigation group can sit directly under the connection card (see
-    // connectionRail). On the narrow shell it is a whole tab page and keeps its
-    // 100% — homeBodyHeight() is the one place that decision lives.
+    // 0.0.38 (I3) E: inside the rail this page must be CONTENT height, so the rail's
+    // own spacer (0.0.42 (I7) §1) can take the slack between it and the bottom-pinned
+    // navigation group (see connectionRail). On the narrow shell it is a whole tab
+    // page and keeps its 100% — homeBodyHeight() is the one place that decision
+    // lives.
     .height(this.homeBodyHeight())
     .backgroundColor($r('app.color.nb_page_background'))
     .align(Alignment.Top)
@@ -6605,9 +6605,11 @@ struct Index {
 
   /**
    * 0.0.38 (I3) E: the RAIL's connection region — content height inside the
-   * split shell, so the navigation group sits directly under the connection card
-   * instead of at the bottom of a stretched column (the I2 gap), and 100% in the
-   * narrow shell, where homeTab() is a whole tab page and must fill it.
+   * split shell, and 100% in the narrow shell, where homeTab() is a whole tab page
+   * and must fill it. 0.0.42 (I7) §1: 'auto' is what lets the rail's ONE
+   * layoutWeight(1) spacer (not the content) absorb the slack between the
+   * top-anchored connection content and the bottom-pinned nav; a weighted filler
+   * here would swallow that space instead and the spacer would never expand.
    */
   private homeBodyHeight(): Length {
     return this.wideLayout() ? 'auto' : '100%';
@@ -6860,28 +6862,27 @@ struct Index {
       // TODAY'S 主页 body, re-parented unchanged. 0.0.38 (I3) E made it CONTENT
       // height here (homeBodyHeight() → 'auto'), not a weighted filler.
       //
-      // 0.0.41 (I6) §1 — TOP-ANCHORED. I4 (0.0.39) P1.8 wrapped this block between
-      // two EQUAL layoutWeight(1) spacers and pinned the destination block to the
-      // bottom, which centred the identity block in the slack ABOVE the nav. The
-      // product owner measured that shape on 0.0.40: ~360 px from the window's top
-      // to the wordmark and ~340 px between the status card and the 对端 row, i.e.
-      // more than half the rail's height spent on empty space. Both spacers are
-      // GONE: the column starts with the page padding (the wordmark's top edge is
-      // RAIL_TOP_GAP_VP = 24 vp below the rail's top) and the destination block
-      // follows the connection block immediately, one seam + its own top padding
-      // under it (RAIL_DESTINATION_GAP_VP = 9 vp). What slack remains belongs below
-      // the nav; nothing floats in the middle any more.
-      //
-      // The alternative in the brief (nav pinned to the bottom, ~24 vp under it)
-      // is NOT taken: that is the I2 shape whose middle void the I4 review named,
-      // and it would put the two destinations ~200 vp away from the connect
-      // command they belong to. See RAIL_TOP_GAP_VP's comment in the module.
+      // 0.0.42 (I7) §1 — THE OWNER'S TWO DECISIONS IN ONE COLUMN: the connection
+      // content stays TOP-ANCHORED (I6) and the 对端/设置 block is PINNED TO THE
+      // BOTTOM with 24 vp under it (RAIL_NAV_BOTTOM_PADDING_VP).
+      //   * top — unchanged from I6: the wordmark's top edge is RAIL_TOP_GAP_VP =
+      //     24 vp below the rail's top (the page padding 16 + the wordmark's 8);
+      //   * middle — ONE layoutWeight(1) spacer carries the whole slack, placed
+      //     AFTER the connection block, so the empty space ends up between the
+      //     connection content and the nav. That is the owner's explicit choice;
+      //   * bottom — the 1 vp region seam, the destination block (8 vp pad + two
+      //     48 vp rows + 4 vp) and the 24 vp bottom padding.
+      // I6's "content then nav immediately below" arrangement is gone, and I4's
+      // shape (two EQUAL spacers around the content, i.e. vertical centring) is NOT
+      // re-introduced: there is exactly ONE spacer, below the content, none above.
+      // The card→row distance is therefore RAIL_DESTINATION_GAP_VP (9 vp) at its
+      // MINIMUM and 9 vp + the spacer in every window that has slack.
       //
       // A SHORT window does not regress: the ceiling below is measured against the
-      // RAIL's height (railConnectionMaxHeight → railConnectionMaxHeightVp), not
-      // against a leftover, so the connection region's own Scroll gives way and
-      // the destination block keeps its 121 vp. Removing the spacers does not touch
-      // that arithmetic — they were only spending the slack.
+      // RAIL's height (railConnectionMaxHeight → railConnectionMaxHeightVp) and that
+      // budget now includes the pinned nav's 24 vp bottom padding, so the connection
+      // region's own Scroll gives way first and the nav is never pushed out or
+      // clipped; the weighted spacer collapses to 0 before anything else moves.
       //
       // The identity block stays a DIRECT child of the rail: it was a percentage cap
       // in I4, and a percentage resolves against the PARENT's height — nested one
@@ -6895,10 +6896,17 @@ struct Index {
       .width('100%')
       .height('auto')
       .constraintSize({ maxHeight: this.railConnectionMaxHeight() })
+      // 0.0.42 (I7) §1: the rail's ONE flexible spacer — all of the slack, between
+      // the connection content above and the pinned nav below. Deliberately the only
+      // weighted child: a second one above the content would centre it again (I4).
+      Column()
+        .width('100%')
+        .layoutWeight(1)
       // Region boundary (0.0.37): the connection block above is the app's live
       // state and scrolls on its own; the navigation block below never moves. The
       // 1 vp role stroke is what makes the two regions read as two groups instead
-      // of one column of text.
+      // of one column of text. 0.0.42 (I7) §1 keeps it directly above the nav — it
+      // is the pinned block's own top edge, not a rule left floating under the card.
       Row() {
         Row()
           .width('100%')
@@ -6926,23 +6934,26 @@ struct Index {
 
   @Builder
   railDestinations() {
-    // The rail's NAVIGATION BLOCK. Placed directly under the connection block,
-    // which is the deliberate relationship: the connection surface owns the top of
-    // the column — it is the app's identity and the one thing that must never
-    // scroll away — while the first-level destinations keep a stable position under
-    // the 1 vp boundary above. 0.0.41 (I6) §1 restored that immediacy: the two
-    // centring spacers I4 had wrapped around the identity block are gone, so the
-    // block is 9 vp (RAIL_DESTINATION_GAP_VP) under the connection card instead of
-    // the owner-measured ~340 px.
+    // The rail's NAVIGATION BLOCK, PINNED TO THE BOTTOM of the rail (0.0.42 (I7)
+    // §1, the product owner's choice over I6's "nav directly under the content").
+    // The deliberate relationship is unchanged in spirit: the connection surface
+    // owns the TOP of the column — it is the app's identity and the one thing that
+    // must never scroll away — while the first-level destinations keep a stable,
+    // thumb-reachable position at the block's other end, 24 vp
+    // (RAIL_NAV_BOTTOM_PADDING_VP) above the rail's bottom edge. The space that
+    // separates the two groups is the rail's slack, carried by the ONE
+    // layoutWeight(1) spacer in connectionRail, so the void sits BETWEEN them and
+    // never above the wordmark (I4's centring) nor under the nav (I6).
     //
     // 0.0.40 (I5) §6 (review §6, agreed with the product owner before this run):
     // the 导航 CAPTION IS GONE. It named a group of exactly two rows and cost a
     // text line plus 4 vp in a 240 vp column; the 1 vp boundary above already says
     // "another region starts here" and the rows say what they are. What it leaves
     // behind is the row geometry, which now comes from the module's own numbers
-    // (RAIL_NAV_ROW_HEIGHT_VP / RAIL_NAV_ROW_GAP_VP / the two paddings) — the same
-    // numbers RAIL_DESTINATIONS_HEIGHT_VP sums to 121 vp, i.e. the space the
-    // connection region's ceiling is measured against.
+    // (RAIL_NAV_ROW_HEIGHT_VP / RAIL_NAV_ROW_GAP_VP / the two paddings plus I7's
+    // 24 vp bottom padding) — the same numbers RAIL_DESTINATIONS_HEIGHT_VP sums to
+    // 133 vp, i.e. the space the connection region's ceiling is measured against,
+    // which is what keeps this block on screen in a short window.
     //
     // 48 vp rows with a 3 vp selected accent bar (a clear selected state that does
     // not depend on colour alone), a hover tint from the framework's own
@@ -7051,9 +7062,12 @@ struct Index {
     // card padding, so the accent bar is at the block edge and its label 13 vp later
     // lands on the same 32 vp the card's text does. I5 removed the caption that used
     // to add RAIL_CARD_PADDING_VP back on top of this; the label's axis is unchanged.
+    // 0.0.42 (I7) §1: the bottom padding is the OWNER's 24 vp
+    // (RAIL_NAV_BOTTOM_PADDING_VP) — the pinned block's distance to the rail's
+    // bottom edge, and part of the ceiling's bottom-region budget.
     .padding({
       left: RAIL_DESTINATIONS_PADDING_VP, right: RAIL_DESTINATIONS_PADDING_VP,
-      top: RAIL_DESTINATIONS_PAD_TOP_VP, bottom: RAIL_DESTINATIONS_PAD_BOTTOM_VP
+      top: RAIL_DESTINATIONS_PAD_TOP_VP, bottom: RAIL_NAV_BOTTOM_PADDING_VP
     })
   }
 
