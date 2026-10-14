@@ -4343,11 +4343,17 @@ struct Index {
           .fontColor($r('app.color.nb_on_primary'))
           .width(this.connectButtonSize())
           .height(this.connectButtonSize())
-          .borderRadius(this.connectButtonSize() / 2)
-          .backgroundColor($r('app.color.nb_primary'))
-          .border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })
+          // The ring is written with the GRANULAR attributes, and the radius is set
+          // LAST: a composite `.border({width, color})` makes the platform fall back
+          // to the component's default corner radius, which turned this disc into a
+          // rounded SQUARE in the 19:45 device capture (the design's circle is
+          // settled — the review keeps the 104 vp size and the shape).
+          .borderWidth(CONNECT_RING_WIDTH_VP)
+          .borderColor(this.stateColor())
           .hoverEffect(HoverEffect.Highlight)
           .focusable(true)
+          .borderRadius(this.connectButtonSize() / 2)
+          .backgroundColor($r('app.color.nb_primary'))
           .enabled(this.toggleEnabled())
           .onClick(() => {
             // 2026-10-12 upstream tap handling (HomeFragment.java:164-201): a tap
@@ -6645,28 +6651,32 @@ struct Index {
       // navigation group follows the card immediately instead of sitting at the
       // bottom of a stretched column.
       //
-      // 0.0.39 (I4) P1.8 (the review's §1.2 option a): the identity block is now
-      // CENTRED vertically in the space above the navigation block, and the
-      // navigation block is pinned at the bottom of the rail. I3's nav-up fix
-      // removed the I2 gap but moved the whole void below the nav; centring the
-      // identity block puts the rail's slack around the block it belongs to
-      // (equal above and below), which is what "the dead middle third disappears"
-      // means here. The centring wrapper carries layoutWeight(1) — the ONLY weight
-      // in the rail — so the navigation group that follows it is pushed to the
-      // bottom. The cap stays the safety valve: RAIL_CONNECTION_MAX_HEIGHT_PCT of
-      // the region, so a short window scrolls the connection block (it keeps its
+      // 0.0.39 (I4) P1.8 (the review's §1.2 option a, verbatim): the identity block
+      // is CENTRED vertically in the space above the navigation block and the
+      // navigation block stays at the bottom of the rail, wrapped between two EQUAL
+      // layoutWeight(1) spacers. I3's nav-up fix removed the I2 gap but moved the
+      // whole void below the nav; the spacers put the rail's slack around the block
+      // it belongs to, which is what "the dead middle third disappears" means here.
+      //
+      // The identity block stays a DIRECT child of the rail (not a child of a
+      // weighted wrapper): RAIL_CONNECTION_MAX_HEIGHT_PCT is a percentage, and it
+      // has to resolve against the RAIL's height — nested one level deeper it
+      // resolved against the leftover space instead and the block's own Scroll
+      // clipped the 详细状态 entry (caught in the 19:45 device capture). The cap is
+      // the safety valve: a short window scrolls the connection block (it keeps its
       // own Scroll) instead of pushing the 导航 group out of the bottom.
-      Column() {
-        Column() {
-          this.homeTab()
-        }
+      Column()
         .width('100%')
-        .height('auto')
-        .constraintSize({ maxHeight: this.railConnectionMaxHeight() })
+        .layoutWeight(1)
+      Column() {
+        this.homeTab()
       }
       .width('100%')
-      .layoutWeight(1)
-      .justifyContent(FlexAlign.Center)
+      .height('auto')
+      .constraintSize({ maxHeight: this.railConnectionMaxHeight() })
+      Column()
+        .width('100%')
+        .layoutWeight(1)
       // Region boundary (0.0.37): the connection block above is the app's live
       // state and scrolls on its own; the navigation block below never moves. The
       // 1 vp role stroke is what makes the two regions read as two groups instead

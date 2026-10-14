@@ -398,7 +398,7 @@ try {
     pageSource.includes('return this.forceCancelOpen;') &&
     pageSource.includes('if (this.forceCancelOpen) {') &&
     pageSource.includes('this.forceCancelConnection();') &&
-    pageSource.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })') &&
+    pageSource.includes('.borderColor(this.stateColor())') &&
     forceCancel.includes('this.requestStop();'));
   check('P12 the official state set replaced our invented failure labels',
     typeof ui['engineReportState'] === 'function' &&

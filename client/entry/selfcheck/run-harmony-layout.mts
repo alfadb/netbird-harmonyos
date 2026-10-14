@@ -810,7 +810,7 @@ try {
       return card.indexOf('if (this.diagnosticsNoteOpen) {') > 0 &&
         card.indexOf('if (this.diagnosticsNoteOpen) {') < card.indexOf('滚动保留：');
     })());
-  check('E: the rail centres the identity block and pins the nav block at the bottom',
+  check('E: the rail centres the identity block between two spacers, nav at the bottom',
     PAGE.includes('private homeBodyHeight(): Length {') &&
     PAGE.includes("return this.wideLayout() ? 'auto' : '100%';") &&
     PAGE.includes('.height(this.homeBodyHeight())') &&
@@ -818,14 +818,19 @@ try {
     (() => {
       const rail = PAGE.slice(PAGE.indexOf('connectionRail() {'),
         PAGE.indexOf('railDestinations() {'));
-      // 0.0.39 (I4) DELIBERATE UPDATE: the rail now carries exactly ONE
-      // layoutWeight(1) — the centring wrapper around the identity block, which is
-      // what pushes the navigation group to the bottom (the review's §1.2 option a).
+      // 0.0.39 (I4): the review's §1.2 option (a) — TWO equal layoutWeight(1)
+      // spacers around the identity block, which keeps the block a DIRECT child of
+      // the rail so RAIL_CONNECTION_MAX_HEIGHT_PCT resolves against the RAIL. Nested
+      // inside a weighted wrapper it resolved against the leftover space and the
+      // block's Scroll clipped the 详细状态 entry (19:45 device capture).
+      const spacers = rail.match(/Column\(\)\s*\n?\s*\.width\('100%'\)\s*\n?\s*\.layoutWeight\(1\)/g) ?? [];
+      const nested = /Column\(\)\s*\{\s*Column\(\)/;
       return rail.includes('.height(\'auto\')') &&
         rail.includes('.constraintSize({ maxHeight: this.railConnectionMaxHeight() })') &&
-        (rail.match(/\.layoutWeight\(1\)/g) ?? []).length === 1 &&
-        rail.indexOf('.layoutWeight(1)') > rail.indexOf('this.homeTab()') &&
-        rail.includes('.justifyContent(FlexAlign.Center)');
+        spacers.length === 2 && !nested.test(rail) &&
+        rail.indexOf('.layoutWeight(1)') < rail.indexOf('this.homeTab()') &&
+        rail.lastIndexOf('.layoutWeight(1)') > rail.indexOf('this.homeTab()') &&
+        rail.indexOf('this.homeTab()') < rail.indexOf('this.railDestinations()');
     })());
   check('E: the 详细状态 row is a proper entry (short subtitle + chevron, no 路… artefact)',
     PAGE.includes("Text('中继 · DNS · 路由 · 流量')") &&
@@ -858,7 +863,15 @@ try {
   check('P0.1: the disc fills with the ACTION role and rings with the STATE role',
     PAGE.includes('private stateColor(): ResourceColor {') &&
     PAGE.includes('.backgroundColor($r(\'app.color.nb_primary\'))') &&
-    PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })') &&
+    // the granular ring attributes with the radius set AFTER them: a composite
+    // `.border({...})` reset the disc to the platform's default corner radius and
+    // rendered a rounded SQUARE on the device (19:45 capture).
+    PAGE.includes('.borderWidth(CONNECT_RING_WIDTH_VP)') &&
+    PAGE.includes('.borderColor(this.stateColor())') &&
+    PAGE.includes('.borderRadius(this.connectButtonSize() / 2)') &&
+    PAGE.indexOf('.borderWidth(CONNECT_RING_WIDTH_VP)') <
+      PAGE.indexOf('.borderRadius(this.connectButtonSize() / 2)') &&
+    !PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP') &&
     !PAGE.includes('private toggleColor()') &&
     !PAGE.includes('private toggleBusy()') &&
     PAGE.includes('return this.wideLayout() ? 104 : 132;') &&

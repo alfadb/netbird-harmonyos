@@ -242,7 +242,8 @@ check('the connect disc fills with the action role and rings with the state role
   toggleColorBody === null &&
   PAGE.includes('.backgroundColor($r(\'app.color.nb_primary\'))') &&
   PAGE.includes('.fontColor($r(\'app.color.nb_on_primary\'))') &&
-  PAGE.includes('.border({ width: CONNECT_RING_WIDTH_VP, color: this.stateColor() })'));
+  PAGE.includes('.borderColor(this.stateColor())') &&
+  PAGE.includes('.borderWidth(CONNECT_RING_WIDTH_VP)'));
 const toneBody = PAGE.match(/private logExportToneColor\(\): ResourceColor \{[\s\S]*?\n  \}/);
 check('log-export tone uses success/warning/error/primary roles',
   toneBody !== null &&
