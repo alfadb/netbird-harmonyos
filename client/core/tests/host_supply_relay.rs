@@ -334,9 +334,17 @@ fn relay_dial_without_any_supply_stays_fail_closed() {
 
 /// Pre-image 2 (the actual 0048 host-side failure): the supply IS attached —
 /// `connector.rs` passes it into `RelayMaterials` — but with no installed DNS
-/// servers a HOSTNAME relay URL dies at the protected resolver, BEFORE any
-/// supply request is raised. That is why a frozen log can carry 840 `[n1b]`
-/// lines and zero `socket-supply: request` lines.
+/// servers a HOSTNAME relay URL dies at the resolver, BEFORE any supply request
+/// is raised. That is why a frozen log can carry 840 `[n1b]` lines and zero
+/// `socket-supply: request` lines.
+///
+/// 0.0.34 update (protected-DNS outage REPORT.md §5 N2): the protected list
+/// being empty no longer ENDS the lookup — the chain then tries the OS
+/// resolver, which for `relay.invalid` also fails (a reserved TLD), so the dial
+/// is still refused and still raises no supply request. What changed is only
+/// the token the refusal carries: one aggregate that names every stage that
+/// failed (`dns:fallbacks-exhausted protected=dns:no-physical-server
+/// os=dns:os-resolver-failed: …`) instead of the first stage alone.
 #[test]
 fn hostname_relay_url_without_dns_servers_fails_at_the_resolver() {
     let _guard = supply_lock();
@@ -350,9 +358,19 @@ fn hostname_relay_url_without_dns_servers_fails_at_the_resolver() {
             Ok(_) => panic!("no dns servers must fail at the resolver"),
             Err(e) => e,
         };
+        // The empty list is still REPORTED as the protected path's reason ...
+        let text = format!("{err}");
         assert!(
-            format!("{err}").contains("dns:no-physical-server"),
-            "typed resolver token: {err}"
+            text.contains("dns:no-physical-server"),
+            "the pre-0.0.34 token survives inside the aggregate: {text}"
+        );
+        assert!(
+            text.contains("dns:fallbacks-exhausted") && text.contains("dns:os-resolver-failed"),
+            "the aggregate names every failed stage: {text}"
+        );
+        assert!(
+            supply.last_known_address("relay.invalid").is_none(),
+            "a failed lookup must remember nothing"
         );
         assert!(
             supply.poll_request().is_none(),

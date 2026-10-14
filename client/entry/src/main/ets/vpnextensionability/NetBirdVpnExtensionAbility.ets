@@ -858,6 +858,34 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private networkEpoch: number = 1;
   private networkNetId: number = 0;
   private networkDirty: boolean = false;
+  // 0.0.34 (protected-DNS outage REPORT.md §5 N1): the retry latch is SEPARATE
+  // from the `networkDirty` bookkeeping. It is armed by a switch AND by a failed
+  // recovery attempt (a failure must never stop the retries), and released only
+  // when a recovery completed or the data plane is observed flowing again. It
+  // is bookkeeping for the RETRY, never a socket gate: the supply gate stays the
+  // instantaneous `physicalDefaultNetId() === 0` probe (0.0.28 F1).
+  private recoveryRetryArmed: boolean = false;
+  // N1(iii): the outcome logging of the CURRENT attempt — the count is what
+  // makes the next capture able to say "attempt N of this outage aborted here
+  // after X ms" instead of inferring it from abort spacing.
+  private recoveryAttemptStartedMs: number = 0;
+  private recoveryAttemptCount: number = 0;
+  // N1(ii): what the EXISTING 5 s status poll last said about the connector.
+  // `connectorFlowingNow` = the tunnel is actually up and the WG device is up
+  // (traffic can flow); `connectorDownSinceMs` = when it was first seen NOT
+  // flowing (-1 = flowing, or never observed). Both are updated from the status
+  // read the watcher already performs — no new timer, no extra core call.
+  private connectorFlowingNow: boolean = false;
+  private connectorDownSinceMs: number = -1;
+  // N1(ii): the last connector state the poll reported. The health gate needs
+  // "the tunnel is broken and needs recovery", so only `reconnecting`/`failed`
+  // arm it: `connecting` is a normal (possibly slow) startup and `disconnected`
+  // is a deliberate user stop — rebuilding the data plane under either would be
+  // wrong. '' = no status observed yet.
+  private connectorStateNow: string = '';
+  // N1(ii): de-duplicates the cheap "already flowing" attempt outcome so a
+  // healthy tunnel does not print one line per tick.
+  private lastRecoveryOutcome: string = '';
   // F4 callback semantics (REPORT.md §5): the first observation after
   // `watchPhysicalNetwork()` subscribes is not a switch, and the capability set
   // of the default handle is the dedupe key for a capability-change trigger.
@@ -1566,6 +1594,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (!switched) { return; }
     this.networkNetId = netId;
     this.networkDirty = true;
+    // N1(i): a measured switch arms the retry for as long as the recovery has
+    // not completed — the latch a failed attempt must keep (REPORT.md §2.3).
+    this.recoveryRetryArmed = true;
     this.networkEpoch++;
     // 2026-10-08: the physical loss/switch edge as ONE persistent record
     // (mode=network-lost|redial). The shell hilog line above is not part of
@@ -1726,8 +1757,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // wg-protect | wg-feed | management-address | dns-feed | ice-mux |
   // signal-resolve | signal-socket-open | signal-feed | spare-socket.
   private recoveryAbort(stage: string, netId: number, epoch: number): void {
+    // N1(i): a FAILED attempt re-arms the retry. `networkDirty` already stays
+    // true across a failure, but the retry must not depend on that single latch
+    // — an attempt started by the health gate (or one whose switch edge was
+    // consumed) would otherwise be the last one ever made.
+    this.recoveryRetryArmed = true;
+    this.lastRecoveryOutcome = `aborted:${stage}`;
+    // N1(iii): each attempt's outcome now carries the attempt ordinal and, for
+    // this failure, the elapsed time since the attempt started — the figures
+    // the next capture needs to measure the retry loop instead of inferring it
+    // from the spacing of these lines (REPORT.md §2.3).
+    const elapsed: number = this.recoveryAttemptStartedMs > 0 ?
+      Date.now() - this.recoveryAttemptStartedMs : -1;
     const line: string = `VPN_NETWORK_RECOVERY_ABORT|stage=${stage}|netId=${String(netId)}|` +
-      `epoch=${String(epoch)}|requestId=${this.requestId}`;
+      `epoch=${String(epoch)}|requestId=${this.requestId}|attempt=${String(this.recoveryAttemptCount)}|` +
+      `elapsedMs=${String(elapsed)}`;
     hilog.warn(DOMAIN, TAG, '%{public}s', line);
     this.n2RingAppend(line);
     this.diagLifecycleMarker('VPN_NETWORK_RECOVERY_ABORT', `stage=${stage}`);
@@ -1746,15 +1790,33 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // create leg settled (`networkRecoveryReady`). Tolerant of a throttled tick:
   // the ROM starves extension ArkTS (gaps up to 599 s, REPORT.md §6.4), so the
   // bound is a timestamp, not a count — a late tick still gets its attempt.
+  //
+  // 0.0.34 (REPORT.md §5 N1): the trigger is HEALTH-gated, not edge-gated. The
+  // 0.0.33 capture's window 3 (07:29–07:47, 18 m 13 s) had ZERO recovery
+  // attempts — `networkDirty` was false because the previous recovery had
+  // completed, so every tick returned here — while the connector sat in
+  // `reconnecting` and protected DNS was still refused. Two honest reasons to
+  // keep retrying now: (i) the retry latch a switch or a failed attempt armed,
+  // and (ii) the connector has been observed NOT connected past the same floor,
+  // which the existing 5 s status poll already measures. This is the report's
+  // "retry while `networkDirty` or the connector has been non-connected for
+  // longer than the floor"; it is still cheap (a gate check on an existing
+  // tick) and it never touches the socket-supply gate, which stays the
+  // instantaneous `physicalDefaultNetId() === 0` probe (0.0.28 F1).
   private retryPhysicalNetworkRecovery(): void {
-    if (!this.networkDirty || this.destroyRequested || this.networkRecoveryActive ||
+    if (this.destroyRequested || this.networkRecoveryActive ||
       this.recreateInFlight || !this.networkRecoveryReady) {
+      return;
+    }
+    const now: number = Date.now();
+    const unhealthy: boolean = this.connectorNeedsRecovery() && this.connectorDownSinceMs > 0 &&
+      now - this.connectorDownSinceMs >= PHYSICAL_RECOVERY_RETRY_MIN_MS;
+    if (!this.recoveryRetryArmed && !unhealthy) {
       return;
     }
     if (this.n2CdProductionBlocked() || physicalDefaultNetId() === 0) {
       return;
     }
-    const now: number = Date.now();
     if (now - this.recoveryRetryAtMs < PHYSICAL_RECOVERY_RETRY_MIN_MS) {
       return;
     }
@@ -1762,6 +1824,33 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.recoverPhysicalNetwork().catch((error: Error): void => {
       this.n2NetworkRecoveryFail(error);
     });
+  }
+
+  // N1(ii): the cheap "the VPN is connected and traffic flows" reading of the
+  // EXISTING status poll. Not a gate on the retry (the retry stays armed while
+  // the outcome is unknown), but the reason a healthy tunnel resolves the retry
+  // in one cheap step instead of blocking it or rebuilding a working data plane.
+  private noteConnectorHealth(status: ConnectorStatusResult): void {
+    const flowing: boolean = status.running === true && status.state === 'connected' &&
+      status.wg !== undefined && status.wg !== null && status.wg.device_up === true;
+    this.connectorFlowingNow = flowing;
+    this.connectorStateNow = status.state;
+    if (flowing) {
+      this.connectorDownSinceMs = -1;
+    } else if (this.connectorDownSinceMs < 0) {
+      this.connectorDownSinceMs = Date.now();
+    }
+  }
+
+  // N1(ii): "the tunnel is broken and owes a recovery" — the health half of the
+  // retry gate. `reconnecting` is the 0.0.33 window-3 state (the connector had
+  // declared itself disconnected and healed only when protected DNS worked
+  // again, 18 m 13 s later, with ZERO recovery attempts because the edge latch
+  // was clear); `failed` is the terminal-ish state before the connector-death
+  // teardown. `connecting` (a slow, healthy startup) and `disconnected` (a user
+  // stop) deliberately do NOT arm it.
+  private connectorNeedsRecovery(): boolean {
+    return this.connectorStateNow === 'reconnecting' || this.connectorStateNow === 'failed';
   }
 
   private async recoverPhysicalNetwork(): Promise<void> {
@@ -1778,8 +1867,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.networkRecoveryActive = true;
+    // N1(iii): one ordinal per ATTEMPT (not per tick — a tick inside the floor
+    // never gets here), plus its start timestamp. `recoveryAbort` and the
+    // recovered line both report them, so the next capture can measure one
+    // attempt instead of inferring its duration from abort spacing.
+    this.recoveryAttemptStartedMs = Date.now();
+    this.recoveryAttemptCount++;
     let attemptEpoch: number = 0;
     try {
+      // N1(ii): the data plane is already flowing and no switch edge is
+      // pending — there is nothing to rebuild. Cheap: no socket, no protect, no
+      // resolve, no mux re-arm. The retry latch is released because the GOAL
+      // state (traffic flows) is already true, and the outcome is logged once
+      // per transition so a healthy tunnel prints nothing per tick.
+      if (!this.networkDirty && this.connectorFlowingNow) {
+        this.recoveryRetryArmed = false;
+        if (this.lastRecoveryOutcome !== 'already-flowing') {
+          this.lastRecoveryOutcome = 'already-flowing';
+          const flowingLine: string = `VPN_NETWORK_RECOVERY_ATTEMPT|requestId=${this.requestId}|` +
+            `attempt=${String(this.recoveryAttemptCount)}|netId=${String(this.networkNetId)}|` +
+            `epoch=${String(this.networkEpoch)}|result=already-flowing`;
+          hilog.info(DOMAIN, TAG, '%{public}s', flowingLine);
+          this.n2RingAppend(flowingLine);
+        }
+        return;
+      }
       do {
         attemptEpoch = this.networkEpoch;
         if (this.n2CdProductionBlocked(attemptEpoch)) { break; }
@@ -1894,8 +2006,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         this.networkDirty = false;
+        // N1(i): the goal state is reached, so the retry is released HERE (or
+        // by the already-flowing guard above) and nowhere else.
+        this.recoveryRetryArmed = false;
+        this.lastRecoveryOutcome = 'recovered';
         const recoveredLine: string = `VPN_NETWORK_RECOVERED|requestId=${this.requestId}|` +
-          `netId=${String(netId)}`;
+          `netId=${String(netId)}|attempt=${String(this.recoveryAttemptCount)}|` +
+          `elapsedMs=${String(this.recoveryAttemptStartedMs > 0 ?
+            Date.now() - this.recoveryAttemptStartedMs : -1)}`;
         hilog.info(DOMAIN, TAG, '%{public}s', recoveredLine);
         this.n2RingAppend(recoveredLine);
         const milestoneFields: DiagFields = { 'net': netId };
@@ -5134,6 +5252,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const status: ConnectorStatusResult | null = pollStatusOrNull();
       if (status !== null) {
         this.statusPollFailures = 0;
+        // N1(ii): the SAME status document the tick already holds feeds the
+        // health gate of `retryPhysicalNetworkRecovery` (next tick reads it) —
+        // one function call, no new timer, no second core call.
+        this.noteConnectorHealth(status);
         const errorClass: string =
           status.last_error !== null && status.last_error !== undefined
             ? status.last_error.class
@@ -6179,8 +6301,42 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         reason = 'socket-open';
         return;
       }
-      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd,
+      const netIdAtProtect: number = this.networkNetId;
+      let protectedOk: boolean = await this.protectSocketWithBox(connection, fd,
         isDns ? 'D' : request.purpose === 'relay' ? 'R' : request.purpose === 'signal' ? 'S' : 'M', request.id);
+      // N5 (0.0.34, protected-DNS outage REPORT.md §5): the protect mark,
+      // OBSERVED. The SDK has no read-back for a protected descriptor — the
+      // only APIs are the write side: `VpnConnection.protect(socketFd)`
+      // (@ohos.net.vpnExtension.d.ts:244) and `protectProcessNet()` (:275),
+      // plus `NetHandle.bindSocket(socket: TCPSocket|UDPSocket)`
+      // (@ohos.net.connection.d.ts:1710), which takes a socket OBJECT and also
+      // only SETS a binding. Neither namespace exposes "is this fd protected"
+      // or "which netId is its mark on".
+      //
+      // The observable half implemented here: record the generation the protect
+      // was ISSUED at and read it back against the live generation at handoff.
+      // If the generation moved while `protect()` was in flight — the H1 shape
+      // (a resolved protect whose mark no longer matches the live network) —
+      // re-protect the same fd once before deciding. Only the protected-DNS
+      // purpose is re-protected: that lookup is one standalone datagram whose
+      // only generation dependency IS the egress mark, so a refreshed mark is
+      // strictly better than refusing it. A management/signal/relay dial keeps
+      // the existing fail-closed `network-epoch` refusal (its resolved address
+      // and route belong to the generation the request was made for).
+      let mark: string = epoch === this.networkEpoch ? 'generation-match' : 'generation-moved';
+      if (protectedOk && isDns && epoch !== this.networkEpoch) {
+        protectedOk = await this.protectSocketWithBox(connection, fd, 'D', request.id);
+        mark = protectedOk ? 'reprotect-ok' : 'reprotect-failed';
+      }
+      if (isDns) {
+        // One line per protected-DNS supply (~200 per 8 h), the observable
+        // replacement for the read-back the platform does not offer.
+        const markLine: string = `VPN_PROTECT_MARK|id=${request.id}|fd=${String(fd)}|` +
+          `protectGeneration=${String(epoch)}|liveGeneration=${String(this.networkEpoch)}|` +
+          `protectNetId=${String(netIdAtProtect)}|mark=${mark}|readback=none`;
+        hilog.info(DOMAIN, TAG, '%{public}s', markLine);
+        this.n2RingAppend(markLine);
+      }
       const postReason: string = socketSupplyRejectionReason({
         networkUnusableNow: physicalDefaultNetId() === 0,
         networkRecoveryReady: this.networkRecoveryReady,
@@ -6190,11 +6346,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         protectDeviation: this.protectDeviationRouteExclusion,
         productionGateBlocked: this.n2CdProductionBlocked()
       });
-      if (protectedOk && epoch === this.networkEpoch && postReason.length === 0) {
+      const epochOk: boolean = epoch === this.networkEpoch || mark === 'reprotect-ok';
+      if (protectedOk && epochOk && postReason.length === 0) {
         result = 'protected';
       } else {
         result = 'protect-failed';
-        reason = epoch !== this.networkEpoch ? 'network-epoch' :
+        reason = !epochOk ? 'network-epoch' :
           postReason.length > 0 ? postReason : 'protect-failed';
       }
     } catch (error) {

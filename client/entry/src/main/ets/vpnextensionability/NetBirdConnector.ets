@@ -688,12 +688,21 @@ export interface ProtectedDnsResult {
   ip?: string;
 }
 
+// 0.0.34 (protected-DNS outage REPORT.md §5 N2): the core's lookup is no longer
+// one protected query — it is the fallback CHAIN (protected attempt → one
+// transient retry → the OS resolver, bounded core-side at 3 s → the
+// last-known-good address). The shell must not discard a chain that is still
+// finishing: the poll window is the chain's worst case, not one query's
+// (`protected_dns.rs` QUERY_TIMEOUT 1.5 s per server + OS_RESOLVE_TIMEOUT 3 s).
+const PROTECTED_DNS_POLL_MS: number = 100;
+const PROTECTED_DNS_POLL_ATTEMPTS: number = 100;
+
 export async function resolveProtectedIp(host: string): Promise<string> {
   if (isIPv4Literal(host)) { return host; }
   const started: ProtectedDnsResult = JSON.parse(core.connector_protected_dns_start(host)) as ProtectedDnsResult;
   if (!started.ok || started.id === undefined) { return ''; }
-  for (let attempt = 0; attempt < 50; attempt++) {
-    await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 100); });
+  for (let attempt = 0; attempt < PROTECTED_DNS_POLL_ATTEMPTS; attempt++) {
+    await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, PROTECTED_DNS_POLL_MS); });
     const result: ProtectedDnsResult = JSON.parse(core.connector_protected_dns_poll(started.id)) as ProtectedDnsResult;
     if (!result.ok) { return ''; }
     if (!result.pending) { return result.ip ?? ''; }

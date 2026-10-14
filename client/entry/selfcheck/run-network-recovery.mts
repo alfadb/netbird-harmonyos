@@ -208,6 +208,31 @@ const WATCHER_STATUS: Record<string, unknown> = {
   reconnects: 0, terminal: false, wg: { device_up: true, ready: true }
 };
 
+// N5 (0.0.34): park the n-th protect() of the fixture's FakeConnection (the
+// helper run-route-apply-vpe.mts uses) so the window between "protect issued"
+// and "protect settled" is steerable — the ONLY window in which the protected
+// socket's generation can move under the await.
+function parkProtectAt(n: number): void {
+  G['__NB_PROTECT_PARK_AT'] = n;
+  G['__NB_PROTECT_PARKED'] = undefined;
+}
+function parkedProtect(): Record<string, unknown> | null {
+  const parked: unknown = G['__NB_PROTECT_PARKED'];
+  return parked === undefined || parked === null ? null : parked as Record<string, unknown>;
+}
+async function waitProtectParked(): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    await sleepMs(10);
+    if (parkedProtect() !== null) { return; }
+  }
+}
+function releaseParkedProtect(): void {
+  const parked: Record<string, unknown> | null = parkedProtect();
+  G['__NB_PROTECT_PARK_AT'] = undefined; // every later protect resolves as always
+  G['__NB_PROTECT_PARKED'] = undefined;
+  if (parked !== null) { (parked['resolve'] as () => void)(); }
+}
+
 try {
   const dir = mkdtempSync(join(tmpdir(), 'nb-net-recovery-'));
   for (const name of STAGED) {
@@ -434,7 +459,17 @@ try {
   check('D6 the retry can never overlap, gate, or fire onto a gone network',
     extText.includes('this.recreateInFlight || !this.networkRecoveryReady) {') &&
     extText.includes('this.n2CdProductionBlocked() || physicalDefaultNetId() === 0') &&
-    extText.includes('if (!this.networkDirty || this.destroyRequested || this.networkRecoveryActive ||'));
+    extText.includes('if (!this.recoveryRetryArmed && !unhealthy) {'));
+  // 0.0.34 N1 (protected-DNS outage REPORT.md §5): the retry is HEALTH-gated —
+  // the edge latch is a reason to try, never the only one — and the socket gate
+  // stays the instantaneous platform probe (0.0.28 F1 is NOT regressed).
+  check('D7 the retry gate is health-gated (N1) and the supply gate stays instantaneous',
+    extText.includes('private connectorNeedsRecovery(): boolean {') &&
+    extText.includes("return this.connectorStateNow === 'reconnecting' || this.connectorStateNow === 'failed';") &&
+    extText.includes('this.noteConnectorHealth(status);') &&
+    extText.includes('const unhealthy: boolean = this.connectorNeedsRecovery() && this.connectorDownSinceMs > 0 &&') &&
+    extText.includes('networkUnusableNow: physicalDefaultNetId() === 0') &&
+    !policyText.includes('recoveryRetryArmed') && !policyText.includes('gate.recoveryRetryArmed'));
 
   // -------------------------------------------------------------------------
   // E. F4: upstream's callback semantics, as far as the HarmonyOS API allows.
@@ -528,6 +563,148 @@ try {
     'UI page module never imported by this harness',
     recoveredC1.indexOf('netId=314') > 0 && !uiText.includes('recoverPhysicalNetwork') &&
     !uiText.includes('watchPhysicalNetwork'));
+
+  // -------------------------------------------------------------------------
+  // H. N1 (0.0.34, protected-DNS outage REPORT.md §5): ONE empty resolution
+  // must not end the recovery. Window 1's 79 aborts each re-armed and retried;
+  // window 3 (18 m 13 s) never even tried because the edge latch was clear.
+  // -------------------------------------------------------------------------
+  seedCellular(514, '10.41.63.59');
+  resetSupply();
+  // A recovery started by an earlier group can still be in flight (its
+  // resolver await is a 100 ms poll), so let it land before the log is read.
+  await sleepMs(300);
+  resetLog();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const n1 = recoveryAbility(mod, 101, FakeConnection);
+  n1['lanRoamArmed'] = false;
+  (n1['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 514, 514);
+  await sleepMs(300);
+  const h1Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '514');
+  check('H1 an empty resolution aborts ONE attempt and names it (attempt=1, elapsedMs present)',
+    h1Aborts.length === 1 && h1Aborts[0].indexOf('|stage=protected-dns|') > 0 &&
+    fieldOf(h1Aborts[0], 'attempt') === '1' && Number(fieldOf(h1Aborts[0], 'elapsedMs')) >= 0,
+    JSON.stringify(h1Aborts));
+  check('H2 the failure RE-ARMS the retry: a failed recovery is not the last one',
+    n1['recoveryRetryArmed'] === true && n1['networkDirty'] === true,
+    JSON.stringify({ armed: n1['recoveryRetryArmed'], dirty: n1['networkDirty'] }));
+  const hTick = watcherTick(n1);
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  resetSupply();
+  resetLog();
+  hTick();
+  await sleepMs(400);
+  const hRecovered = lastLine('VPN_NETWORK_RECOVERED|');
+  check('H3 the NEXT tick retries and recovers: the empty resolution did not end the outage',
+    hRecovered.indexOf('netId=514') > 0 && fieldOf(hRecovered, 'attempt') === '2' &&
+    Number(fieldOf(hRecovered, 'elapsedMs')) >= 0 && n1['recoveryRetryArmed'] === false &&
+    supplyOf('WG_FEED') === 1,
+    JSON.stringify({ recovered: hRecovered, armed: n1['recoveryRetryArmed'],
+      wg: supplyOf('WG_FEED') }));
+
+  // The window-3 shape: the previous recovery COMPLETED (so the edge latch is
+  // clear) and the connector sits in `reconnecting`. The health gate alone must
+  // still retry — this is the 18 m 13 s that had ZERO attempts.
+  seedCellular(514, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  const health = recoveryAbility(mod, 514, FakeConnection);
+  health['lanRoamArmed'] = false;
+  const healthTick = watcherTick(health);
+  health['networkDirty'] = false;
+  health['recoveryRetryArmed'] = false;
+  health['connectorStateNow'] = 'reconnecting';
+  health['connectorDownSinceMs'] = Date.now() - (RETRY_MIN_MS + 5000);
+  healthTick();
+  await sleepMs(400);
+  check('H4 the health gate retries with NO edge latch (window 3: zero attempts -> one recovery)',
+    lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=514') > 0 && supplyOf('WG_FEED') === 1,
+    JSON.stringify({ recovered: lastLine('VPN_NETWORK_RECOVERED|'), wg: supplyOf('WG_FEED') }));
+
+  // N1(ii): "connected and traffic flows" resolves the retry CHEAPLY — the
+  // attempt opens no socket, resolves nothing and re-arms nothing.
+  resetSupply();
+  resetLog();
+  health['networkDirty'] = false;
+  health['recoveryRetryArmed'] = true;
+  health['connectorStateNow'] = 'connected';
+  health['connectorFlowingNow'] = true;
+  health['connectorDownSinceMs'] = -1;
+  health['recoveryRetryAtMs'] = 0;
+  healthTick();
+  await sleepMs(200);
+  const flowingLine = lastLine('VPN_NETWORK_RECOVERY_ATTEMPT|');
+  check('H5 a connected, flowing tunnel resolves the retry cheaply (no socket, no resolve, no rebuild)',
+    flowingLine.indexOf('|result=already-flowing') > 0 && supplyOf('WG_OPEN') === 0 &&
+    supplyOf('DNS_RESOLVE') === 0 && health['recoveryRetryArmed'] === false,
+    JSON.stringify({ flowing: flowingLine, wg: supplyOf('WG_OPEN'), dns: supplyOf('DNS_RESOLVE') }));
+
+  // -------------------------------------------------------------------------
+  // I. N5 (0.0.34): the protect mark is OBSERVED at handoff. The SDK has no
+  // read-back API (only protect()/protectProcessNet()/bindSocket() — all
+  // write-side), so the observable half is: the generation the protect was
+  // issued at, read back against the live one, and a re-protect when it moved.
+  // -------------------------------------------------------------------------
+  seedCellular(514, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  G['__NB_PROTECTED'] = 0;
+  const marked = recoveryAbility(mod, 514, FakeConnection);
+  marked['networkEpoch'] = 7;
+  parkProtectAt(1);
+  const markRequest = (marked['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'mark-d', kind: 'udp', purpose: 'dns' });
+  await waitProtectParked();
+  marked['networkEpoch'] = 8; // the platform moved the generation under the await
+  releaseParkedProtect();
+  await markRequest;
+  const markLine = lastLine('VPN_PROTECT_MARK|');
+  const replyLast = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('I1 a generation that moved under the await is RE-PROTECTED before handoff',
+    markLine.indexOf('|mark=reprotect-ok') > 0 && markLine.indexOf('|protectGeneration=7') > 0 &&
+    markLine.indexOf('|liveGeneration=8') > 0 && markLine.indexOf('|readback=none') > 0 &&
+    Number(G['__NB_PROTECTED'] ?? 0) === 2 && replyLast['result'] === 'protected',
+    JSON.stringify({ mark: markLine, protects: G['__NB_PROTECTED'], reply: replyLast }));
+
+  seedCellular(514, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  G['__NB_PROTECTED'] = 0;
+  const steady = recoveryAbility(mod, 514, FakeConnection);
+  steady['networkEpoch'] = 5;
+  await (steady['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'mark-e', kind: 'udp', purpose: 'dns' });
+  const steadyLine = lastLine('VPN_PROTECT_MARK|');
+  check('I2 an unmoved generation is handed over as-is: one protect, mark=generation-match',
+    steadyLine.indexOf('|mark=generation-match') > 0 && Number(G['__NB_PROTECTED'] ?? 0) === 1,
+    JSON.stringify({ mark: steadyLine, protects: G['__NB_PROTECTED'] }));
+  check('I3 the write-only SDK surface is cited where the observable half lives',
+    extText.includes('@ohos.net.vpnExtension.d.ts:244') &&
+    extText.includes('@ohos.net.connection.d.ts:1710') && extText.includes('readback=none'));
+
+  // -------------------------------------------------------------------------
+  // J. N2/N3 (0.0.34): the core-side chain the shell now relies on. The
+  // behavioural tests live in `client/core/src/protected_dns.rs`; here only the
+  // invariants a shell fixture can read are pinned.
+  // -------------------------------------------------------------------------
+  const pdnsText = readFileSync(join(HERE, '..', '..', 'core', 'src', 'protected_dns.rs'), 'utf8');
+  const iceText = readFileSync(join(HERE, '..', '..', 'core', 'src', 'ice.rs'), 'utf8');
+  check('J1 the chain is ordered protected -> protected-retry -> os-resolver -> last-known-good',
+    pdnsText.indexOf('source=protected-retry') > 0 && pdnsText.indexOf('source=os-resolver') > 0 &&
+    pdnsText.indexOf('source=last-known-good') > 0 &&
+    pdnsText.indexOf('source=protected-retry') < pdnsText.indexOf('source=os-resolver') &&
+    pdnsText.indexOf('source=os-resolver') < pdnsText.indexOf('source=last-known-good') &&
+    pdnsText.indexOf('source=none') > pdnsText.indexOf('source=last-known-good'));
+  check('J2 a syscall-level failure names the call AND keeps the raw OS error (N3)',
+    pdnsText.includes('fn syscall_error(call: &str, error: io::Error) -> io::Error {') &&
+    pdnsText.includes('dns:{call}-failed errno={errno} ({error})'));
+  check('J3 the OS resolver is no longer a hard OHOS error (N2b)',
+    !iceText.includes('return Err(fail("stun:protected-dns-required".into()));'));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

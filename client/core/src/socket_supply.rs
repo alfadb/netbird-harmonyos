@@ -103,6 +103,14 @@ struct State {
 pub struct SocketSupply {
     state: Mutex<State>,
     dns_servers: Mutex<Vec<Ipv4Addr>>,
+    /// N2(c) (0.0.34, protected-DNS outage REPORT.md §5): the LAST address this
+    /// supply successfully resolved for a host. It belongs to the supply — the
+    /// resolution context — rather than to the process, so it dies with the
+    /// installation it was learned on and a host/unit test never inherits
+    /// another test's answer. Only ever consulted as the FINAL fallback of
+    /// [`crate::protected_dns`]'s chain, after the protected path (and its
+    /// retry) and the OS resolver both failed; a live lookup always wins.
+    last_good: Mutex<HashMap<String, Ipv4Addr>>,
 }
 
 struct RequestCleanup<'a> {
@@ -125,6 +133,24 @@ impl SocketSupply {
 
     pub fn dns_servers(&self) -> Vec<Ipv4Addr> {
         self.dns_servers.lock().expect("dns servers").clone()
+    }
+
+    /// N2(c): remember `ip` as the last address this supply resolved for
+    /// `host`. Called by the protected-DNS chain on every successful answer
+    /// (protected, retried-protected or OS-resolver) — never on a guess.
+    pub fn remember_address(&self, host: &str, ip: Ipv4Addr) {
+        if host.is_empty() { return; }
+        self.last_good.lock().expect("last good").insert(host.to_string(), ip);
+    }
+
+    /// N2(c): the last address this supply resolved for `host`, if any.
+    pub fn last_known_address(&self, host: &str) -> Option<Ipv4Addr> {
+        self.last_good.lock().expect("last good").get(host).copied()
+    }
+
+    /// How many hosts have a last-known-good address (observability/tests).
+    pub fn last_known_addresses(&self) -> usize {
+        self.last_good.lock().expect("last good").len()
     }
 
     pub async fn request(&self, purpose: Purpose) -> Result<OwnedFd, SocketSeamError> {

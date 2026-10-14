@@ -803,6 +803,10 @@ impl ProtectedUdpFdSource {
                         }
                     }
                     Err(e) => crate::hilog::emit(&format!(
+                        // N3 (0.0.34): `e` now carries the SYSCALL and the raw
+                        // OS error (`dns:send-failed errno=1 (… os error 1)`)
+                        // alongside the old reason token — the STUN twin of the
+                        // `protected-dns:` result line.
                         "N5c_ICE|stun-dns|host={host}|outcome=failed|reason={e}"
                     )),
                 }
@@ -833,6 +837,7 @@ impl ProtectedUdpFdSource {
             }
             Err(reason) => {
                 crate::hilog::emit(&format!(
+                    // N3 (0.0.34): same per-syscall token as the warm path above.
                     "N5c_ICE|stun-dns|host={host}|outcome=failed|reason={reason}"
                 ));
                 Err(ManagementError::Network(format!("stun-resolve: {reason}")))
@@ -1240,6 +1245,20 @@ type FreeAddrInfo = unsafe extern "C" fn(*const AddrInfo);
 /// handles both). AF_INET + SOCK_DGRAM hint. Absent symbol / failure →
 /// [`ManagementError::Network`] with a stable token (fail-closed: no
 /// address, no STUN query).
+///
+/// 0.0.34 (protected-DNS outage REPORT.md §5 N2b): the OHOS build uses this
+/// path too. It used to return `stun:protected-dns-required` on OHOS, i.e. the
+/// OS resolver was a HARD error there while the protected path was the only
+/// resolver — which is exactly the single point of failure the outage exposed.
+/// It is now the OS-resolver stage of [`crate::protected_dns`]'s fallback
+/// chain (and the no-supply answer of
+/// [`ProtectedUdpFdSource::resolve_on_demand`]). This call BYPASSES
+/// `protect()`: the query leaves on the process's default network, not on a
+/// shell-protected socket. That is the deliberate, upstream-aligned last resort
+/// (upstream resolves STUN/relay names with the OS resolver —
+/// `client/internal/stdnet/stdnet.go:112` — and falls back per DNS query,
+/// `client/internal/dns/upstream.go:279/316/409/645`); it carries a name lookup
+/// only, and the protected path is always tried first.
 pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
     let fail = |tok: String| ManagementError::Network(tok);
     // Numeric IPv4 fast path — no libc round trip for literals (mock tests
@@ -1263,9 +1282,6 @@ pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
             return Ok(addr);
         }
     }
-    #[cfg(target_env = "ohos")]
-    return Err(fail("stun:protected-dns-required".into()));
-    #[cfg(not(target_env = "ohos"))]
     unsafe {
         let libc = dlopen_libc();
         if libc.is_null() {
