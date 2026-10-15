@@ -187,7 +187,8 @@ import {
   PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf,
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
   peerDetailCopyValue, peerDetailIconKind, peerDetailSectionOf, peerFqdnDuplicatesTitle,
-  PEER_LIST_CARD_RADIUS_VP, PEER_ROW_COPY_GLYPH_VP, PEER_ROW_COPY_SLOT_VP,
+  PEER_LIST_CARD_RADIUS_VP, PEER_ROW_CONTENT_PADDING_VP, PEER_ROW_COPY_GLYPH_VP,
+  PEER_ROW_COPY_SLOT_VP, PEER_SEARCH_TEXT_INSET_VP,
   PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
   PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
   PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
@@ -199,7 +200,9 @@ import {
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
   RAIL_WORDMARK_MARGIN_VP,
   railConnectionMaxHeightVp, railInfoValueTextWidthFor, railTrafficVisible,
-  railWidthFor, SECTION_CHEVRON_SLOT_VP, SECTION_HEADER_GAP_VP,
+  railWidthFor, SECTION_CHEVRON_GLYPH_VP, SECTION_CHEVRON_PATH_COLLAPSED,
+  SECTION_CHEVRON_PATH_EXPANDED, SECTION_CHEVRON_SLOT_VP, SECTION_CHEVRON_STROKE_VP,
+  SECTION_HEADER_GAP_VP,
   settingsContentMaxWidthVp, splitPaneWidthVp,
   TYPE_APP_TITLE_FP, TYPE_BODY_FP, TYPE_CAPTION_FP, TYPE_CHEVRON_FP, TYPE_PAGE_TITLE_FP,
   TYPE_SCALE_MAX_DISC, TYPE_SCALE_MAX_ROW, TYPE_SECTION_TITLE_FP, TYPE_STAT_VALUE_FP,
@@ -1331,11 +1334,30 @@ struct DetailSectionHeader {
         .maxLines(1)
         .textAlign(TextAlign.End)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(this.expanded ? '▾' : '▸')
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width(SECTION_CHEVRON_SLOT_VP)
-        .textAlign(TextAlign.Center)
+      // 0.0.47 (I12) §3 — THE MARK IS A DRAWN CHEVRON, 12 vp OF REAL INK.
+      // The I5 slot fixed the ALIGNMENT but kept the Unicode pair ▾/▸ at the caption
+      // size, and the re-review read the result as "仍像很小的针点" while explicitly
+      // rejecting the shortcut ("不要只把容器或字符字号设大而仍显示微小三角"). The
+      // glyph's own ink is a fraction of its em box, so the mark is now a native Path
+      // STROKE: a 12 vp box with a 2 vp round-capped stroke, monochrome in the
+      // secondary role, in the SAME 24 vp slot with the SAME 12 vp gap to the preview.
+      // The expanded/collapsed directions are two command strings in the layout module
+      // (SECTION_CHEVRON_PATH_*), so the geometry is pinned host-side.
+      Row() {
+        Path({
+          width: SECTION_CHEVRON_GLYPH_VP,
+          height: SECTION_CHEVRON_GLYPH_VP,
+          commands: this.expanded ? SECTION_CHEVRON_PATH_EXPANDED
+            : SECTION_CHEVRON_PATH_COLLAPSED
+        })
+          .fill(Color.Transparent)
+          .stroke($r('app.color.nb_text_secondary'))
+          .strokeWidth(SECTION_CHEVRON_STROKE_VP)
+          .strokeLineCap(LineCapStyle.Round)
+          .strokeLineJoin(LineJoinStyle.Round)
+      }
+      .width(SECTION_CHEVRON_SLOT_VP)
+      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .padding({ top: 12, bottom: 8 })
@@ -5204,14 +5226,19 @@ struct Index {
     //     floor plus PEER_ROW_L2_META_COMPACT_VP).
     // The row renders the SAME fields on both shapes, so peerRowKey is unchanged
     // by the condensation.
-    // 0.0.43 (I8) §1/§2 — TWO CONTAINERS, ONE JOB EACH. The OUTER Column is the
-    // row's hit area and owns the HIGHLIGHT INSET: its horizontal padding is
-    // PEER_ROW_HIGHLIGHT_INSET_VP — the SAME 12 vp the list's own content padding
-    // is — so the tint below can never reach the list card's rounded edge. (Up to
-    // 0.0.42 that 12 vp came from the LIST's padding, which is why the highlight
-    // read as a full-width band with square corners.) The INNER Row is the highlight
-    // BLOCK: the selected/hover tint, the 3 vp selection marker and the corner
-    // radius all live on it, so the highlight IS an inset rounded block.
+    // 0.0.47 (I12) §1 — TWO CONTAINERS, ONE JOB EACH, AND THE FILL IS FULL-BLEED.
+    // I8 had made the OUTER Column own the HIGHLIGHT INSET (its horizontal padding was
+    // the list's 12 vp content padding, so the tint could never reach the card's
+    // rounded edge). The owner has now read the 0.0.46 frame and wants the opposite:
+    // the selected/hovered row's background must span the row edge to edge, with the
+    // TEXT still inset by the same padding. So the two containers keep exactly the
+    // same two numbers, swapped: the OUTER Column is the full-width hit area with NO
+    // horizontal padding (the fill therefore spans the list's whole content area), and
+    // the INNER Row — the highlight block, which carries the tint, the 3 vp marker and
+    // the corner radius — pays PEER_ROW_CONTENT_PADDING_VP on the left and right, so
+    // the name/IP keep the exact axis and budget they had. The fill's own radius is 0
+    // (a square band); the LIST clips its ends to the card's 16 vp arc, which is what
+    // keeps a full-bleed first/last row inside the rounded corner.
     // 0.0.45 (I10) — THE TEXT IS THE GLYPHS AGAIN. I8 gave line 1 and line 2 their
     // copy marks but left the name and the IP at `.layoutWeight(1)`: the text BOX ran
     // to the meta column, and the mark landed at the end of the BOX. The owner read
@@ -5221,7 +5248,7 @@ struct Index {
     // its own budget) + COPY_ICON_GAP_VP + its mark], with the tier's trailing pieces
     // (the condensed dot / chip / status) pushed to the row's right edge by
     // `justifyContent(FlexAlign.SpaceBetween)`. Nothing else about the row moves: the
-    // same fields, the same key, the same 64 vp height, the same inset highlight.
+    // same fields, the same key, the same 64 vp height, the same text inset.
     Column() {
       Row({ space: 8 }) {
         // ---- the two-line text block -------------------------------------------
@@ -5396,8 +5423,13 @@ struct Index {
       // 0.0.38 (I3) C: 12 + 12 vp of padding around a 40 vp two-line body is the
       // ≈64 vp compact row; the minHeight keeps that true even in a font whose
       // metrics are shorter, and the row still clears the ≥48 vp pointer/touch
-      // target I2 introduced.
-      .padding({ top: 12, bottom: 12 })
+      // target I2 introduced. 0.0.47 (I12) §1: the 12 vp horizontal padding lives
+      // HERE now — inside the full-bleed fill, on the fill's own node, so the tint
+      // reaches the row's edges while the text keeps its axis.
+      .padding({
+        left: PEER_ROW_CONTENT_PADDING_VP, right: PEER_ROW_CONTENT_PADDING_VP,
+        top: 12, bottom: 12
+      })
       .constraintSize({ minHeight: PEER_ROW_MIN_HEIGHT_VP })
     // 0.0.40 (I5) §3 — THE SELECTED ROW. The ASTRA review read the I4 detail frame
     // and could not tell the row whose detail was open from its neighbours: "该行
@@ -5444,22 +5476,18 @@ struct Index {
     .backgroundColor(this.peerRowSelected(peer)
       ? $r('app.color.nb_row_selected_background')
       : this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background') : Color.Transparent)
-    // 0.0.43 (I8) §1: the OTHER half of "an inset rounded block". The block is
-    // inset by the list's own content padding (the outer Column's padding) and its
-    // corner is rounded, so the highlight cannot read as a band whose square corner
-    // pokes at the card's own 16 vp arc. The radius is bounded below by the
-    // concentric radius (card − inset) and shipped at 12 — the same
-    // octave-below-the-cards radius the search field uses; both numbers are asserted
-    // in run-harmony-layout.mts.
+    // 0.0.47 (I12) §1: the fill's own radius is 0 — a full-bleed band is square. What
+    // keeps it inside the card's rounded corners is the LIST's own clip
+    // (`.clip(true)` on the node that carries PEER_LIST_CARD_RADIUS_VP, see
+    // peerListBody), not a radius here: a 12 vp radius on a 0 vp inset would draw a
+    // rounded band that visibly misses the card's arc at the first and last row.
     .borderRadius(PEER_ROW_HIGHLIGHT_RADIUS_VP)
     }
     .width('100%')
-    // I8 §1: THE INSET. This is the list's own horizontal content padding, applied
-    // by the ROW instead of by the List, so "the highlight respects the list's
-    // padding" is one constant rather than a property of the framework's padding
-    // semantics — and it is the width the row's text budget already subtracts
-    // (peerRowTextWidthVp).
-    .padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })
+    // 0.0.47 (I12) §1: NO horizontal padding on the hit area — that is what makes the
+    // background full-bleed. The 12 vp the row's text is inset by is paid by the fill
+    // itself (PEER_ROW_CONTENT_PADDING_VP, above), so the text axis and the
+    // `peerRowTextWidthVp` budget are exactly what they were under I8.
     // 0.0.37 (I2): pointer affordances on the PC; focusable makes the row reachable
     // in the keyboard tab order. No custom cursor: `mouseStyle` is not in the public
     // API.
@@ -5804,6 +5832,17 @@ struct Index {
             .borderRadius(12)
             .backgroundColor($r('app.color.nb_input_background'))
             .border({ width: 1, color: $r('app.color.nb_card_border') })
+            // 0.0.47 (I12) §2 — THE THIRD AXIS. The field's OUTER edges are already
+            // the list card's (I6 §3), so what the re-review measured was the text
+            // inside it: the placeholder started at the framework's own TextInput
+            // inset. The explicit padding puts the field's text on the SAME axis the
+            // peer names and addresses sit on (PEER_SEARCH_TEXT_INSET_VP = the row's
+            // reserved 3 vp marker + the shared 12 vp content padding) and ends it at
+            // the shared content padding, i.e. the row text region's own two edges. No
+            // new magic number: both terms are the constants the row already spends.
+            .padding({
+              left: PEER_SEARCH_TEXT_INSET_VP, right: PEER_ROW_CONTENT_PADDING_VP
+            })
             .onChange((value: string): void => {
               this.peerQuery = value;
             })
@@ -5864,30 +5903,43 @@ struct Index {
           }
           .width('100%')
           .layoutWeight(1)
-          // 0.0.39 (I4) P2 (review §5.4): the rows of the list are separated by a
-          // hairline INSIDE the card. With the 64 vp two-line rows the whitespace-
-          // only separation the review saw in frame 1 stopped reading as rows at
-          // all; the divider uses the same card stroke the card's own edge does, so
-          // no new colour enters the system and the card's edge stays clean.
-          .divider({ strokeWidth: 1, color: $r('app.color.nb_card_border'),
-            startMargin: 0, endMargin: 0 })
-          // 0.0.43 (I8) §1: the card's radius is the NAMED constant now, because the
-          // highlight block's corner is bounded against this exact number (the
-          // block is inset by the content padding and its radius has to clear the
-          // card's arc — see peerRowHighlightCornerClearanceVp).
+          // 0.0.47 (I12) §4 — THE INTERNAL DIVIDER IS A HAIRLINE, NOT A GRID LINE.
+          // The re-review's optional §3 ("减轻对端列表内部的横线重量 … 较强的网格感略削弱
+          // 轻巧感") and the owner asked for it, so it is done with the review's own two
+          // levers and NOT by removing the separation (the rows are 64 vp of two-line
+          // text and still have to scan one by one):
+          //   * the colour is a dedicated, WEAKER role — `nb_row_divider`, whose
+          //     distance from the card fill is strictly below the card stroke's in BOTH
+          //     modes (pinned in run-theme-resources.mts), instead of reusing the card
+          //     outline's own `nb_card_border`;
+          //   * it is INSET by the row text's content padding on both sides
+          //     (startMargin/endMargin), so the lines no longer run edge to edge into the
+          //     card's border — that full-width join is what read as a grid.
+          // The card's own outline still separates the card from the page, so the
+          // separation that aids scanning is kept and only its weight inside the card
+          // drops.
+          .divider({ strokeWidth: 1, color: $r('app.color.nb_row_divider'),
+            startMargin: PEER_ROW_CONTENT_PADDING_VP, endMargin: PEER_ROW_CONTENT_PADDING_VP })
+          // 0.0.43 (I8) §1: the card's radius is the NAMED constant, because the row
+          // fill is full-bleed and this node's CLIP is what keeps it inside the arc
+          // (0.0.47 I12 §1).
           .borderRadius(PEER_LIST_CARD_RADIUS_VP)
+          // 0.0.47 (I12) §1 — THE CLIP THAT MAKES FULL-BLEED SAFE. The selected/hovered
+          // row's fill now spans the card's whole content width, so the first and last
+          // row's square corner would poke out of the card's 16 vp arc without this.
+          // Clipping the LIST (not the row) rounds both ends at once and costs no
+          // layout: the row keeps `width('100%')`, so nothing adds horizontal scroll.
+          .clip(true)
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
-          // 0.0.38 (I3) C / 0.0.43 (I8) §1: THE LIST'S HORIZONTAL PADDING MOVED TO
-          // THE ROW. I3 put the 12 vp here and the row's text budget (and the I6
-          // search-field width) has been measured from it ever since — which is why
-          // the selected row's tint inherited it as an edge-to-edge band with square
-          // corners. I8 gives the same 12 vp to the ROW
-          // (PEER_ROW_HIGHLIGHT_INSET_VP, the identical number), so the tint block
-          // is inset by construction and the divider — which I3's own measurement
-          // showed runs edge-to-edge regardless of this padding — is unchanged.
-          // The card's content geometry is therefore identical: the row's border box
-          // is card minus 24 vp, exactly what peerRowTextWidthVp assumes.
+          // 0.0.38 (I3) C / 0.0.43 (I8) §1 / 0.0.47 (I12) §1: WHERE THE 12 vp LIVES.
+          // I3 put the list's horizontal padding HERE, on the List; I8 moved it to the
+          // ROW (as the highlight block's inset) and I12 moved it INSIDE the fill, so
+          // the highlight is full-bleed again and the TEXT keeps the same inset. In
+          // every one of the three shapes the card's content geometry is identical —
+          // the row's border box is the card minus 24 vp laterally plus the 3 vp marker
+          // every row reserves, exactly what peerRowTextWidthVp and the I6 search-field
+          // identity are measured from.
           // A mouse needs a scroll position cue; a finger does not, so the wide
           // branch shows the bar and the phone keeps today's BarState.Off.
           .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)

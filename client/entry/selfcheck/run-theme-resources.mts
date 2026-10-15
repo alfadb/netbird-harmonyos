@@ -104,6 +104,13 @@ const CONTRACT: Array<[string, string, string]> = [
   // stronger, blue-carrying tint AND the 3 vp primary marker, which hover never
   // renders (see the layout selfcheck's negative property).
   ['nb_row_hover_background', '#F2F5F7', '#2A3138'],
+  // 0.0.47 (I12) §4: the peer list's INTERNAL row divider. The re-review's optional
+  // §3 ("减轻对端列表内部的横线重量") and the owner's own ask: the internal lines were
+  // reusing nb_card_border, i.e. the weight of the card's own outline, and the list read
+  // as a grid. This is the review's own suggested softer step for dark (#33414A) and its
+  // light analogue; the property that matters — the line is strictly LIGHTER than the
+  // card outline it used to borrow — is asserted below, in both modes.
+  ['nb_row_divider', '#E8EEF2', '#33414A'],
   ['nb_on_status', '#FFFFFF', '#0B1218'],
   ['nb_window_status_bar_background', '#F2F6F8', '#10171D'],
   ['nb_window_navigation_bar_background', '#F2F6F8', '#10171D'],
@@ -160,6 +167,24 @@ check('I6 §2: hover and selection are DIFFERENT roles, and the selection is the
   liftFromCard('#FFFFFF', hoverLight) > 0 && liftFromCard('#1B242C', hoverDark) > 0 &&
   liftFromCard('#FFFFFF', selectedLight) > liftFromCard('#FFFFFF', hoverLight) &&
   liftFromCard('#1B242C', selectedDark) > liftFromCard('#1B242C', hoverDark));
+
+// 1c. 0.0.47 (I12) §4 — the internal row divider is a HAIRLINE, not the card outline.
+//     It is a role of its own and, in BOTH modes, its lift from the card fill is
+//     strictly below the card stroke's — which is exactly "减轻内部横线的重量": the
+//     line is still there to scan by, it just no longer carries the outline's weight.
+const dividerLight = base.get('nb_row_divider') as string;
+const dividerDark = dark.get('nb_row_divider') as string;
+check('I12 §4: the row divider is lighter than the card outline in both modes',
+  dividerLight !== (base.get('nb_card_border') as string) &&
+  dividerDark !== (dark.get('nb_card_border') as string) &&
+  liftFromCard('#FFFFFF', dividerLight) > 0 &&
+  liftFromCard('#1B242C', dividerDark) > 0 &&
+  liftFromCard('#FFFFFF', dividerLight) < liftFromCard('#FFFFFF', base.get('nb_card_border') as string) &&
+  liftFromCard('#1B242C', dividerDark) < liftFromCard('#1B242C', dark.get('nb_card_border') as string),
+  `light=${liftFromCard('#FFFFFF', dividerLight)} ` +
+    `vs ${liftFromCard('#FFFFFF', base.get('nb_card_border') as string)}, ` +
+    `dark=${liftFromCard('#1B242C', dividerDark)} ` +
+    `vs ${liftFromCard('#1B242C', dark.get('nb_card_border') as string)}`);
 
 // 2. Mandatory role pairs: a filled role and the ink that sits ON it must both
 //    exist in each palette — that is what makes the explicit on-role ink

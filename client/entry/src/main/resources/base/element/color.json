@@ -89,6 +89,10 @@
       "value": "#F2F5F7"
     },
     {
+      "name": "nb_row_divider",
+      "value": "#E8EEF2"
+    },
+    {
       "name": "nb_on_status",
       "value": "#FFFFFF"
     },

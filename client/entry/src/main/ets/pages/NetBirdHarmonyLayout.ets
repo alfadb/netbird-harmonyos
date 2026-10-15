@@ -711,7 +711,11 @@ export const PEER_LIST_NAV_BAR_CAP_ROOMY_VP: number = 480;
  * the list (the review's §P0.1: "the navBar is the bottleneck, not the rail").
  */
 export const PEER_LIST_CONTENT_MIN_COMPACT_VP: number = 320;
-/** The peer list card's own left/right padding (vp) — 8 vp grid. */
+/**
+ * The peer list's horizontal content padding (vp). Since 0.0.47 (I12) it is paid by
+ * the ROW, INSIDE the full-bleed highlight fill (PEER_ROW_CONTENT_PADDING_VP), rather
+ * than by the List — the same 12 vp, the same text axis, one number.
+ */
 export const PEER_ROW_LIST_PADDING_VP: number = 12;
 /** The two-line peer row's minimum height (vp): name+chip+status / IP. */
 export const PEER_ROW_MIN_HEIGHT_VP: number = 64;
@@ -1126,59 +1130,72 @@ export function peerRowIpOneLineAtCapVp(): number {
 }
 
 // ---------------------------------------------------------------------------
-// 0.0.43 (I8) §1 — the row highlight is an INSET ROUNDED BLOCK
+// 0.0.47 (I12) §1 — the row highlight is FULL-BLEED; the TEXT is padded
 // ---------------------------------------------------------------------------
-// The owner read the 0.0.42 frame as "the selected row's tint spans the whole list
-// card edge-to-edge" and asked for the opposite: a block that respects the list's
-// horizontal padding and has a corner radius, so the highlight cannot touch the
-// card's rounded edges. The geometry is three numbers:
+// I8 read the owner's 0.0.42 frame as "the selected row's tint spans the whole list
+// card edge-to-edge" and made the highlight an INSET ROUNDED BLOCK: 12 vp in from
+// each side, 12 vp corner radius. The owner has now read the shipped 0.0.46 PC frame
+// and asked for the opposite back — "the selected and hovered row backgrounds must
+// cover the full row width, edge to edge of the list's content area" — while the
+// row's TEXT keeps its inset, so the text never touches the card edge. Background
+// full-bleed, content padded. The geometry is still three numbers, with new jobs:
 //
-//   * `PEER_ROW_HIGHLIGHT_INSET_VP` — the block's left/right inset from the card's
-//     inner edge. It IS the list's own content padding (PEER_ROW_LIST_PADDING_VP),
-//     because that is the padding the row content uses: the page now writes it as
-//     the ROW's own horizontal inset, so "the tint is inset by the content padding"
-//     is one constant the selfcheck can compare with itself.
-//   * `PEER_LIST_CARD_RADIUS_VP` — the card's own radius (16), which the block's
-//     corner has to clear.
-//   * `PEER_ROW_HIGHLIGHT_RADIUS_VP` — the block's radius. It is at least the
-//     CONCENTRIC radius (`card - inset` = 4, the most a nested rounded box may be
-//     and still look nested) and, because a 4 vp radius still reads as a square
-//     corner, the shipped value is 12 (the same octave-below-the-cards radius the
-//     search field uses). The selfcheck pins both: the bound, and the fact that the
-//     block's corner is clear of the card's rounded edge by a stated number of vp.
+//   * `PEER_ROW_HIGHLIGHT_INSET_VP` — the fill's left/right inset from the card's
+//     inner edge. It is 0: the fill spans the list's whole content width.
+//   * `PEER_ROW_CONTENT_PADDING_VP` — the TEXT's own horizontal inset, now applied
+//     INSIDE the fill. It is the same number the row's text budget has spent since
+//     I3 (PEER_ROW_LIST_PADDING_VP, 12 vp): the padding did not move, the fill grew
+//     around it.
+//   * `PEER_ROW_HIGHLIGHT_RADIUS_VP` — the fill's own corner radius, also 0. A
+//     full-bleed fill is square; what keeps it clear of the card's arc is the LIST
+//     clipping to its own `PEER_LIST_CARD_RADIUS_VP` (16). That property lives on the
+//     page (`.clip(true)` on the same node as the radius), so it is asserted there.
+//
+// Nothing else moves: the always-reserved 3 vp selection marker still starts at the
+// fill's left edge, so the text axis is `marker + content padding` = 15 vp from the
+// card's inner edge — the axis it has had since I8 — and the name/IP budgets are
+// unchanged (`peerRowTextWidthVp` still subtracts exactly those two numbers).
 /** The peer list card's own corner radius (vp). */
 export const PEER_LIST_CARD_RADIUS_VP: number = 16;
-/** The highlight block's left/right inset from the card's inner edge (vp). */
-export const PEER_ROW_HIGHLIGHT_INSET_VP: number = PEER_ROW_LIST_PADDING_VP;
-/** The highlight block's corner radius (vp). */
-export const PEER_ROW_HIGHLIGHT_RADIUS_VP: number = 12;
+/** The highlight fill's left/right inset from the card's inner edge (vp) — full-bleed. */
+export const PEER_ROW_HIGHLIGHT_INSET_VP: number = 0;
+/** The highlight fill's own corner radius (vp) — square; the LIST clips the ends. */
+export const PEER_ROW_HIGHLIGHT_RADIUS_VP: number = 0;
+/** The row TEXT's horizontal inset (vp), paid INSIDE the full-bleed fill. */
+export const PEER_ROW_CONTENT_PADDING_VP: number = PEER_ROW_LIST_PADDING_VP;
 
 /**
- * The SMALLEST radius a block inset by `PEER_ROW_HIGHLIGHT_INSET_VP` inside a
- * `PEER_LIST_CARD_RADIUS_VP` card may have and still read as nested rather than as
- * a square corner poking at the card's arc: the two radii are concentric when
- * `inner = outer - inset`.
+ * The x (vp) at which the row's TEXT starts, measured from the card's inner left
+ * edge: the selection marker every row reserves (transparent when unselected) plus
+ * the text's own content padding. This is the axis the search field's text has to
+ * land on (§2) and the number `peerRowTextWidthVp` already spends on the left.
  */
-export function peerRowHighlightConcentricRadiusVp(): number {
-  const concentric: number = PEER_LIST_CARD_RADIUS_VP - PEER_ROW_HIGHLIGHT_INSET_VP;
-  return concentric > 0 ? concentric : 0;
+export function peerRowTextStartVp(): number {
+  return PEER_ROW_SELECT_BAR_VP + PEER_ROW_CONTENT_PADDING_VP;
 }
 
 /**
- * How far (vp) the highlight block's corner is from the card's rounded edge,
- * measured along the corner's own diagonal (the closest approach between the two
- * arcs). Positive = the block cannot touch the card's rounded edge, which is the
- * property the owner asked for; the shipped geometry clears it by ~15 vp.
+ * The width (vp) the full-bleed fill spans inside a card of `cardWidthVp`: the card's
+ * whole inner width while the inset is 0, and never negative on a collapsed pane.
  */
-export function peerRowHighlightCornerClearanceVp(): number {
-  const inset: number = PEER_ROW_HIGHLIGHT_INSET_VP;
-  const radius: number = PEER_ROW_HIGHLIGHT_RADIUS_VP;
-  const cardRadius: number = PEER_LIST_CARD_RADIUS_VP;
-  const blockDiagonal: number =
-    Math.sqrt((inset + radius) * (inset + radius) * 2) - radius;
-  const cardDiagonal: number = Math.sqrt(cardRadius * cardRadius * 2) - cardRadius;
-  return blockDiagonal - cardDiagonal;
+export function peerRowHighlightWidthVp(cardWidthVp: number): number {
+  const width: number = cardWidthVp - 2 * PEER_ROW_HIGHLIGHT_INSET_VP;
+  return width > 0 ? width : 0;
 }
+
+/**
+ * 0.0.47 (I12) §2 — THE SEARCH FIELD'S TEXT SITS ON THE ROW TEXT'S AXIS.
+ *
+ * The field's OUTER edges are already the list card's (I6 §3: `peerSearchWidth` →
+ * `peerListCardWidthVp`, so left and right edge match by construction). What the
+ * re-review measured was the third axis: the placeholder started at the framework's
+ * own TextInput inset instead of at the axis the peer names and addresses sit on. The
+ * field therefore carries an EXPLICIT horizontal padding, and it is not a new magic
+ * number — the left edge is the row text's own start (`peerRowTextStartVp`, i.e. the
+ * reserved marker plus the shared content padding) and the right edge is the shared
+ * content padding, exactly as the row's text region ends.
+ */
+export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();
 
 // ---------------------------------------------------------------------------
 // 0.0.38 (I3) — the SETTINGS content column
@@ -1249,6 +1266,25 @@ export const GUIDE_BODY_LINE_HEIGHT_FP: number = 22;
 export const SECTION_CHEVRON_SLOT_VP: number = 24;
 /** The gap between the preview text and that slot (vp) — the review's §8. */
 export const SECTION_HEADER_GAP_VP: number = 12;
+
+// 0.0.47 (I12) §3 — AND THE SYMBOL ITSELF IS NOW A DRAWN CHEVRON, NOT A GLYPH.
+// The I5 slot fixed the ALIGNMENT (the review's §8: "符号与预览文字分离") but the
+// re-review read the result again and was explicit about what was left: "可见三角仍
+// 很小，扫视更像一个点 … 不要只把容器或字符字号设大而仍显示微小三角". The shipped
+// mark was the Unicode pair ▾/▸ at TYPE_CAPTION_FP; those two glyphs ink only a
+// fraction of their em box, so no slot could make them read. The indicator is
+// therefore a 12 vp `Path` STROKE (the review's "可见宽高约 10–12 vp 的原生 chevron"),
+// monochrome in the secondary role, inside the same 24 vp slot with the same 12 vp
+// gap. The commands are drawn in a 12 x 12 vp box with the 2 vp stroke's own half
+// kept inside it (the 1 vp inset), so the ink really is ~10-12 vp tall/wide.
+/** The collapsed-section chevron's visible glyph box (vp) — the review's 10–12. */
+export const SECTION_CHEVRON_GLYPH_VP: number = 12;
+/** The chevron's stroke width (vp). */
+export const SECTION_CHEVRON_STROKE_VP: number = 2;
+/** The chevron's path when the section is COLLAPSED (points right, 12 x 12 box). */
+export const SECTION_CHEVRON_PATH_COLLAPSED: string = 'M3 1 L9 6 L3 11';
+/** The chevron's path when the section is EXPANDED (points down, 12 x 12 box). */
+export const SECTION_CHEVRON_PATH_EXPANDED: string = 'M1 3 L6 9 L11 3';
 
 // ---------------------------------------------------------------------------
 // 0.0.40 (I5) — THE RAIL's connection region: a HEIGHT BUDGET, not a percentage

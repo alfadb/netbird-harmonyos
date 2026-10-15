@@ -98,8 +98,14 @@ try {
   // =========================================================================
   // A. THE UNIT: every font size is the fp scale, never a fixed-unit literal
   // =========================================================================
-  check('A: the page has 130 fontSize call sites (the pinned inventory of 0.0.46)',
-    pageArgs.length === 130, `got ${pageArgs.length}`);
+  check('A: the page has 129 fontSize call sites (the pinned inventory of 0.0.47)',
+    // 0.0.47 (I12) §3 DELIBERATE UPDATE: 130 → 129. The collapsed sections' expand
+    // indicator is a DRAWN 12 vp Path stroke now (a Unicode ▾/▸ at the caption size
+    // inked only a fraction of its em box — the re-review's "仍像很小的针点"), so the
+    // DetailSectionHeader's third Text and its fontSize call are gone. It carried no
+    // maxFontScale and no fixed height of its own, so no other pin moves: the page's
+    // cap inventory (38) is untouched.
+    pageArgs.length === 129, `got ${pageArgs.length}`);
   check('A: the login chrome has 3 (the page title and its two captions)',
     loginArgs.length === 3, `got ${loginArgs.length}`);
   check('A: NO font size is a numeric literal (a bare number IS fp, but a literal is ' +

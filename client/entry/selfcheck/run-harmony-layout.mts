@@ -521,6 +521,9 @@ try {
     // The property is unchanged — chrome budgeted per tier, stated rather than
     // magic — and the floors are measured against these same numbers below.
     m.PEER_ROW_MIN_HEIGHT_VP === 64 && m.PEER_ROW_LIST_PADDING_VP === 12 &&
+    // 0.0.47 (I12) §1: the 12 vp is now the row's CONTENT padding inside the fill —
+    // one number, one axis (see the I12 §1 checks below for the full-bleed property).
+    m.PEER_ROW_CONTENT_PADDING_VP === m.PEER_ROW_LIST_PADDING_VP &&
     m.PEER_ROW_CHIP_WIDTH_VP === 44 && m.PEER_ROW_STATUS_TEXT_WIDTH_VP === 28 &&
     m.PEER_ROW_DOT_VP === 10 && m.PEER_ROW_META_GAP_VP === 8 &&
     m.PEER_ROW_META_WIDE_VP === 98 && m.PEER_ROW_META_COMPACT_VP === 18 &&
@@ -935,13 +938,15 @@ try {
     PAGE.includes('return peerRowCondensed(this.widthVp);') &&
     PAGE.includes('private peerSearchWidth(): Length {') &&
     PAGE.includes('.width(this.peerSearchWidth())') &&
-    // 0.0.43 (I8) §1 DELIBERATE UPDATE: the list's 12 vp horizontal padding (I3's C
-    // fix) moved from the List to the ROW, where it is the highlight block's inset —
-    // the same number (PEER_ROW_HIGHLIGHT_INSET_VP === PEER_ROW_LIST_PADDING_VP), so
-    // the card's content geometry and the I6 search-field identity are unchanged.
-    // The card itself no longer pads horizontally; see the I8 §1 checks below.
-    PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })') &&
-    !PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
+    // 0.0.47 (I12) §1 DELIBERATE UPDATE: the 12 vp content padding now lives INSIDE
+    // the highlight fill (the ROW's own padding on the fill's node), so the fill is
+    // full-bleed edge to edge while the text keeps this inset — the same number, the
+    // same text axis, and the card still has no horizontal padding of its own. See the
+    // I12 §1 checks below.
+    PAGE.includes('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP, ' +
+      'right: PEER_ROW_CONTENT_PADDING_VP,\n        top: 12, bottom: 12\n      })') &&
+    !PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })') &&
+    !PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })'));
   check('F: the search field exists only when there is a peer to search',
     PAGE.indexOf('if (this.peersList().length > 0) {') > 0 &&
     PAGE.indexOf('if (this.peersList().length > 0) {') <
@@ -1400,51 +1405,155 @@ try {
     !PAGE.includes('peerRowKey(peer, this.peerRowHovered'));
 
   // =========================================================================
-  // 0.0.43 (I8) §1/§2 — the owner's three findings, as properties of the shipped
-  // sources. (The copy policy and the pasteboard call path are the separate
+  // 0.0.43 (I8) §1/§2 + 0.0.47 (I12) §1 — the row highlight, as properties of the
+  // shipped sources. (The copy policy and the pasteboard call path are the separate
   // run-copy-affordance.mts's subject, because they need a stubbed platform.)
   // =========================================================================
 
-  // ---- (a) the selection/hover highlight is an INSET ROUNDED BLOCK -------------
-  // The owner's frame read the tint as "a band across the whole list card". The
-  // property is three numbers: the inset IS the list's content padding, the radius
-  // is at least the concentric radius of a block nested inside the card, and the
-  // block's corner therefore clears the card's own rounded edge.
-  check('I8 §1: the highlight is inset by the list content padding, radius bounded below',
-    m.PEER_ROW_HIGHLIGHT_INSET_VP === m.PEER_ROW_LIST_PADDING_VP &&
-    m.PEER_ROW_HIGHLIGHT_INSET_VP === 12 &&
-    m.PEER_LIST_CARD_RADIUS_VP === 16 && m.PEER_ROW_HIGHLIGHT_RADIUS_VP === 12 &&
-    m.peerRowHighlightConcentricRadiusVp() ===
-      m.PEER_LIST_CARD_RADIUS_VP - m.PEER_ROW_HIGHLIGHT_INSET_VP &&
-    m.PEER_ROW_HIGHLIGHT_RADIUS_VP >= m.peerRowHighlightConcentricRadiusVp());
-  check('I8 §1: the block\'s corner is clear of the card\'s rounded edge, not tangent to it',
-    m.peerRowHighlightCornerClearanceVp() > 0 &&
-    // a square corner (radius 0) would still clear the arc, but by less — the
-    // radius is what makes the block read as nested rather than as a poking corner
-    m.peerRowHighlightCornerClearanceVp() >
-      (Math.sqrt(2 * m.PEER_ROW_HIGHLIGHT_INSET_VP * m.PEER_ROW_HIGHLIGHT_INSET_VP) -
-        (Math.sqrt(2 * m.PEER_LIST_CARD_RADIUS_VP * m.PEER_LIST_CARD_RADIUS_VP) -
-          m.PEER_LIST_CARD_RADIUS_VP)),
-    `clearance=${m.peerRowHighlightCornerClearanceVp().toFixed(2)} vp`);
-  check('I8 §1: the ROW carries the inset, the BLOCK carries the radius (two nodes)',
+  // ---- (a) 0.0.47 (I12) §1: the highlight is FULL-BLEED, the TEXT is padded -----
+  // I8's inset rounded block is retired. The owner's newest requirement: the selected
+  // and hovered row's background covers the full row width, edge to edge of the list's
+  // content area, while the TEXT keeps the same 12 vp inset. The property is three
+  // numbers plus one structural fact:
+  //   * the fill's inset is 0 and its own radius is 0 (a full-bleed band is square);
+  //   * the TEXT pays PEER_ROW_CONTENT_PADDING_VP (= the same 12 vp), so the text axis
+  //     (marker + padding) and `peerRowTextWidthVp` are exactly what they were;
+  //   * the LIST clips to its own 16 vp radius, which is what keeps the first/last
+  //     row's square fill inside the card's rounded corner.
+  check('I12 §1: the highlight fill is FULL-BLEED — inset 0, radius 0, text still padded 12',
+    m.PEER_ROW_HIGHLIGHT_INSET_VP === 0 && m.PEER_ROW_HIGHLIGHT_RADIUS_VP === 0 &&
+    m.PEER_ROW_CONTENT_PADDING_VP === m.PEER_ROW_LIST_PADDING_VP &&
+    m.PEER_ROW_CONTENT_PADDING_VP === 12 && m.PEER_LIST_CARD_RADIUS_VP === 16);
+  check('I12 §1: the fill spans the card\'s whole inner width (never negative), and the ' +
+    'text axis is marker + padding — the SAME budget the name/IP arithmetic spends',
+    m.peerRowHighlightWidthVp(400) === 400 &&
+    m.peerRowHighlightWidthVp(0) === 0 && m.peerRowHighlightWidthVp(-50) === 0 &&
+    m.peerRowTextStartVp() === m.PEER_ROW_SELECT_BAR_VP + m.PEER_ROW_CONTENT_PADDING_VP &&
+    m.peerRowTextStartVp() === 15 &&
+    // the two sides of the row's text budget, stated end to end on one card: the fill
+    // is the whole card, and the text is that card minus the start axis minus the
+    // right-hand content padding
+    m.peerRowHighlightWidthVp(m.peerListCardWidthVp(400)) === m.peerListCardWidthVp(400) &&
+    m.peerRowTextWidthVp(400) === m.peerListCardWidthVp(400) -
+      m.peerRowTextStartVp() - m.PEER_ROW_CONTENT_PADDING_VP,
+    `start=${m.peerRowTextStartVp()} text=${m.peerRowTextWidthVp(400)} ` +
+      `card=${m.peerListCardWidthVp(400)}`);
+  check('I12 §1: the FILL carries the marker + the tint + the text padding (one node)',
     (() => {
       const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
         PAGE.indexOf('peersTab() {'));
-      const markerAt = row.indexOf('.border({');
-      const radiusAt = row.indexOf('.borderRadius(PEER_ROW_HIGHLIGHT_RADIUS_VP)');
-      const insetAt = row.indexOf('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP');
-      const hoverAt = row.indexOf('.onHover(');
-      // order inside the builder: the block's marker → its tint → its radius → the
-      // wrapper's inset → the wrapper's pointer/activation handlers. The tint and the
-      // marker are on the SAME node (checked by the I6 §2 assertions above), so the
-      // radius on that node rounds exactly what the tint paints.
-      return markerAt > 0 && radiusAt > markerAt && insetAt > radiusAt &&
-        hoverAt > insetAt &&
-        row.includes('.borderRadius(PEER_LIST_CARD_RADIUS_VP)') === false;
+      // The ArkUI rule that decides this: an attribute chain attaches to the component
+      // whose body brace was closed LAST, so the brace depth at the attribute is the
+      // structural statement of "same node". The text padding, the always-reserved
+      // marker, the tint and the corner radius must all sit at the SAME depth (that is
+      // the fill); the pointer handlers must sit exactly one level out (that is the
+      // full-width hit area, which carries no padding of its own — the full-bleed
+      // property, and the negative control for the retired I8 inset).
+      const depthAt = (index: number): number => {
+        let depth = 0;
+        for (let i = 0; i < index; i++) {
+          if (row[i] === '{') { depth++; } else if (row[i] === '}') { depth--; }
+        }
+        return depth;
+      };
+      const padAt = row.indexOf('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP');
+      const markerAt = row.indexOf('.border({', padAt);
+      const tintAt = row.indexOf('.backgroundColor(this.peerRowSelected(peer)', markerAt);
+      const radiusAt = row.indexOf('.borderRadius(PEER_ROW_HIGHLIGHT_RADIUS_VP)', tintAt);
+      const hoverAt = row.indexOf('.onHover(', radiusAt);
+      const fillDepth = depthAt(padAt);
+      return padAt > 0 && markerAt > padAt && tintAt > markerAt && radiusAt > tintAt &&
+        hoverAt > radiusAt &&
+        depthAt(markerAt) === fillDepth && depthAt(tintAt) === fillDepth &&
+        depthAt(radiusAt) === fillDepth && depthAt(hoverAt) === fillDepth - 1 &&
+        // the hit area between the fill's closing brace and the pointer handlers adds
+        // NO horizontal padding
+        !row.slice(radiusAt, hoverAt).includes('.padding(') &&
+        !row.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP') &&
+        !row.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP');
     })());
-  check('I8 §1: the LIST card is the named radius and no longer pads horizontally',
-    PAGE.includes('.borderRadius(PEER_LIST_CARD_RADIUS_VP)') &&
-    !PAGE.includes('.padding({ left: PEER_ROW_LIST_PADDING_VP, right: PEER_ROW_LIST_PADDING_VP })'));
+  check('I12 §1: the LIST clips its content at the named card radius (the full-bleed fill ' +
+    'cannot spill past the rounded corner), and adds no horizontal scroll',
+    // the clip and the radius are on the SAME node: the List
+    /\.borderRadius\(PEER_LIST_CARD_RADIUS_VP\)\s*\n\s*\/\/[\s\S]{0,700}?\.clip\(true\)/
+      .test(PAGE) &&
+    !PAGE.includes('.listDirection(') &&
+    // the row's own two boxes are the card's full width; nothing is width-capped to a
+    // narrower number, which is what could introduce a horizontal scrollbar
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
+        PAGE.indexOf('peersTab() {'));
+      return (row.match(/\.width\('100%'\)/g) ?? []).length >= 2 &&
+        !row.includes('peerListCardWidthVp(this.widthVp)') &&
+        // and the phone's narrow branch shares this very component: one List, one row
+        (PAGE.match(/this\.peerListBody\(\)/g) ?? []).length === 2;
+    })());
+  check('I12 §1: the retired I8 inset block is gone (negative control)',
+    !PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })') &&
+    !PAGE.includes('peerRowHighlightCornerClearanceVp') &&
+    !PAGE.includes('peerRowHighlightConcentricRadiusVp'));
+
+  // ---- (a2) 0.0.47 (I12) §2: the search field's text sits on the row text axis -----
+  check('I12 §2: the search field\'s INNER padding is the row text\'s own axis, and its ' +
+    'outer width is still the list card\'s',
+    m.PEER_SEARCH_TEXT_INSET_VP === m.peerRowTextStartVp() &&
+    m.PEER_SEARCH_TEXT_INSET_VP === m.PEER_ROW_SELECT_BAR_VP + m.PEER_ROW_CONTENT_PADDING_VP &&
+    PAGE.includes('private peerSearchWidth(): Length {') &&
+    PAGE.includes('.width(this.peerSearchWidth())') &&
+    PAGE.includes('.padding({\n              left: PEER_SEARCH_TEXT_INSET_VP, ' +
+      'right: PEER_ROW_CONTENT_PADDING_VP\n            })') &&
+    // the field's OUTER width is still the list card's own width (I6 §3): the page hands
+    // the field the same pure table it hands the list, and the narrow branch keeps 100%
+    PAGE.includes('return peerListCardWidthVp(this.peerListNavBarWidth());') &&
+    m.peerListCardWidthVp(m.peerListNavBarWidthFor(1440)) ===
+      m.peerListNavBarWidthFor(1440) - 2 * m.RAIL_PAGE_PADDING_VP);
+
+  // ---- (a3) 0.0.47 (I12) §3: the disclosure indicator is a drawn 12 vp chevron ------
+  check('I12 §3: the collapsed sections\' chevron is a 10-12 vp DRAWN mark in the same ' +
+    '24 vp slot 12 vp from the preview, monochrome in a secondary role',
+    m.SECTION_CHEVRON_GLYPH_VP >= 10 && m.SECTION_CHEVRON_GLYPH_VP <= 12 &&
+    m.SECTION_CHEVRON_STROKE_VP === 2 &&
+    m.SECTION_CHEVRON_SLOT_VP === 24 && m.SECTION_HEADER_GAP_VP === 12 &&
+    // the ink really is ~10 vp tall/wide inside the 12 vp box, and the 2 vp stroke's own
+    // half is kept inside it (the 1 vp inset) so nothing is clipped by the box
+    m.SECTION_CHEVRON_PATH_COLLAPSED === 'M3 1 L9 6 L3 11' &&
+    m.SECTION_CHEVRON_PATH_EXPANDED === 'M1 3 L6 9 L11 3' &&
+    (() => {
+      const header = PAGE.slice(PAGE.indexOf('struct DetailSectionHeader {'),
+        PAGE.indexOf('// 0.0.37 (I2) — THE RAIL\'S LABEL/VALUE ROW'));
+      return header.includes('Path({') &&
+        header.includes('width: SECTION_CHEVRON_GLYPH_VP,') &&
+        header.includes('height: SECTION_CHEVRON_GLYPH_VP,') &&
+        header.includes('this.expanded ? SECTION_CHEVRON_PATH_EXPANDED') &&
+        header.includes(': SECTION_CHEVRON_PATH_COLLAPSED') &&
+        header.includes('.strokeWidth(SECTION_CHEVRON_STROKE_VP)') &&
+        header.includes(".stroke($r('app.color.nb_text_secondary'))") &&
+        header.includes('.fill(Color.Transparent)') &&
+        header.includes('Row({ space: SECTION_HEADER_GAP_VP })') &&
+        header.includes('.width(SECTION_CHEVRON_SLOT_VP)') &&
+        // the tiny-glyph pair the re-review rejected must not come back (the glyphs
+        // themselves may still be NAMED in the comment that explains why they went)
+        !header.includes("Text(this.expanded ? '▾' : '▸')") &&
+        !header.includes('TYPE_CHEVRON_FP') &&
+        // the retired mark was the muted-coloured Text in that slot; the drawn mark is
+        // stroked in the secondary role, so that pair of old attributes is gone
+        !header.includes(".fontColor($r('app.color.nb_text_muted'))\n        " +
+          '.width(SECTION_CHEVRON_SLOT_VP)');
+    })());
+
+  // ---- (a4) 0.0.47 (I12) §4: the internal divider is lighter and inset ------------
+  check('I12 §4: the row divider uses its own weaker role and is inset by the text padding',
+    PAGE.includes('.divider({ strokeWidth: 1, color: $r(\'app.color.nb_row_divider\'),\n' +
+      '            startMargin: PEER_ROW_CONTENT_PADDING_VP, ' +
+      'endMargin: PEER_ROW_CONTENT_PADDING_VP })') &&
+    // the separation itself is kept (do not remove the line, its weight is what drops)
+    !PAGE.includes('.divider({ strokeWidth: 0') &&
+    !PAGE.includes('startMargin: 0, endMargin: 0'));
+
+  // =========================================================================
+  // 0.0.43 (I8) §2 — the owner's chip/dot finding, as properties of the shipped
+  // sources.
+  // =========================================================================
 
   // ---- (b) the chip and the dot are centred on the ROW, in every state ---------
   // The property is structural: the chip + 空闲/离线 text + dot are a SIBLING of the
@@ -1458,7 +1567,10 @@ try {
       const ipAt = row.indexOf("Text(peer.ip.length > 0 ? peer.ip : '无 IP')");
       const metaAt = row.indexOf('if (!this.peerRowCondensed()) {');
       const centerAt = row.indexOf('.alignItems(VerticalAlign.Center)', metaAt);
-      const bodyPadAt = row.indexOf('.padding({ top: 12, bottom: 12 })');
+      // 0.0.47 (I12) §1: the row body's own padding is the multi-line, full-bleed form
+      // now (it carries the horizontal content padding as well as the vertical 12s);
+      // this check's subject — the meta column sits INSIDE that body — is unchanged.
+      const bodyPadAt = row.indexOf('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP');
       return ipAt > 0 && metaAt > ipAt && centerAt > metaAt && bodyPadAt > centerAt;
     })());
   check('I8 §2: the column is STATE-FREE and tier-consistent (colours only, one dot)',
@@ -1466,7 +1578,8 @@ try {
       const row = PAGE.slice(PAGE.indexOf('peerRow(peer: UiPeerEntry) {'),
         PAGE.indexOf('peersTab() {'));
       const metaAt = row.indexOf('if (!this.peerRowCondensed()) {');
-      const meta = row.slice(metaAt, row.indexOf('.padding({ top: 12, bottom: 12 })'));
+      const meta = row.slice(metaAt,
+        row.indexOf('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP'));
       // no selection/hover term and no VERTICAL placement of its own in the column:
       // the chip and the dot cannot move between the selected / unselected / hovered
       // states. (`width` is deliberately not banned: the slice ends after the row
@@ -1541,7 +1654,11 @@ try {
     m.railInfoValueTextWidthVp(840) ===
       m.railInfoValueWidthVp(840) - m.RAIL_INFO_COPY_SLOT_VP - m.COPY_ICON_GAP_VP &&
     m.railInfoValueTextWidthVp(840) >= m.PEER_ROW_IP_MIN_WIDTH_VP &&
-    PAGE.includes('.padding({ left: PEER_ROW_HIGHLIGHT_INSET_VP, right: PEER_ROW_HIGHLIGHT_INSET_VP })'));
+    // 0.0.47 (I12) §1 DELIBERATE UPDATE: this check used to end on the I8 inset
+    // padding string, which no longer exists — the 12 vp is the FILL's own content
+    // padding now (full-bleed fill, padded text).
+    PAGE.includes('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP, ' +
+      'right: PEER_ROW_CONTENT_PADDING_VP,\n        top: 12, bottom: 12\n      })'));
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);
