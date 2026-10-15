@@ -143,15 +143,39 @@ pub struct ManagedRoute {
     pub skip_auto_apply: bool,
 }
 
-/// DNS config (`DNSConfig` → upstream `toDNSConfig` engine.go:1792-1874).
-/// Custom zones and the (deprecated) forwarder port are not consumed yet —
-/// see the unconsumed-fields list in the module tail / doc.
+/// DNS config (`DNSConfig`); custom zones retain the management wire values.
+/// Resolver policy (including upstream single-zone compatibility) belongs to
+/// the DNS service, not this snapshot model. The deprecated forwarder port is
+/// not consumed yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsConfig {
     /// `ServiceEnable` (field 1) — whether the peer DNS resolver is active.
     pub service_enable: bool,
     /// Name server groups (field 2).
     pub name_server_groups: Vec<NameServerGroup>,
+    /// Custom zones (field 3), in management order.
+    pub custom_zones: Vec<CustomZone>,
+}
+
+/// Management `CustomZone`, retained without normalizing domains or flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomZone {
+    pub domain: String,
+    pub records: Vec<SimpleRecord>,
+    pub search_domain_disabled: bool,
+    pub non_authoritative: bool,
+}
+
+/// Management `SimpleRecord`. Type and TTL remain signed 64-bit values, like
+/// the proto and upstream Go `int` on 64-bit clients (engine.go:1855-1861 at
+/// 67c2041). Validation and DNS wire encoding belong to the resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleRecord {
+    pub name: String,
+    pub r#type: i64,
+    pub class: String,
+    pub ttl: i64,
+    pub r_data: String,
 }
 
 /// One name server group (`NameServerGroup`).
@@ -318,7 +342,23 @@ impl DnsConfig {
                 search_domains_enabled: g.search_domains_enabled,
             });
         }
-        Ok(DnsConfig { service_enable: d.service_enable, name_server_groups: groups })
+        let custom_zones = d.custom_zones.iter().map(|zone| CustomZone {
+            domain: zone.domain.clone(),
+            records: zone.records.iter().map(|record| SimpleRecord {
+                name: record.name.clone(),
+                r#type: record.r#type,
+                class: record.class.clone(),
+                ttl: record.ttl,
+                r_data: record.r_data.clone(),
+            }).collect(),
+            search_domain_disabled: zone.search_domain_disabled,
+            non_authoritative: zone.non_authoritative,
+        }).collect();
+        Ok(DnsConfig {
+            service_enable: d.service_enable,
+            name_server_groups: groups,
+            custom_zones,
+        })
     }
 }
 
@@ -451,6 +491,68 @@ mod tests {
             custom_zones: vec![],
             ..Default::default()
         }
+    }
+
+    fn decoded_dns(map: &proto::NetworkMap) -> NetworkMap {
+        let bytes = map.encode_to_vec();
+        let decoded = proto::NetworkMap::decode(bytes.as_slice()).expect("decode DNS snapshot");
+        NetworkMap::from_proto(&decoded).expect("convert DNS snapshot")
+    }
+
+    #[test]
+    fn custom_zones_survive_decode_and_conversion() {
+        let records = vec![
+            proto::SimpleRecord { name: "host.Example.".into(), r#type: 1, class: "IN".into(), ttl: 300, r_data: "100.64.0.1".into() },
+            proto::SimpleRecord { name: "host.Example.".into(), r#type: 1, class: "IN".into(), ttl: 60, r_data: "100.64.0.2".into() },
+            proto::SimpleRecord { name: "host.Example.".into(), r#type: 28, class: "IN".into(), ttl: 0, r_data: "fd00::1".into() },
+            proto::SimpleRecord { name: "alias.Example.".into(), r#type: 5, class: "IN".into(), ttl: 86400, r_data: "host.Example.".into() },
+            // No new model-level rejection or narrowing of signed proto values.
+            proto::SimpleRecord { name: "".into(), r#type: i64::MAX, class: "CLASS65280".into(), ttl: i64::MIN, r_data: "opaque".into() },
+        ];
+        let mut dns = dns_config();
+        dns.custom_zones = vec![
+            proto::CustomZone { domain: "Example.".into(), records: records.clone(), search_domain_disabled: true, non_authoritative: true },
+            proto::CustomZone { domain: "empty.example".into(), ..Default::default() },
+        ];
+        let map = proto::NetworkMap { serial: 1, dns_config: Some(dns.clone()), ..Default::default() };
+        let model = decoded_dns(&map).dns.unwrap();
+        assert!(model.service_enable);
+        assert_eq!(model.name_server_groups, DnsConfig::from_proto(&dns_config()).unwrap().name_server_groups);
+        assert_eq!(model.custom_zones.len(), 2);
+        let zone = &model.custom_zones[0];
+        assert_eq!(zone.domain, "Example.");
+        assert!(zone.search_domain_disabled);
+        assert!(zone.non_authoritative);
+        assert_eq!(zone.records.len(), records.len());
+        for (actual, wire) in zone.records.iter().zip(&records) {
+            assert_eq!(actual.name, wire.name);
+            assert_eq!(actual.r#type, wire.r#type);
+            assert_eq!(actual.class, wire.class);
+            assert_eq!(actual.ttl, wire.ttl);
+            assert_eq!(actual.r_data, wire.r_data);
+        }
+        assert_eq!(model.custom_zones[1], CustomZone {
+            domain: "empty.example".into(), records: vec![],
+            search_domain_disabled: false, non_authoritative: false,
+        });
+        dns.custom_zones.truncate(1);
+        let single = decoded_dns(&proto::NetworkMap { dns_config: Some(dns), ..Default::default() });
+        assert!(single.dns.unwrap().custom_zones[0].non_authoritative, "model retains even single-zone wire flag");
+    }
+
+    #[test]
+    fn dns_snapshots_replace_and_clear_without_merging() {
+        let mut dns = dns_config();
+        dns.custom_zones.push(proto::CustomZone { domain: "old.example".into(), ..Default::default() });
+        let first = decoded_dns(&proto::NetworkMap { serial: 1, dns_config: Some(dns.clone()), ..Default::default() });
+        dns.custom_zones[0].domain = "new.example".into();
+        let replacement = decoded_dns(&proto::NetworkMap { serial: 2, dns_config: Some(dns), ..Default::default() });
+        assert_eq!(first.dns.unwrap().custom_zones[0].domain, "old.example");
+        assert_eq!(replacement.dns.unwrap().custom_zones[0].domain, "new.example");
+        let empty = decoded_dns(&proto::NetworkMap { serial: 3, dns_config: Some(proto::DnsConfig::default()), ..Default::default() });
+        assert_eq!(empty.dns, Some(DnsConfig { service_enable: false, name_server_groups: vec![], custom_zones: vec![] }));
+        let absent = decoded_dns(&proto::NetworkMap { serial: 4, ..Default::default() });
+        assert!(absent.dns.is_none());
     }
 
     #[test]
