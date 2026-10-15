@@ -1,7 +1,7 @@
 # Native DNS 维护说明
 
 适用范围：`feat/native-dns` 工作树中已落盘的原生 DNS 实现。
-本文记录实现边界与已有证据；最终完整 host 回归与 PC 包构建/签名/验签已通过，真实新实现 DNS 验证尚待设备连接恢复。
+本文记录实现边界与已有证据；最终完整 host 回归与 PC 包构建/签名/验签已通过，PC 真机已取得 ROM 系统 ping 的 IPv4 解析与 ICMP 成功证据。
 官方语义对照固定为 NetBird `67c2041fb5534c19d7b2320617cfc3aaab8e7d3d`、Android `147bb4f`，不宣称最新 release。
 参考：[NetBird 固定提交](https://github.com/netbirdio/netbird/tree/67c2041fb5534c19d7b2320617cfc3aaab8e7d3d)、[Android 固定提交](https://github.com/netbirdio/android-client/tree/147bb4f)。
 
@@ -118,26 +118,37 @@ source config 日志仅记录数量摘要，不输出记录值、完整配置或
 最终交付候选为 [PC signed HAP](</home/worker/n2h-kit/native-dns-validation/20261015T152517.035553Z-final-pc-package/netbird-native-dns-pc-signed.hap>)，7493396 B，0.0.48 / 48。
 SHA256：`fdc9ac8d8291e1d88d3eedf50c2dd2b9dc7474306d8c4441bd641d50bff03a65`。
 N2H_BUILD_SHA256：`cb8fb023713a43faf470004c803dfcf331d59a5169d6bc1bd1b8038bec88e7e4`。
-构建时 HEAD 为 model commit `0d4cd69912c5f6a0ad60025b1fd89c20251fb79f` 且 dirty，含本次功能源码；本地功能提交不代表按新 commit 重建。
-中间 `2cec1c…` 包已过时，不作为交付。
-[本轮设备报告](</home/worker/n2h-kit/native-dns-validation/20261015T153311Z-pc-final/REPORT-device.md>) 记录列表见 PC，但 echo 探测 15 秒超时，未安装最终包。
-真实新实现 DNS 验证尚待设备连接恢复；后续重连结果尚未纳入本文，不据此推断成功或失败。
+构建时 HEAD 为 model commit `0d4cd69912c5f6a0ad60025b1fd89c20251fb79f` 且 dirty，含本次功能源码；逐文件 hash 已确认与源码提交 `641459e53636a006782ea1976df946a2dd93d8b7` 的功能内容一致，并非按新 commit 重建。
+上述包 build hash 由构建/签名/验签报告证实，不是运行进程 readback；中间 `2cec1c…` 包已过时，不作为交付。
+此前调试连接 echo 超时阶段见[历史设备报告](</home/worker/n2h-kit/native-dns-validation/20261015T153311Z-pc-final/REPORT-device.md>)；用户唤醒后已恢复连接并完成下述覆盖安装及解析检查。
 
 以下均为外部本地证据，不随 repo 发布：
 - [最终完整测试报告](</home/worker/n2h-kit/native-dns-validation/20261015T152508Z-final-tests/REPORT-final-tests.md>)、[最终包报告](</home/worker/n2h-kit/native-dns-validation/20261015T152517.035553Z-final-pc-package/REPORT-final-package.md>)。
 - [完整 host 回归报告](</home/worker/n2h-kit/native-dns-validation/host-tests-Hjrr9lSY/REPORT-host-tests.md>)、[relay 限定因果报告](</home/worker/n2h-kit/native-dns-validation/relay-causal-20261015/REPORT-relay-failure.md>)。
 - [OHOS 首轮构建报告](</home/worker/n2h-kit/native-dns-validation/20261015T150407.971387Z-ohos-build/REPORT-build.md>)、[首轮签名报告](</home/worker/n2h-kit/native-dns-validation/20261015T151121.308743Z-signed-pc/REPORT-sign.md>)。
 - [历史 selfcheck 报告](</home/worker/n2h-kit/native-dns-validation/20261015T143238.736316Z-native-dns-selfcheck-2853641-report.json>)、[PC 配置报告](</home/worker/n2h-kit/native-dns-validation/20261015T145320Z-pc-dns-config/REPORT.md>)。
-真实设备 DNS、路由与生命周期行为仍待验证。
+- [PC 真机连接与 DNS 报告](</home/worker/n2h-kit/native-dns-validation/20261015T234135.112693Z-device-connected/REPORT-device-connected.md>)：下述装前/装后检查与证据缺口。
 
-## 当前用户场景
+## 当前用户场景与 PC 真机结果
 
-用户报告：此前断开 VPN 时 .6 → .9 NetBird DNS 链路可解析 netcenter.local，连接 VPN 后失败。
-PC 0.0.48 当前 baseline core 的 App state=connected，配置 DNS 为公网 223.5.5.5 / 114.114.114.114，interface_dns=null；不是新 DNS HAP 的设备验收。
-尚未取得 OS 最终生效 DNS 值，也没有物理 Wi-Fi DNS 的直接证据，不能据此裁定根因。
-此前 ROM ping 私域报 `Name does not resolve`，公网 example 可解析；当时 VPN 状态未证，不能当作本次切网 A/B。
-自带 ELF 临时 probe 被 ROM `Permission denied`，已清理；后续使用 App、已有系统工具或 browser 验收。
-未改 .6/.9 生产配置；未实现另一个 fakeIP 分类网关项目。
+用户此前报告：断开 VPN 时 .6 → .9 NetBird DNS 链路可解析 netcenter.local，连接 VPN 后失败。
+用户唤醒 PC 后，恰好一次 `tconn` 返回 `Connect OK`，随后一次 echo 收到字面 `__ALIVE__`。
+指定最终 signed SHA256 `fdc9ac8d8291e1d88d3eedf50c2dd2b9dc7474306d8c4441bd641d50bff03a65` 包仅一次 `install -r` 成功；保留账户数据，同版本 0.0.48 / 48 覆盖安装。
+updateTime 从 `1792064905737` 更新为 `1792107608517`，PID `45413 → 9967`；随后仅一次启动 App、一次 NetBird“连接”点击。
+装后新会话取得 fresh `connected`（`started_at_unix=1792107654`、`updated_at_ms=1792107660648`）；日志为 native DNS `ready=true`、`localIP=100.108.255.254`、`records=21`、`groups=1`。
+
+| 同一 PC 的 ROM 系统 ping | 装前旧客户端 fresh connected | 装后新会话 connected |
+| --- | --- | --- |
+| netcenter.netcenter.local | `Name does not resolve` | `100.108.227.115`，ICMP 1/1、34ms |
+| nethostdebian.netcenter.local | 未测，无装前对照 | `100.108.171.38`，ICMP 1/1、5ms |
+| example.com | `172.66.147.243`，ICMP 1/1、207ms | 同 IP，ICMP 1/1、206ms |
+
+本轮未改 .6/.9、系统 DNS、路由偏好或账号凭据；未卸载、清数据或重新登录。未读取账号设置文件，不能据此声称所有设置逐项一致。
+本轮仅证明 ROM 系统 ping 的 IPv4 解析和 ICMP；浏览器、设备 TCP 与 AAAA 尚未验证。上游 UDP/TCP/AAAA 已有主机测试，不等同于这些入口的真机证据。
+新进程完整 build hash、`VPN_LOCAL_DNS` 全部 create 参数、`applied_dns`、search 及 queries/drop counters 未直接取得。
+App `interface_dns=null`、`dns_servers=[223.5.5.5:53,114.114.114.114:53]` 仅是配置快照，不是平台最终 create 实参或 OS DNS 属性的直接 readback；实际物理 Wi-Fi DNS 也未直接取得。
+`/proc/net/route` 单表可见 `vpn-tun 100.108.0.0/16`，未见虚拟 DNS `/32`；单表未显示不能否定已成功的系统解析，也不能声称已实测新增 `/32`。
+其它路由与生命周期行为仍需按下列清单验证；未实现另一个 fakeIP 分类网关项目。
 
 ## 可复制的 host 验证命令
 
