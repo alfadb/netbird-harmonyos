@@ -1599,7 +1599,86 @@ struct ConnectorShared {
     /// [`ConnectorShared::refresh_net_gate_at`]), and a guard of this leaf is
     /// never held while acquiring `inner` or `ice`.
     ice_snapshot: Mutex<Option<IceStatusSample>>,
+    // Serialized by route_apply; never join a worker under inner or a WG lock.
+    dns: Mutex<ConnectorDns>,
+    dns_supply: std::sync::OnceLock<Arc<crate::socket_supply::SocketSupply>>,
+    dns_feed: std::sync::OnceLock<Arc<crate::wg_device::WgDeviceFeed>>,
 }
+
+#[derive(Default)]
+struct ConnectorDns {
+    runtime: Option<crate::dns_runtime::DnsRuntime>,
+    local: ShellLocalDns,
+    applied: Option<(String, Vec<String>)>,
+    config: Option<crate::network_map::DnsConfig>,
+    mtu: usize,
+    // Stage/class only: resolver errors can contain private domains or RDATA.
+    last_error: Option<String>,
+}
+
+impl ConnectorDns {
+    fn status_json(&self) -> String {
+        let stats = self.runtime.as_ref().map(|runtime| runtime.handle().stats()).unwrap_or_default();
+        format!(
+            "{{{},{},{},{},{},{},{},{},\"accepted\":{},\"queries\":{},\"failures\":{},\"dropped_input\":{},\"dropped_output\":{}}}",
+            jbool("running", stats.running),
+            jbool("service_enable", self.config.as_ref().is_some_and(|config| config.service_enable)),
+            jstr("local_resolver_ip", &self.local.local_resolver_ip),
+            jbool("local_resolver_ready", stats.running),
+            jnum("search_domain_count", self.local.search_domains.len() as u64),
+            jnum("custom_zone_count", self.local.custom_zone_count as u64),
+            jnum("record_count", self.local.record_count as u64),
+            format!("{},{}", jnum("nameserver_group_count", self.local.nameserver_group_count as u64),
+                self.last_error.as_ref().map(|error| jstr("last_error", error)).unwrap_or_else(|| "\"last_error\":null".into())),
+            stats.accepted, stats.queries, stats.failures, stats.dropped_input, stats.dropped_output,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellLocalDns {
+    pub local_resolver_ip: String,
+    pub local_resolver_ready: bool,
+    pub search_domains: Vec<String>,
+    pub custom_zone_count: usize,
+    pub record_count: usize,
+    pub nameserver_group_count: usize,
+}
+
+impl ShellLocalDns {
+    fn platform_key(&self) -> (String, Vec<String>) {
+        let ip = self.local_resolver_ip.parse::<std::net::Ipv4Addr>().ok();
+        if !self.local_resolver_ready || ip.is_none() {
+            return (String::new(), Vec::new());
+        }
+        let mut domains = Vec::new();
+        for value in &self.search_domains {
+            // Same ASCII/punycode contract as shell normalizeSearchDomains.
+            let domain = value.trim().trim_end_matches('.').to_ascii_lowercase();
+            if domain.is_empty() || domain.len() > 253 || domains.contains(&domain) {
+                continue;
+            }
+            if domain.split('.').all(|label| !label.is_empty() && label.len() <= 63
+                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+                domains.push(domain);
+            }
+        }
+        (ip.unwrap().to_string(), domains)
+    }
+
+    fn to_json_fields(&self) -> String {
+        format!("{},{},\"search_domains\":[{}],{},{},{}",
+            jstr("local_resolver_ip", &self.local_resolver_ip),
+            jbool("local_resolver_ready", self.local_resolver_ready),
+            self.search_domains.iter().map(|s| format!("\"{}\"", crate::util::json_escape(s))).collect::<Vec<_>>().join(","),
+            jnum("custom_zone_count", self.custom_zone_count as u64),
+            jnum("record_count", self.record_count as u64),
+            jnum("nameserver_group_count", self.nameserver_group_count as u64))
+    }
+}
+
 
 /// 2026-10-09 (ArkTS main-thread freeze fix): ONE ICE status sub-snapshot —
 /// everything `connector_status()` needs from the peer-ICE orchestrator, read
@@ -1742,6 +1821,105 @@ impl ConnectorShared {
             relay_ads: Arc::new(Mutex::new(HashMap::new())),
             route_apply: Mutex::new(()),
             ice_snapshot: Mutex::new(None),
+            dns: Mutex::new(ConnectorDns::default()),
+            dns_supply: std::sync::OnceLock::new(),
+            dns_feed: std::sync::OnceLock::new(),
+        }
+    }
+
+    // Called only with route_apply held, before publishing the shell snapshot.
+    fn apply_dns(&self, map: &NetworkMap) -> (ShellLocalDns, Option<crate::network_map::DnsConfig>) {
+        if self.dns_supply.get().is_none() {
+            return (ShellLocalDns::default(), map.dns.clone());
+        }
+        let mut slot = self.dns.lock_poison();
+        let prepared = (|| -> Result<_, &'static str> {
+            let ip = match map.peer.as_ref().and_then(|p| p.address.as_deref()) {
+                Some(raw) => crate::dns_resolver::runtime_ip_from_cidr(raw).map_err(|_| "resolver-ip-invalid-cidr")?,
+                // A later empty map still replaces DNS rules. Its missing peer
+                // does not revoke the already announced permanent resolver IP.
+                None => slot.local.local_resolver_ip.parse().map_err(|_| "peer-cidr-missing")?,
+            };
+            let snapshot = Arc::new(crate::dns_resolver::DnsResolverSnapshot::new(map.dns.as_ref(), ip).map_err(|_| "resolver-snapshot-invalid-config")?);
+            // Resolver search_domains currently renders Unicode. The shell contract
+            // requires the DNS wire spelling (ASCII/punycode).
+            let search_domains = snapshot.search_domains().iter().map(|s| {
+                hickory_proto::rr::Name::from_utf8(s).map(|n| n.to_ascii()).map_err(|_| "search-domain-ascii-conversion-failed")
+            }).collect::<Result<Vec<_>, _>>()?;
+            hilog::emit(&format!("connector: dns snapshot skipped records={} zones={} nameservers={} group_domains={}",
+                snapshot.skipped_records(), snapshot.skipped_zones(), snapshot.skipped_nameservers(), snapshot.skipped_group_domains()));
+            let configured = map.dns.as_ref();
+            let local = ShellLocalDns {
+                local_resolver_ip: ip.to_string(),
+                local_resolver_ready: false,
+                search_domains,
+                custom_zone_count: configured.map_or(0, |d| d.custom_zones.iter().filter(|z| !z.records.is_empty() && !z.domain.is_empty() && hickory_proto::rr::Name::from_utf8(&z.domain).is_ok()).count()),
+                record_count: configured.map_or(0, |d| d.custom_zones.iter().map(|z| z.records.len()).sum::<usize>()).saturating_sub(snapshot.skipped_records()),
+                nameserver_group_count: configured.map_or(0, |d| d.name_server_groups.iter().filter(|g| !g.name_servers.is_empty()).count()),
+            };
+            let mtu = map.peer.as_ref().and_then(|p| p.mtu).filter(|m| (config::MTU_MIN as i32..=config::MTU_MAX as i32).contains(m)).map(|m| m as usize).unwrap_or(if slot.mtu == 0 { 1280 } else { slot.mtu });
+            Ok((ip, snapshot, local, mtu))
+        })();
+        if let Ok((ip, snapshot, mut local, mtu)) = prepared {
+            if let Some(supply) = self.dns_supply.get() {
+                let reusable = slot.runtime.as_ref().is_some_and(|r| r.handle().stats().running)
+                    && slot.local.local_resolver_ip == local.local_resolver_ip && slot.mtu == mtu;
+                if reusable {
+                    slot.runtime.as_ref().unwrap().update(snapshot);
+                } else {
+                    // Prepare the replacement before retiring the last usable service.
+                    match crate::dns_runtime::DnsRuntime::start(ip, mtu, snapshot, supply.clone(), 0) {
+                        Ok(runtime) => {
+                            if let Some(feed) = self.dns_feed.get() {
+                                feed.set_dns_handle(Some(runtime.handle()));
+                            }
+                            if let Some(mut previous) = slot.runtime.replace(runtime) {
+                                previous.stop_and_join(); // no inner, feed or device lock is held
+                            }
+                        }
+                        Err(error) => {
+                            let summary = format!("runtime-start:{:?}:os={:?}", error.kind(), error.raw_os_error());
+                            hilog::emit(&format!("connector: dns config rejected {summary}; retaining last usable config"));
+                            slot.last_error = Some(summary);
+                            let mut old = slot.local.clone();
+                            old.local_resolver_ready = slot.runtime.as_ref().is_some_and(|r| r.handle().stats().running);
+                            return (old, slot.config.clone());
+                        }
+                    }
+                }
+                local.local_resolver_ready = slot.runtime.as_ref().is_some_and(|r| r.handle().stats().running);
+            }
+            slot.local = local;
+            slot.mtu = mtu;
+            slot.config = map.dns.clone();
+            slot.last_error = None;
+        } else if let Err(summary) = prepared {
+            // Never stop the service still named by the platform's virtual address.
+            hilog::emit(&format!("connector: dns config rejected {summary}; retaining last usable config"));
+            slot.last_error = Some(summary.to_string());
+        }
+        let mut local = slot.local.clone();
+        local.local_resolver_ready = slot.runtime.as_ref().is_some_and(|r| r.handle().stats().running);
+        hilog::emit(&format!("connector: dns config applied enabled={} ready={} localIP={} zones={} records={} groups={}",
+            slot.config.as_ref().is_some_and(|d| d.service_enable), local.local_resolver_ready,
+            local.local_resolver_ip, local.custom_zone_count, local.record_count, local.nameserver_group_count));
+        (local, slot.config.clone())
+    }
+
+    fn stop_dns(&self) {
+        let _apply = self.route_apply.lock_poison();
+        if let Some(feed) = self.dns_feed.get() { feed.set_dns_handle(None); }
+        let runtime = {
+            let mut slot = self.dns.lock_poison();
+            let runtime = slot.runtime.take();
+            *slot = ConnectorDns::default();
+            runtime
+        };
+        if let Some(mut runtime) = runtime {
+            runtime.stop_and_join(); // outside inner and every WG/feed lock
+        }
+        if let Some(snapshot) = self.lock().net_config.as_mut() {
+            snapshot.local_dns.local_resolver_ready = false;
         }
     }
 
@@ -1760,6 +1938,7 @@ impl ConnectorShared {
         if self.running.swap(v, Ordering::AcqRel) != v {
             crate::status_events::edge("connector-running");
         }
+        if !v { self.stop_dns(); }
     }
 
     /// Drive the state machine, ignoring transitions that are illegal from
@@ -2053,6 +2232,12 @@ impl ConnectorShared {
             .filter(|r| !r.is_default || allowed)
             .map(|r| r.network.clone())
             .collect();
+        let dns_changed = {
+            let slot = self.dns.lock_poison();
+            snap.local_dns.local_resolver_ready = slot.runtime.as_ref().is_some_and(|runtime| runtime.handle().stats().running);
+            slot.applied.as_ref().map_or(snap.local_dns.local_resolver_ready,
+                |applied| applied != &snap.local_dns.platform_key())
+        };
         inner.recreate.cooling_down = false;
         match inner.applied_route_set.as_ref() {
             // the shell never ACKed an applied set (older shell / initial
@@ -2066,7 +2251,7 @@ impl ConnectorShared {
             // prefix, so an HA owner/metric swap — or merely duplicate/permuted
             // rows — on the same prefixes is NOT a desired-set change and must
             // neither raise the signal nor spend automatic recreate budget.
-            Some(applied) if !recreate_needed_for(&desired, Some(applied)) => {
+            Some(applied) if !dns_changed && !recreate_needed_for(&desired, Some(applied)) => {
                 inner.recreate.required = false;
                 inner.recreate.reason = "none".to_string();
             }
@@ -2134,8 +2319,15 @@ impl ConnectorShared {
     /// (the NAPI entry carries `kind` as a string — see
     /// [`connector_route_set_applied_kind_json`]).
     fn ack_applied_route_set_kind(&self, routes: Vec<String>, kind: RouteAckKind, now_ms: u64) {
+        self.ack_applied_platform_set(routes, None, kind, now_ms);
+    }
+
+    fn ack_applied_platform_set(&self, routes: Vec<String>, applied_dns: Option<(String, Vec<String>)>, kind: RouteAckKind, now_ms: u64) {
         let mut g = self.lock();
         g.applied_route_set = Some(routes.clone());
+        // Only create's receipt is evidence. Missing legacy payload is unknown,
+        // even if a newer desired config is already available here.
+        self.dns.lock_poison().applied = applied_dns;
         match kind {
             RouteAckKind::Initial => {
                 g.recreate.required = false;
@@ -2757,6 +2949,7 @@ impl ConnectorShared {
                 None => true, // no orchestrator (unit-test construction): N3-7 semantics unchanged
             }
         };
+        let (local_dns, applied_dns) = self.apply_dns(map);
         {
             let mut g = self.lock();
             g.last_serial = map.serial;
@@ -2771,8 +2964,11 @@ impl ConnectorShared {
             let relay_ready = self.relay_ready();
             let data_plane_ready =
                 two_path_readiness(wg.tunnel_ready(), ice_ready, relay_ready);
+            let mut dns_map = map.clone();
+            dns_map.dns = applied_dns;
             let mut snapshot =
-                ShellNetworkConfig::from_map_gated(map, g.force_default_route, data_plane_ready);
+                ShellNetworkConfig::from_map_gated(&dns_map, g.force_default_route, data_plane_ready);
+            snapshot.local_dns = local_dns;
             if data_plane_ready && !g.force_default_route && !ice_ready && relay_ready {
                 // the relay path enabled the route — name it in the token
                 snapshot.default_route_reason = DEFAULT_ROUTE_REASON_RELAY_READY.to_string();
@@ -4856,6 +5052,7 @@ pub struct ShellNetworkConfig {
     pub routes: Vec<ShellRouteEntry>,
     pub dns_service_enable: bool,
     pub dns_servers: Vec<ShellDnsServer>,
+    pub local_dns: ShellLocalDns,
     pub peers: Vec<ShellPeerSummary>,
     /// N3-7 default-route safety gate: TRUE only when the data plane can
     /// actually carry traffic (registered peers + WG `tunnel_ready()`), or
@@ -5097,6 +5294,7 @@ impl ShellNetworkConfig {
             routes,
             dns_service_enable: map.dns.as_ref().map(|d| d.service_enable).unwrap_or(false),
             dns_servers,
+            local_dns: ShellLocalDns::default(),
             peers,
             default_route_allowed,
             default_route_reason,
@@ -5229,7 +5427,7 @@ impl ShellNetworkConfig {
             signal,
             routes,
             jbool("service_enable", self.dns_service_enable),
-            format!("\"servers\":[{dns_servers}]"),
+            format!("\"servers\":[{dns_servers}],{}", self.local_dns.to_json_fields()),
             jnum("peer_count", self.peers.len() as u64),
             peers,
             jbool("allowed", self.default_route_allowed),
@@ -6149,6 +6347,12 @@ impl ConnectorHandle {
             crate::socket_supply::install(supply.clone());
             supply
         });
+        if let Some(supply) = socket_supply.as_ref() {
+            let _ = shared.dns_supply.set(supply.clone());
+        }
+        if let Some(feed) = wg_feed.as_ref() {
+            let _ = shared.dns_feed.set(feed.clone());
+        }
         let ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>;
         let ice_mux: Option<crate::peer_conn::IceMuxSlot>;
         let ice = match ice {
@@ -6385,7 +6589,12 @@ impl ConnectorHandle {
         // behind the ICE pump's 8–11 s gather, freezing the shell's 5 s status
         // poll.
         let ice = self.shared.ice_status_sample();
-        let base = self.status_with_ice(&ice).to_json();
+        let mut base = self.status_with_ice(&ice).to_json();
+        let dns = try_lock_poison(&self.shared.dns)
+            .map(|slot| slot.status_json())
+            .unwrap_or_else(|| "null".to_string());
+        base.pop();
+        base.push_str(&format!(",\"dns_runtime\":{dns}}}"));
         // N5c socket-depth observability (HOST-CLI FEED): expose the remaining
         // depth of the protected UDP source so a FEEDER can read the real value.
         // A feeder that only learns the depth from its own feed calls keeps a
@@ -7819,6 +8028,12 @@ fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
 /// `recreate.required` flag clears exactly when the shell's applied set
 /// matches the desired one.
 ///
+/// `applied_dns` optionally accompanies routes in the same JSON document:
+/// `{"local_resolver_ip":"<bare IPv4 or empty>","search_domains":["example.com"]}`.
+/// It is captured from the config submitted to create; empty IP means no native
+/// DNS was submitted. A missing field keeps DNS unknown and cannot acknowledge
+/// the live desired config. Production shell always sends it on both legs.
+///
 /// Failure tokens: `route-set-invalid` (malformed JSON / non-string entries /
 /// missing `routes` field) or `no-connector`. The document is validated BEFORE
 /// the connector lookup, so a malformed `routesJson` answers `route-set-invalid`
@@ -7831,10 +8046,9 @@ fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
 /// set (see that entry point) — recording it is what lets a later,
 /// default-ENABLED network raise the recreate signal.
 pub fn connector_route_set_applied_json(routes_json: &str, is_recreate: bool) -> String {
-    route_set_applied_entry(routes_json, move |handle, routes| {
-        handle
-            .shared
-            .ack_applied_route_set(routes, is_recreate, crate::sys::mono_ms());
+    route_set_applied_entry(routes_json, move |handle, routes, dns| {
+        handle.shared.ack_applied_platform_set(routes, dns,
+            if is_recreate { RouteAckKind::Auto } else { RouteAckKind::Initial }, crate::sys::mono_ms());
     })
 }
 
@@ -7877,10 +8091,8 @@ pub fn connector_route_set_applied_kind_json(routes_json: &str, kind: &str) -> S
     let Some(kind) = RouteAckKind::parse(kind) else {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "kind-invalid"));
     };
-    route_set_applied_entry(routes_json, move |handle, routes| {
-        handle
-            .shared
-            .ack_applied_route_set_kind(routes, kind, crate::sys::mono_ms());
+    route_set_applied_entry(routes_json, move |handle, routes, dns| {
+        handle.shared.ack_applied_platform_set(routes, dns, kind, crate::sys::mono_ms());
     })
 }
 
@@ -7892,7 +8104,7 @@ pub fn connector_route_set_applied_kind_json(routes_json: &str, kind: &str) -> S
 /// nothing running and mutates nothing either way.
 fn route_set_applied_entry(
     routes_json: &str,
-    ack: impl FnOnce(&ConnectorHandle, Vec<String>),
+    ack: impl FnOnce(&ConnectorHandle, Vec<String>, Option<(String, Vec<String>)>),
 ) -> String {
     let routes = match parse_route_set(routes_json) {
         Ok(r) => r,
@@ -7904,17 +8116,39 @@ fn route_set_applied_entry(
             )
         }
     };
+    let dns = match parse_applied_dns(routes_json) {
+        Ok(dns) => dns,
+        Err(_) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "route-set-invalid")),
+    };
     let slot = connector_slot();
     let Some(handle) = slot.as_ref() else {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
     };
-    ack(handle, routes);
+    ack(handle, routes, dns);
     let recreate = handle.shared.lock().recreate.clone();
     format!(
         "{{{},{}}}",
         jbool("ok", true),
         format!("\"recreate\":{}", recreate.to_json())
     )
+}
+
+/// `applied_dns` identifies native DNS in the VpnConfig submitted to create.
+/// Empty IP explicitly means no native resolver was submitted; absent means
+/// unknown (legacy route-only caller), never current desired DNS.
+fn parse_applied_dns(json: &str) -> Result<Option<(String, Vec<String>)>, ConfigError> {
+    let invalid = || ConfigError::Field { field: "applied_dns", reason: "expected IP and search-domain snapshot".into() };
+    let Json::Obj(entries) = config::parse_document(json)? else { return Err(invalid()); };
+    let Some((_, value)) = entries.iter().find(|(key, _)| key == "applied_dns") else { return Ok(None); };
+    let Json::Obj(fields) = value else { return Err(invalid()); };
+    let ip = fields.iter().find(|(key, _)| key == "local_resolver_ip")
+        .map(|(_, value)| field_str(value, "applied_dns")).transpose()?.ok_or_else(invalid)?;
+    if !ip.is_empty() && ip.parse::<std::net::Ipv4Addr>().is_err() { return Err(invalid()); }
+    let Some((_, Json::Arr(values))) = fields.iter().find(|(key, _)| key == "search_domains") else { return Err(invalid()); };
+    let domains = values.iter().map(|value| field_str(value, "applied_dns").map(str::to_string)).collect::<Result<Vec<_>, _>>()?;
+    if ip.is_empty() && !domains.is_empty() { return Err(invalid()); }
+    Ok(Some(ShellLocalDns { local_resolver_ip: ip.into(), local_resolver_ready: !ip.is_empty(),
+        search_domains: domains, ..Default::default() }.platform_key()))
 }
 
 /// Parse the `{"routes":["a.b.c.d/p",...]}` argument of
@@ -12448,6 +12682,469 @@ mod tests {
         fn clear(&self) {}
     }
 
+    fn native_dns_map() -> NetworkMap {
+        use crate::network_map::{CustomZone, SimpleRecord};
+        let mut map = shell_test_map();
+        map.peer.as_mut().unwrap().address = Some("100.100.1.2/16".into());
+        let dns = map.dns.as_mut().unwrap();
+        dns.name_server_groups.truncate(1);
+        dns.custom_zones = vec![CustomZone {
+            domain: "bücher.example".into(), search_domain_disabled: false, non_authoritative: false,
+            records: vec![SimpleRecord { name: "host.bücher.example".into(), r#type: 1, class: "IN".into(), ttl: 60, r_data: "192.0.2.1".into() }],
+        }];
+        map
+    }
+
+    fn native_dns_apply(shared: &ConnectorShared, map: NetworkMap) {
+        shared.apply_update(&WgPeerRegistry::new(), &NoopHost,
+            &SyncUpdate { session_deadline_unix: None, netbird_config: None, network_map: Some(map) });
+    }
+
+    fn native_dns_frame(ip: &str, id: u16, name: &str) -> Vec<u8> {
+        use hickory_proto::{op::{Message, Query}, rr::{Name, RecordType}};
+        let mut query = Message::new();
+        query.set_id(id).set_recursion_desired(true)
+            .add_query(Query::query(Name::from_utf8(name).unwrap(), RecordType::A));
+        let wire = query.to_vec().unwrap();
+        let mut frame = vec![0; 28 + wire.len()];
+        let length = frame.len() as u16;
+        frame[0] = 0x45;
+        frame[2..4].copy_from_slice(&length.to_be_bytes());
+        frame[8] = 64;
+        frame[9] = 17;
+        frame[12..16].copy_from_slice(&[100, 100, 1, 2]);
+        frame[16..20].copy_from_slice(&ip.parse::<std::net::Ipv4Addr>().unwrap().octets());
+        frame[20..22].copy_from_slice(&41000u16.to_be_bytes());
+        frame[22..24].copy_from_slice(&53u16.to_be_bytes());
+        frame[24..26].copy_from_slice(&((wire.len() + 8) as u16).to_be_bytes());
+        frame[28..].copy_from_slice(&wire);
+        smoltcp::wire::Ipv4Packet::new_unchecked(&mut frame[..]).fill_checksum();
+        frame
+    }
+
+    fn native_dns_query(handle: &crate::dns_runtime::DnsHandle, ip: &str, id: u16, name: &str) -> hickory_proto::op::Message {
+        native_dns_supplied_query(handle, ip, id, name, None)
+    }
+
+    fn native_dns_supplied_query(handle: &crate::dns_runtime::DnsHandle, ip: &str, id: u16, name: &str, supply: Option<&crate::socket_supply::SocketSupply>) -> hickory_proto::op::Message {
+        let frame = native_dns_frame(ip, id, name);
+        let before = handle.stats().accepted;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        // try_ingest is deliberately nonblocking, so retry only if contention
+        // dropped this test's sole frame before acceptance.
+        loop {
+            assert!(handle.try_ingest(&frame, 0));
+            if handle.stats().accepted > before { break; }
+            assert!(std::time::Instant::now() < until, "DNS input deadline");
+            std::thread::yield_now();
+        }
+        loop {
+            if let Some((id, purpose)) = supply.and_then(|supply| supply.poll_request()) {
+                use std::os::fd::AsRawFd;
+                assert_eq!(purpose, crate::socket_supply::Purpose::Dns);
+                let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                socket.set_nonblocking(true).unwrap();
+                assert_eq!(supply.unwrap().reply(id, socket.as_raw_fd(), "protected"), "{\"ok\":true}");
+            }
+            for output in handle.take_packets(128) {
+                assert_eq!(output.generation, 0);
+                let ip = smoltcp::wire::Ipv4Packet::new_checked(&output.frame[..]).unwrap();
+                let udp = smoltcp::wire::UdpPacket::new_checked(ip.payload()).unwrap();
+                let reply = hickory_proto::op::Message::from_vec(udp.payload()).unwrap();
+                if reply.id() == id { return reply; }
+            }
+            assert!(std::time::Instant::now() < until, "DNS response deadline");
+            let mut fd = crate::sys::pollfd { fd: handle.wake_fd(), events: crate::sys::POLLIN, revents: 0 };
+            unsafe { crate::sys::poll(&mut fd, 1, 10); }
+            handle.drain_wake();
+        }
+    }
+
+    #[test]
+    fn native_dns_late_initial_route_ack_must_not_ack_live_dns() {
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let map = native_dns_map();
+        // Initial create captured A before the runtime was ready. B arrives
+        // while platform create / TUN feed are awaiting completion.
+        let a = ShellNetworkConfig::from_map_gated(&map, false, false);
+        assert!(!a.local_dns.local_resolver_ready);
+        let routes = a.routes.iter().map(|r| r.network.clone()).collect();
+        native_dns_apply(&shared, map);
+        shared.ack_applied_platform_set(routes, Some(a.local_dns.platform_key()), RouteAckKind::Initial, 0);
+        assert_eq!(shared.dns.lock_poison().applied, Some((String::new(), Vec::new())));
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), 1);
+        assert!(shared.lock().recreate.required, "late A ACK must leave B unapplied");
+        let b = shared.lock().net_config.as_ref().unwrap().clone();
+        shared.ack_applied_platform_set(b.routes.iter().map(|r| r.network.clone()).collect(),
+            Some(b.local_dns.platform_key()), RouteAckKind::Auto, 2);
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), RECREATE_COOLDOWN_MS + 3);
+        assert!(!shared.lock().recreate.required);
+        assert_eq!(shared.lock().recreate.count, 1);
+        shared.stop_dns();
+    }
+
+    #[test]
+    fn native_dns_late_ready_ack_keeps_ip_or_search_change_pending() {
+        for change_ip in [false, true] {
+            let shared = ConnectorShared::new(false, None);
+            let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+            let mut map = native_dns_map();
+            native_dns_apply(&shared, map.clone());
+            let a = shared.lock().net_config.as_ref().unwrap().clone();
+            map.serial += 1;
+            if change_ip {
+                map.peer.as_mut().unwrap().address = Some("100.101.1.2/16".into());
+            } else {
+                map.dns.as_mut().unwrap().custom_zones[0].search_domain_disabled = true;
+            }
+            native_dns_apply(&shared, map.clone());
+            shared.ack_applied_platform_set(a.routes.iter().map(|r| r.network.clone()).collect(),
+                Some(a.local_dns.platform_key()), RouteAckKind::Initial, 0);
+            shared.refresh_net_gate_at(&WgPeerRegistry::new(), 1);
+            assert!(shared.lock().recreate.required, "late A ACK: change_ip={change_ip}");
+            let b = shared.lock().net_config.as_ref().unwrap().clone();
+            shared.ack_applied_platform_set(b.routes.iter().map(|r| r.network.clone()).collect(),
+                Some(b.local_dns.platform_key()), RouteAckKind::Auto, 2);
+            // Rules change during the B ACK interval does not change platform DNS.
+            map.serial += 1;
+            map.dns.as_mut().unwrap().custom_zones[0].records[0].r_data = "192.0.2.9".into();
+            native_dns_apply(&shared, map);
+            shared.refresh_net_gate_at(&WgPeerRegistry::new(), RECREATE_COOLDOWN_MS + 3);
+            assert!(!shared.lock().recreate.required);
+            assert_eq!(shared.lock().recreate.count, 1);
+            // A route-only legacy call does not infer DNS from live state.
+            shared.ack_applied_route_set(b.routes.iter().map(|r| r.network.clone()).collect(), false, 4);
+            assert!(shared.dns.lock_poison().applied.is_none());
+            shared.refresh_net_gate_at(&WgPeerRegistry::new(), RECREATE_COOLDOWN_MS + 4);
+            assert!(shared.lock().recreate.required);
+            shared.stop_dns();
+        }
+    }
+
+    #[test]
+    fn native_dns_route_ack_payload_normalizes_platform_shape() {
+        let receipt = r#"{"routes":[],"applied_dns":{"local_resolver_ip":"100.108.255.254","search_domains":[" XN--BCHER-KVA.Example. ","xn--bcher-kva.example","*.bad","-bad.test",""]}}"#;
+        assert_eq!(parse_applied_dns(receipt).unwrap(), Some(("100.108.255.254".into(), vec!["xn--bcher-kva.example".into()])));
+        assert_eq!(parse_applied_dns(r#"{"routes":[]}"#).unwrap(), None);
+        assert_eq!(parse_applied_dns(r#"{"routes":[],"applied_dns":{"local_resolver_ip":"","search_domains":[]}}"#).unwrap(), Some((String::new(), vec![])));
+        for bad in [r#"{"routes":[],"applied_dns":{}}"#,
+            r#"{"routes":[],"applied_dns":{"local_resolver_ip":"100.108.255.254:53","search_domains":[]}}"#,
+            r#"{"routes":[],"applied_dns":{"local_resolver_ip":"","search_domains":["example.com"]}}"#] {
+            assert!(parse_applied_dns(bad).is_err());
+            assert!(connector_route_set_applied_kind_json(bad, "initial").contains("route-set-invalid"));
+        }
+    }
+
+    #[test]
+    fn native_dns_apply_lifecycle_and_platform_changes() {
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let mut map = native_dns_map();
+        assert!(!ShellNetworkConfig::from_map_gated(&map, false, false).local_dns.local_resolver_ready);
+        native_dns_apply(&shared, map.clone());
+        let local = shared.lock().net_config.as_ref().unwrap().local_dns.clone();
+        assert!(local.local_resolver_ready, "worker is ready even before any TUN/feed");
+        assert_eq!(local.local_resolver_ip, "100.100.255.254");
+        assert_eq!(local.search_domains, vec!["xn--bcher-kva.example."]);
+        assert_eq!((local.custom_zone_count, local.record_count, local.nameserver_group_count), (1, 1, 1));
+        let exported = shared.network_config_json();
+        crate::config::parse_document(&exported).unwrap();
+        for field in ["\"port\":853", "\"local_resolver_ip\":\"100.100.255.254\"", "\"local_resolver_ready\":true", "\"search_domains\":[\"xn--bcher-kva.example.\"]", "\"custom_zone_count\":1", "\"record_count\":1", "\"nameserver_group_count\":1"] {
+            assert!(exported.contains(field), "missing DNS field {field}: {exported}");
+        }
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        assert_eq!(native_dns_query(&handle, &local.local_resolver_ip, 1, "host.bücher.example").answers()[0].data().to_string(), "192.0.2.1");
+        let routes = shared.lock().net_config.as_ref().unwrap().routes.iter().map(|r| r.network.clone()).collect();
+        shared.ack_applied_platform_set(routes, Some(local.platform_key()), RouteAckKind::Initial, 0);
+        map.serial += 1;
+        map.dns.as_mut().unwrap().custom_zones[0].records[0].r_data = "192.0.2.2".into();
+        map.dns.as_mut().unwrap().name_server_groups[0].name_servers[1].port = 5353;
+        native_dns_apply(&shared, map.clone());
+        assert!(Arc::ptr_eq(&handle, &shared.dns.lock_poison().runtime.as_ref().unwrap().handle()));
+        assert_eq!(native_dns_query(&handle, &local.local_resolver_ip, 2, "host.bücher.example").answers()[0].data().to_string(), "192.0.2.2");
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), 1);
+        assert!(!shared.lock().recreate.required);
+        map.serial += 1;
+        map.dns.as_mut().unwrap().custom_zones[0].search_domain_disabled = true;
+        native_dns_apply(&shared, map.clone());
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), 2);
+        assert!(shared.lock().recreate.required);
+        let recreated_dns = shared.lock().net_config.as_ref().unwrap().local_dns.platform_key();
+        shared.ack_applied_platform_set(vec!["172.16.0.0/12".into()], Some(recreated_dns), RouteAckKind::Auto, 2);
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), 3);
+        assert!(!shared.lock().recreate.required);
+        assert_eq!(shared.lock().recreate.count, 1);
+        map.serial += 1;
+        map.peer.as_mut().unwrap().address = Some("100.101.1.2/16".into());
+        native_dns_apply(&shared, map.clone());
+        assert!(!handle.stats().running, "replaced worker has joined");
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), RECREATE_COOLDOWN_MS + 3);
+        assert!(shared.lock().recreate.required);
+        let active = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        shared.stop_dns();
+        assert!(!active.stats().running);
+        assert!(shared.dns.lock_poison().runtime.is_none());
+        native_dns_apply(&shared, map);
+        assert!(shared.dns.lock_poison().runtime.as_ref().unwrap().handle().stats().running);
+        shared.stop_dns();
+    }
+
+    #[test]
+    fn native_dns_map_before_tun_and_restart_attach_the_owned_worker() {
+        use std::os::{fd::AsRawFd, unix::net::UnixDatagram};
+        use crate::wg_device::{WgDeviceConfig, WgDeviceFeed};
+        fn tun_query(feed: &WgDeviceFeed, os: &UnixDatagram, id: u16) {
+            os.send(&native_dns_frame("100.100.255.254", id, "host.bücher.example")).unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                feed.with_device(|device| {
+                    device.service_tun(crate::sys::mono_ms());
+                    device.service_dns_tx();
+                }).unwrap();
+                let mut frame = [0; 2048];
+                match os.recv(&mut frame) {
+                    Ok(n) => {
+                        let ip = smoltcp::wire::Ipv4Packet::new_checked(&frame[..n]).unwrap();
+                        let udp = smoltcp::wire::UdpPacket::new_checked(ip.payload()).unwrap();
+                        let reply = hickory_proto::op::Message::from_vec(udp.payload()).unwrap();
+                        assert_eq!(reply.id(), id);
+                        assert_eq!(reply.answers()[0].data().to_string(), "192.0.2.1");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("TUN query: {error}"),
+                }
+                assert!(std::time::Instant::now() < until, "TUN DNS response deadline");
+                WgDeviceFeed::pump_wait(&feed.pump_wait_plan(crate::sys::mono_ms(), false));
+            }
+        }
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let feed = Arc::new(WgDeviceFeed::new(WgDeviceConfig::new(base64::engine::general_purpose::STANDARD.encode([7; 32]))));
+        let _ = shared.dns_feed.set(feed.clone());
+        let map = native_dns_map();
+        native_dns_apply(&shared, map.clone());
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        let pending = feed.pump_wait_plan(0, false);
+        assert!(pending.tun_fd.is_none());
+        let wg = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        wg.set_nonblocking(true).unwrap();
+        let (tun, os) = UnixDatagram::pair().unwrap();
+        tun.set_nonblocking(true).unwrap();
+        os.set_nonblocking(true).unwrap();
+        feed.feed_wg_socket(wg.as_raw_fd()).unwrap();
+        feed.feed_tun(tun.as_raw_fd()).unwrap();
+        assert!(Arc::ptr_eq(feed.pump_wait_plan(0, false).dns_handle.as_ref().unwrap(), &handle));
+        tun_query(&feed, &os, 30);
+        let socket = feed.socket_fd();
+        feed.release_tun().unwrap();
+        let (next_tun, next_os) = UnixDatagram::pair().unwrap();
+        next_tun.set_nonblocking(true).unwrap();
+        next_os.set_nonblocking(true).unwrap();
+        feed.feed_tun(next_tun.as_raw_fd()).unwrap();
+        assert_eq!(feed.socket_fd(), socket);
+        tun_query(&feed, &next_os, 31);
+        shared.set_running(false);
+        assert!(!handle.stats().running);
+        assert!(feed.pump_wait_plan(0, false).dns_handle.is_none());
+        feed.clear();
+        native_dns_apply(&shared, map);
+        let restarted = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        assert!(!Arc::ptr_eq(&handle, &restarted));
+        feed.feed_wg_socket(wg.as_raw_fd()).unwrap();
+        feed.feed_tun(next_tun.as_raw_fd()).unwrap();
+        assert!(Arc::ptr_eq(feed.pump_wait_plan(0, false).dns_handle.as_ref().unwrap(), &restarted));
+        tun_query(&feed, &next_os, 32);
+        shared.set_running(false);
+        assert!(!restarted.stats().running);
+        feed.clear();
+    }
+
+    #[test]
+    fn native_dns_upstream_only_update_changes_real_queries_without_recreate() {
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let mut map = native_dns_map();
+        let mut mocks = Vec::new();
+        let mut ports = Vec::new();
+        for code in [0u8, 3] {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            ports.push(socket.local_addr().unwrap().port());
+            mocks.push(std::thread::spawn(move || {
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut wire = [0; 2048];
+                let (n, peer) = socket.recv_from(&mut wire).unwrap();
+                wire[2] = 0x81;
+                wire[3] = 0x80 | code;
+                socket.send_to(&wire[..n], peer).unwrap();
+            }));
+        }
+        let group = &mut map.dns.as_mut().unwrap().name_server_groups[0];
+        group.primary = true;
+        group.domains.clear();
+        group.search_domains_enabled = false;
+        group.name_servers = vec![crate::network_map::NameServer { ip: "127.0.0.1".into(), ns_type: 1, port: ports[0] }];
+        native_dns_apply(&shared, map.clone());
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        let routes = shared.lock().net_config.as_ref().unwrap().routes.iter().map(|r| r.network.clone()).collect();
+        let applied_dns = shared.lock().net_config.as_ref().unwrap().local_dns.platform_key();
+        shared.ack_applied_platform_set(routes, Some(applied_dns), RouteAckKind::Initial, 0);
+        assert_eq!(native_dns_query(&handle, "100.100.255.254", 10, "remote.example").response_code(), hickory_proto::op::ResponseCode::NoError);
+        map.serial += 1;
+        map.dns.as_mut().unwrap().name_server_groups[0].name_servers[0].port = ports[1];
+        native_dns_apply(&shared, map);
+        shared.refresh_net_gate_at(&WgPeerRegistry::new(), 1);
+        assert!(!shared.lock().recreate.required);
+        assert_eq!(shared.lock().recreate.count, 0);
+        assert!(Arc::ptr_eq(&handle, &shared.dns.lock_poison().runtime.as_ref().unwrap().handle()));
+        assert_eq!(native_dns_query(&handle, "100.100.255.254", 11, "remote.example").response_code(), hickory_proto::op::ResponseCode::NXDomain);
+        for mock in mocks { mock.join().unwrap(); }
+        shared.stop_dns();
+        assert!(!handle.stats().running);
+    }
+
+    #[test]
+    fn native_dns_disabled_uses_current_physical_servers_from_same_supply() {
+        let shared = ConnectorShared::new(false, None);
+        let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+        let _ = shared.dns_supply.set(supply.clone());
+        let mut map = native_dns_map();
+        native_dns_apply(&shared, map.clone());
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        map.serial += 1;
+        map.dns.as_mut().unwrap().service_enable = false;
+        map.dns.as_mut().unwrap().name_server_groups.clear();
+        native_dns_apply(&shared, map);
+        // Distinct loopback servers prove fallback reads the current physical
+        // list while the permanent service still answers configured local RRs.
+        assert_eq!(native_dns_query(&handle, "100.100.255.254", 55, "host.bücher.example").answers().len(), 1);
+        for (last, code) in [(56u8, 0u8), (57, 3)] {
+            let physical = std::net::Ipv4Addr::new(127, 89, 53, last);
+            let server = std::net::UdpSocket::bind((physical, 53)).unwrap();
+            let mock = std::thread::spawn(move || {
+                server.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut wire = [0; 2048];
+                let (n, peer) = server.recv_from(&mut wire).unwrap();
+                wire[2] = 0x81;
+                wire[3] = 0x80 | code;
+                server.send_to(&wire[..n], peer).unwrap();
+            });
+            supply.set_dns_servers(vec![physical]);
+            let reply = native_dns_supplied_query(&handle, "100.100.255.254", last as u16, "remote.example", Some(&supply));
+            assert!(reply.answers().is_empty());
+            assert_eq!(u16::from(reply.response_code()), code as u16);
+            mock.join().unwrap();
+        }
+        assert!(handle.stats().running);
+        assert_eq!(handle.stats().queries, 3);
+        shared.stop_dns();
+        assert!(!handle.stats().running);
+    }
+
+    #[test]
+    fn native_dns_failed_start_preserves_ready_only_for_a_live_previous_worker() {
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let mut map = native_dns_map();
+        // CIDR arithmetic succeeds, but the real transport rejects multicast.
+        map.peer.as_mut().unwrap().address = Some("224.0.0.1/24".into());
+        native_dns_apply(&shared, map.clone());
+        assert!(!shared.lock().net_config.as_ref().unwrap().local_dns.local_resolver_ready);
+        assert!(shared.dns.lock_poison().runtime.is_none());
+        assert!(shared.dns.lock_poison().last_error.as_ref().unwrap().contains("runtime-start:InvalidInput"));
+        map.serial += 1;
+        map.peer.as_mut().unwrap().address = Some("100.100.1.2/16".into());
+        native_dns_apply(&shared, map.clone());
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        let ready = shared.lock().net_config.as_ref().unwrap().local_dns.clone();
+        map.serial += 1;
+        map.peer.as_mut().unwrap().address = Some("invalid-cidr".into());
+        native_dns_apply(&shared, map.clone());
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns, ready);
+        assert!(shared.dns.lock_poison().last_error.as_ref().unwrap().contains("resolver-ip-invalid-cidr"));
+        assert_eq!(native_dns_query(&handle, &ready.local_resolver_ip, 39, "host.bücher.example").answers().len(), 1);
+        map.serial += 1;
+        map.peer.as_mut().unwrap().address = Some("224.0.0.1/24".into());
+        native_dns_apply(&shared, map);
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns, ready);
+        assert_eq!(native_dns_query(&handle, &ready.local_resolver_ip, 40, "host.bücher.example").answers().len(), 1);
+        assert!(shared.dns.lock_poison().last_error.as_ref().unwrap().contains("runtime-start:InvalidInput"));
+        shared.set_running(false);
+        assert!(!handle.stats().running);
+        assert!(!shared.lock().net_config.as_ref().unwrap().local_dns.local_resolver_ready);
+    }
+
+    #[test]
+    fn native_dns_invalid_old_empty_disabled_and_absent_updates() {
+        let shared = ConnectorShared::new(false, None);
+        let _ = shared.dns_supply.set(Arc::new(crate::socket_supply::SocketSupply::new()));
+        let mut map = native_dns_map();
+        native_dns_apply(&shared, map.clone());
+        let handle = shared.dns.lock_poison().runtime.as_ref().unwrap().handle();
+        let original = shared.lock().net_config.as_ref().unwrap().local_dns.clone();
+        map.serial += 1;
+        let mut bad = map.dns.as_ref().unwrap().custom_zones[0].records[0].clone();
+        bad.r_data = "invalid".into();
+        map.dns.as_mut().unwrap().custom_zones[0].records.push(bad);
+        map.dns.as_mut().unwrap().custom_zones[0].records[0].r_data = "192.0.2.2".into();
+        native_dns_apply(&shared, map.clone());
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns, original);
+        assert!(handle.stats().running);
+        let status = shared.dns.lock_poison().status_json();
+        assert!(status.contains("\"last_error\":null"));
+        assert!(!status.contains("bücher") && !status.contains("192.0.2.1") && !status.contains("invalid"));
+        crate::config::parse_document(&status).unwrap();
+        assert_eq!(native_dns_query(&handle, &original.local_resolver_ip, 20, "host.bücher.example").answers()[0].data().to_string(), "192.0.2.2");
+        shared.apply_update(&WgPeerRegistry::new(), &NoopHost,
+            &SyncUpdate { session_deadline_unix: None, netbird_config: None, network_map: None });
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns, original);
+        let mut old = native_dns_map();
+        old.serial = 1;
+        old.dns = None;
+        native_dns_apply(&shared, old);
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns, original);
+        map.serial += 1;
+        map.dns.as_mut().unwrap().service_enable = false;
+        native_dns_apply(&shared, map.clone());
+        let disabled = shared.lock().net_config.as_ref().unwrap().local_dns.clone();
+        assert!(disabled.local_resolver_ready);
+        assert_eq!((disabled.record_count, disabled.custom_zone_count, disabled.nameserver_group_count), (1, 1, 1));
+        assert_eq!(disabled.search_domains, original.search_domains);
+        assert!(!shared.lock().net_config.as_ref().unwrap().dns_service_enable);
+        assert!(shared.dns.lock_poison().last_error.is_none());
+        assert_eq!(native_dns_query(&handle, &original.local_resolver_ip, 21, "host.bücher.example").answers()[0].data().to_string(), "192.0.2.2");
+        assert!(Arc::ptr_eq(&handle, &shared.dns.lock_poison().runtime.as_ref().unwrap().handle()));
+        map.serial += 1;
+        let mut restored = native_dns_map();
+        restored.serial = map.serial;
+        native_dns_apply(&shared, restored);
+        assert_eq!(native_dns_query(&handle, &original.local_resolver_ip, 22, "host.bücher.example").answers().len(), 1);
+        map.serial += 1;
+        map.dns = Some(crate::network_map::DnsConfig {
+            service_enable: false, custom_zones: vec![], name_server_groups: vec![],
+        });
+        native_dns_apply(&shared, map.clone());
+        let empty = shared.lock().net_config.as_ref().unwrap().local_dns.clone();
+        assert!(empty.local_resolver_ready);
+        assert_eq!((empty.record_count, empty.custom_zone_count, empty.nameserver_group_count), (0, 0, 0));
+        assert!(empty.search_domains.is_empty());
+        assert!(native_dns_query(&handle, &original.local_resolver_ip, 24, "host.bücher.example").answers().is_empty());
+        map.serial += 1;
+        map.dns = native_dns_map().dns;
+        native_dns_apply(&shared, map.clone());
+        assert_eq!(native_dns_query(&handle, &original.local_resolver_ip, 25, "host.bücher.example").answers().len(), 1);
+        map.serial += 1;
+        map.peer = None;
+        map.dns = None;
+        native_dns_apply(&shared, map);
+        assert_eq!(shared.lock().net_config.as_ref().unwrap().local_dns.record_count, 0);
+        assert!(native_dns_query(&handle, &original.local_resolver_ip, 23, "host.bücher.example").answers().is_empty());
+        assert!(handle.stats().running);
+        shared.stop_dns();
+        assert!(!handle.stats().running);
+    }
+
     fn shell_test_map() -> NetworkMap {
         use crate::network_map::{DnsConfig, ManagedRoute, NameServer, NameServerGroup, PeerInfo, PeerSelfConfig};
         NetworkMap {
@@ -12510,6 +13207,7 @@ mod tests {
             skipped_routes: vec![],
             dns: Some(DnsConfig {
                 service_enable: true,
+                custom_zones: vec![],
                 name_server_groups: vec![
                     NameServerGroup {
                         name_servers: vec![

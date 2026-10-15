@@ -51,6 +51,7 @@ import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, Exclusion
 // type-only: erased at runtime, so the host selfcheck fixtures that stage
 // this file byte-identically never resolve the sibling module
 import type { LanExclusionProbe, LanExclusionResult } from './NetBirdEndpointExclusion';
+import type { AppliedDns } from './NetBirdConnector';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
   ConnectorLogoutResult, DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
@@ -1013,6 +1014,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // canonical 'a.b.c.d/p' strings exactly as connector_network_config
   // renders them). Stashed before create(), consumed in settleCreate.
   private pendingAppliedRoutes: string[] | null = null;
+  private pendingAppliedDns: AppliedDns | undefined = undefined;
   // N8: one controlled recreate at a time (the watcher ticks faster than a
   // recreate completes; this is the shell-side serialization on top of the
   // core-side budget/cooldown bounds).
@@ -2501,6 +2503,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const base: VpnTunnelConfig = withEndpointExclusions(baseTemplate,
       lanRoutes.concat(exclusion.routes));
     let merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
+    if (net !== null) {
+      this.logLocalDnsSummary(net, 'initial');
+    }
     // N3-7 default-route safety gate (shell half): hold 0.0.0.0/0 unless the
     // core gate allowed it (usable peers + WG tunnel ready) or the explicit
     // forceDefaultRoute opt-in was honored. The core already excludes a held
@@ -2614,6 +2619,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // base fallback shape is not the core's desired rendering. 2026-10-09: an
     // AVAILABLE snapshot with an EMPTY desired set is stashed as `[]` (not
     // null) so ackAppliedRoutesInitial ACKs the real empty applied set.
+    this.pendingAppliedDns = this.captureAppliedDns(config, net);
     this.pendingAppliedRoutes =
       net !== null && net.routes !== undefined && net.routes !== null
         ? net.routes.map((r: CoreRouteEntry): string => r.network)
@@ -5537,9 +5543,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // be able to compare against it. Only a MISSING core snapshot (no map was
   // merged at all) still skips: there is nothing to ACK and a fabricated `[]`
   // would claim an applied set that was never submitted.
+  private captureAppliedDns(config: vpnExtension.VpnConfig, net: CoreNetworkConfig | null): AppliedDns {
+    const ip: string = net?.dns?.local_resolver_ready === true ? (net.dns.local_resolver_ip ?? '') : '';
+    // The key denotes native DNS only. Verify it is actually in the mapped
+    // VpnConfig (evidence configs may remove DNS), then copy its SDK shape.
+    const active: boolean = ip.length > 0 && config.dnsAddresses?.length === 1 && config.dnsAddresses[0] === ip;
+    return { local_resolver_ip: active ? ip : '',
+      search_domains: active ? (config.searchDomains ?? []).slice() : [] };
+  }
+
   private ackAppliedRoutesInitial(): void {
     const routes: string[] | null = this.pendingAppliedRoutes;
+    const dns: AppliedDns | undefined = this.pendingAppliedDns;
     this.pendingAppliedRoutes = null;
+    this.pendingAppliedDns = undefined;
     if (routes === null) {
       hilog.warn(DOMAIN, TAG,
         'VPN_ROUTE_SET_ACK_SKIPPED|requestId=%{public}s|reason=no-core-snapshot-routes',
@@ -5547,7 +5564,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     try {
-      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routes, false, 'initial');
+      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routes, false, 'initial', dns);
       if (!ack.ok) {
         hilog.warn(DOMAIN, TAG,
           'VPN_ROUTE_SET_ACK_FAILED|requestId=%{public}s|error=%{public}s',
@@ -5655,6 +5672,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const base: VpnTunnelConfig = withEndpointExclusions(recreateTemplate,
         lanRoutesRecreate.concat(frozenRoutesRecreate).concat(dnsRoutesRecreate));
       let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
+      this.logLocalDnsSummary(net, 'recreate');
       const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
         ? net.default_route.allowed
         : false;
@@ -5725,6 +5743,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // fail-closed teardown.
       const RECREATE_IFACE_MAX_ATTEMPTS: number = 2;
       let acceptedFd: number = -1;
+      let appliedDns: AppliedDns | undefined = undefined;
       for (let attempt: number = 1; attempt <= RECREATE_IFACE_MAX_ATTEMPTS; attempt++) {
         // roam-1005-0124: release the core's TUN dup FIRST (idempotent —
         // attempt 2 finds nothing left to release). The platform cannot
@@ -5791,6 +5810,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         const config: vpnExtension.VpnConfig =
           buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
             this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
+        const createDns: AppliedDns = this.captureAppliedDns(config, net);
         // 场景B roaming: this leg's re-derived exclusion becomes the
         // live-config truth the moment this create() lands (a failed leg tears
         // the whole session down fail-closed, so the recording can never
@@ -5834,6 +5854,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           continue;
         }
         acceptedFd = fd;
+        appliedDns = createDns;
         this.tunFd = fd;
         this.fdConfirmedOpenAfterCreate = true;
         // N2-H I3a (v3.1 §2.1 C2 (4)): the recreate leg's ACCEPTANCE ANCHOR —
@@ -5870,7 +5891,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // array crosses verbatim, including an EMPTY one (every network off).
       stage = 'ack';
       const ack: RouteSetAppliedResult =
-        connectorRouteSetApplied(routeNetworks, true, ackKind);
+        connectorRouteSetApplied(routeNetworks, true, ackKind, appliedDns);
       if (!ack.ok) {
         throw new Error(`recreate-ack-failed:${ack.error ?? 'no-message'}`);
       }
@@ -6362,7 +6383,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const t0: number = Date.now();
     const epoch: number = this.networkEpoch;
     try {
-      const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
+      const isDns: boolean = request.purpose === 'dns' &&
+        (request.kind === 'udp' || request.kind === 'tcp');
       // F1 (v0.0.27 outage REPORT.md §5): the gate is INSTANTANEOUS. It asks the
       // platform for the physical default network at THIS request instead of
       // reading the remembered `networkDirty` switch latch — the latch stayed
@@ -6402,7 +6424,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           return;
         }
       }
-      const opened: NativeTcpSocketOpen = isDns ? iceSocketOpen() : mgmtSocketOpen();
+      const opened: NativeTcpSocketOpen = request.kind === 'udp' ? iceSocketOpen() : mgmtSocketOpen();
       fd = opened.fd;
       if (fd < 0 || opened.bind_rc !== 0) {
         reason = 'socket-open';
@@ -6425,13 +6447,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // If the generation moved while `protect()` was in flight — the H1 shape
       // (a resolved protect whose mark no longer matches the live network) —
       // re-protect the same fd once before deciding. Only the protected-DNS
-      // purpose is re-protected: that lookup is one standalone datagram whose
+      // purpose over UDP is re-protected: that lookup is one standalone datagram whose
       // only generation dependency IS the egress mark, so a refreshed mark is
       // strictly better than refusing it. A management/signal/relay dial keeps
       // the existing fail-closed `network-epoch` refusal (its resolved address
       // and route belong to the generation the request was made for).
       let mark: string = epoch === this.networkEpoch ? 'generation-match' : 'generation-moved';
-      if (protectedOk && isDns && epoch !== this.networkEpoch) {
+      if (protectedOk && isDns && request.kind === 'udp' && epoch !== this.networkEpoch) {
         protectedOk = await this.protectSocketWithBox(connection, fd, 'D', request.id);
         mark = protectedOk ? 'reprotect-ok' : 'reprotect-failed';
       }
@@ -6875,6 +6897,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'stage': leg, 'mtu': effectiveMtu, 'source': source
     };
     this.diagMilestone('vpn_tunnel_mtu', milestoneFields);
+  }
+
+  private logLocalDnsSummary(net: CoreNetworkConfig, leg: string): void {
+    if (net.dns === undefined || net.dns === null) {
+      return;
+    }
+    hilog.info(DOMAIN, TAG,
+      'VPN_LOCAL_DNS_CONFIG|leg=%{public}s|ready=%{public}s|ip=%{public}s|' +
+      'zones=%{public}d|records=%{public}d|groups=%{public}d',
+      leg, net.dns.local_resolver_ready === undefined ? 'legacy' : String(net.dns.local_resolver_ready),
+      net.dns.local_resolver_ip ?? '',
+      net.dns.custom_zone_count ?? 0, net.dns.record_count ?? 0,
+      net.dns.nameserver_group_count ?? 0);
   }
 
   private logConfigApplied(config: VpnTunnelConfig): void {

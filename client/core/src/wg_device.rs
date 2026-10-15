@@ -210,6 +210,7 @@
 //!   ——本模块（含载体路径）只经 [`TunFd`]/dup 副本接触 fd，载体挂载/
 //!   拆除/`connector_stop()` 都不会触碰那个号码。
 
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -218,6 +219,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use base64::Engine as _;
 
 use crate::connector::{WgPeerApplier, WgPeerEntry};
+use crate::dns_runtime::{DnsHandle, DnsOutput};
 use crate::hilog::{emit, emit_evidence};
 use crate::sys;
 use crate::tun::TunFd;
@@ -309,6 +311,11 @@ impl WgPeerSpec {
 /// Device-level counters. Every drop path counts; nothing panics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WgDeviceStats {
+    pub dns_consumed: u64,
+    pub dns_tx_packets: u64,
+    pub dns_stale_drops: u64,
+    pub dns_tx_drops: u64,
+    pub dns_tx_would_block: u64,
     /// Encapsulated transport datagrams actually handed to sendto.
     pub tx_packets: u64,
     pub tx_bytes: u64,
@@ -1315,6 +1322,11 @@ pub struct WgDevice {
     /// getsockname at adopt time (observability only).
     local: ([u8; 4], u16),
     tun: TunFd,
+    // Connector owns the runtime. DNS queues are leaves below the device lock.
+    dns: Option<Arc<DnsHandle>>,
+    dns_generation: u64,
+    dns_tx: VecDeque<DnsOutput>,
+    dns_tx_retries: u8,
     peers: Vec<WgPeer>,
     /// Managed-route overlay (N6 路由表缺陷修复): management-issued network
     /// routes grouped by network, each with its HA candidate routing peers
@@ -1381,6 +1393,10 @@ impl WgDevice {
             fd: Some(fd),
             local,
             tun,
+            dns: None,
+            dns_generation: 0,
+            dns_tx: VecDeque::new(),
+            dns_tx_retries: 0,
             peers: Vec::new(),
             managed_routes: Vec::new(),
             next_index: INDEX_BASE,
@@ -1390,6 +1406,30 @@ impl WgDevice {
             shared_socket_reader: false,
         })
     }
+
+    fn reset_dns_tun(&mut self) {
+        self.dns_generation = self.dns_generation.checked_add(1).expect("DNS generation exhausted");
+        self.stats.dns_stale_drops += self.dns_tx.len() as u64;
+        self.dns_tx.clear();
+        self.dns_tx_retries = 0;
+        if let Some(handle) = &self.dns {
+            handle.reset_tun(self.dns_generation);
+        }
+    }
+
+    pub fn attach_dns(&mut self, handle: Arc<DnsHandle>) {
+        self.detach_dns();
+        self.dns = Some(handle);
+        self.reset_dns_tun();
+    }
+
+    pub fn detach_dns(&mut self) {
+        self.reset_dns_tun();
+        self.dns = None;
+    }
+
+    pub fn dns_generation(&self) -> u64 { self.dns_generation }
+    pub fn dns_pending_tx(&self) -> usize { self.dns_tx.len() }
 
     /// N8 — controlled-recreate TUN replacement: adopt a dup of the NEW
     /// platform TUN fd and deactivate the old one, keeping peers, tunnels
@@ -1409,6 +1449,7 @@ impl WgDevice {
     ///   sink/source changes, so payload continues over the same WG keys.
     pub fn replace_tun(&mut self, tun_raw: i32) -> Result<(), crate::tun::TunError> {
         let tun = TunFd::dup_from_raw(tun_raw)?;
+        self.reset_dns_tun();
         let old = core::mem::replace(&mut self.tun, tun);
         drop(old); // closes the old DUP only (fd contract)
         emit("N8_WG_DEVICE|tun-replaced|sessions-kept");
@@ -1431,6 +1472,7 @@ impl WgDevice {
     /// the platform destroy() lets the old netdev go the moment destroy()
     /// closes the raw fd.
     pub fn release_tun(&mut self) -> Option<i32> {
+        self.reset_dns_tun();
         if self.tun.fd().is_none() {
             return None;
         }
@@ -1857,6 +1899,7 @@ impl WgDevice {
     /// owned by the device stay until the device is dropped. The managed
     /// route overlay goes with it (stop semantics — a later map re-applies).
     pub fn clear(&mut self) {
+        self.detach_dns();
         let had = !self.peers.is_empty() || !self.managed_routes.is_empty();
         self.peers.clear();
         self.managed_routes.clear();
@@ -2350,7 +2393,11 @@ impl WgDevice {
                         continue;
                     }
                     self.feed_tun_tee(TunFrameDir::FromOs, &buf[..len]);
-                    self.send_from_tun(&buf[..len], now_ms);
+                    if self.dns.as_ref().is_some_and(|h| h.try_ingest(&buf[..len], self.dns_generation)) {
+                        self.stats.dns_consumed += 1;
+                    } else {
+                        self.send_from_tun(&buf[..len], now_ms);
+                    }
                     n += 1;
                 }
                 Err(_) => {
@@ -2360,6 +2407,46 @@ impl WgDevice {
             }
         }
         n
+    }
+
+    /// Bounded DNS response delivery by the same TUN owner as WG plaintext.
+    /// A blocked frame remains queued; poll watches TUN writability, not a timer.
+    pub fn service_dns_tx(&mut self) -> usize {
+        let Some(handle) = self.dns.clone() else { return 0; };
+        self.dns_tx.extend(handle.take_packets(DRAIN_MAX.saturating_sub(self.dns_tx.len())));
+        handle.drain_wake();
+        let mut written = 0;
+        for _ in 0..DRAIN_MAX {
+            let Some(packet) = self.dns_tx.front() else { break; };
+            if packet.generation != self.dns_generation {
+                self.stats.dns_stale_drops += 1;
+            } else if self.tun.fd().is_none() {
+                self.stats.dns_tx_drops += 1;
+            } else {
+                match self.tun.write_frame_budget(&packet.frame, 0) {
+                    Ok(_) => {
+                        self.feed_tun_tee(TunFrameDir::ToOs, &packet.frame);
+                        self.stats.dns_tx_packets += 1;
+                        written += 1;
+                    }
+                    Err(crate::tun::TunError::WouldBlock) |
+                    Err(crate::tun::TunError::Backpressure { written: 0 }) => {
+                        self.stats.dns_tx_would_block += 1;
+                        self.dns_tx_retries += 1;
+                        // Three attempts, across pump turns, then drop. Never
+                        // hold the WG lock waiting for TUN capacity.
+                        if self.dns_tx_retries < 3 {
+                            break;
+                        }
+                        self.stats.dns_tx_drops += 1;
+                    }
+                    Err(_) => self.stats.dns_tx_drops += 1,
+                }
+            }
+            self.dns_tx.pop_front();
+            self.dns_tx_retries = 0;
+        }
+        written
     }
 
     /// Poll + recvfrom + `handle_udp`. Non-blocking, at most `DRAIN_MAX`
@@ -3394,8 +3481,11 @@ pub const WG_PUMP_TICK_MS: u64 = 100;
 
 /// One wait plan for the production data-plane pump: the fds whose readiness
 /// means "data to move" plus the bounded timeout. Pure data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Default)]
 pub struct WgPumpWait {
+    /// Keeps the DNS wake fd alive across detach/stop while poll is waiting.
+    pub dns_handle: Option<Arc<DnsHandle>>,
+    pub tun_writable: bool,
     /// The device TUN fd, once the device is up and has adopted a TUN.
     pub tun_fd: Option<i32>,
     /// The device's own outer UDP socket fd — ONLY while the device owns its
@@ -3525,6 +3615,7 @@ struct FeedInner {
     carriers: Vec<(String, Arc<dyn WgEgressCarrier>)>,
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
+    dns_handle: Option<Arc<DnsHandle>>,
     /// OFFICIAL-ALIGNMENT STAGE 3: the shared-socket model is ARMED for the
     /// device of this feed (the mux's reader thread is the ONE reader). Stored
     /// here so it is re-applied when the device is (re)built after this call —
@@ -3550,6 +3641,22 @@ impl WgDeviceFeed {
     /// injected-clock timer policy).
     pub fn new(cfg: WgDeviceConfig) -> WgDeviceFeed {
         WgDeviceFeed { cfg, inner: Mutex::new(FeedInner::default()) }
+    }
+
+    /// Install immediately, or retain until device adoption. Never owns/joins a runtime.
+    /// Lock order: FeedInner -> device -> DNS queues (leaf).
+    pub fn set_dns_handle(&self, handle: Option<Arc<DnsHandle>>) {
+        let mut g = self.inner.lock_poison();
+        if let Some(dev) = &g.device {
+            dev.with_device(|d| match &handle {
+                Some(h) => d.attach_dns(h.clone()),
+                None => d.detach_dns(),
+            });
+        } else if let Some(old) = &g.dns_handle {
+            // Wake any plan retaining the previous handle, without joining.
+            old.reset_tun(0);
+        }
+        g.dns_handle = handle;
     }
 
     pub fn set_n2_destination_targets(&self, targets: Vec<[u8; 4]>) -> bool {
@@ -3758,6 +3865,7 @@ impl WgDeviceFeed {
                 if let Some((tun_n, udp_n)) = slot.with_device(|d| {
                     let tun_n = d.service_tun(now);
                     let udp_n = d.service_udp(now);
+                    d.service_dns_tx();
                     d.tick(now);
                     (tun_n, udp_n)
                 }) {
@@ -3777,6 +3885,9 @@ impl WgDeviceFeed {
             // No device yet: bounded idle until the feeds arrive (the feed
             // itself builds the device, so this is a startup/shutdown window).
             return WgPumpWait {
+                // No TUN owner exists to drain DNS wake/output yet.
+                dns_handle: None,
+                tun_writable: false,
                 tun_fd: None,
                 wg_fd: None,
                 timeout_ms: if saturated { 0 } else { WG_PUMP_TICK_MS },
@@ -3789,6 +3900,10 @@ impl WgDeviceFeed {
                 None => WG_PUMP_TICK_MS,
             };
             WgPumpWait {
+                // While retrying, wait on POLLOUT; a readable DNS wake must not
+                // turn TUN backpressure into an immediate-poll busy loop.
+                dns_handle: if d.dns_tx.is_empty() { d.dns.clone() } else { None },
+                tun_writable: !d.dns_tx.is_empty(),
                 tun_fd: d.tun_fd(),
                 wg_fd: if d.shared_socket_reader() { None } else { d.socket_fd() },
                 timeout_ms: if saturated {
@@ -3811,7 +3926,10 @@ impl WgDeviceFeed {
     pub fn pump_wait(plan: &WgPumpWait) -> usize {
         let mut fds: Vec<sys::pollfd> = Vec::new();
         if let Some(fd) = plan.tun_fd {
-            fds.push(sys::pollfd { fd, events: sys::POLLIN, revents: 0 });
+            fds.push(sys::pollfd { fd, events: sys::POLLIN | if plan.tun_writable { sys::POLLOUT } else { 0 }, revents: 0 });
+        }
+        if let Some(handle) = &plan.dns_handle {
+            fds.push(sys::pollfd { fd: handle.wake_fd(), events: sys::POLLIN, revents: 0 });
         }
         if let Some(fd) = plan.wg_fd {
             fds.push(sys::pollfd { fd, events: sys::POLLIN, revents: 0 });
@@ -3827,7 +3945,7 @@ impl WgDeviceFeed {
         if ret <= 0 {
             return 0;
         }
-        fds.iter().filter(|f| (f.revents & sys::POLLIN) != 0).count()
+        fds.iter().filter(|f| (f.revents & f.events) != 0).count()
     }
 
     /// Build the device when both feeds are present. Returns whether a
@@ -3855,6 +3973,7 @@ impl WgDeviceFeed {
         // — the TUN one).
         let mut dev = dev;
         dev.set_shared_socket_reader(g.shared_udp_reader);
+        if let Some(handle) = &g.dns_handle { dev.attach_dns(handle.clone()); }
         let dev = dev;
         let app = Arc::new(WgDeviceApplier::new(dev));
         if let Some(tee) = g.n2_dest_tee.clone() {
@@ -4011,6 +4130,10 @@ impl WgPeerApplier for WgDeviceFeed {
         }
         g.n2_dest_tee = None;
         g.n2_gap_start = None;
+        if g.device.is_none() {
+            if let Some(handle) = &g.dns_handle { handle.reset_tun(0); }
+        }
+        g.dns_handle = None;
         if let Some(d) = g.device.take() {
             d.clear();
         }
@@ -4990,7 +5113,7 @@ mod feed_tests {
         let plan = slot.pump_wait_plan(now, false);
         assert_eq!(plan.timeout_ms, WG_PUMP_TICK_MS);
         // 没有数据时：等满上界（这里只验证「会阻塞」，用 0 超时探测可读性）。
-        let probe = WgPumpWait { timeout_ms: 0, ..plan };
+        let probe = WgPumpWait { timeout_ms: 0, ..plan.clone() };
         assert_eq!(WgDeviceFeed::pump_wait(&probe), 0, "nothing readable yet");
         // 写一帧进 TUN 的测试端 → 设备那一端立刻可读。
         let frame = [0x45u8, 0, 0, 28, 0, 0, 0, 0, 64, 17, 0, 0, 10, 77, 0, 1, 10, 77, 0, 9, 0, 53, 0, 53, 0, 8, 0, 0];

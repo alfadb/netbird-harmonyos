@@ -335,14 +335,16 @@ try {
     { id: 'outage-m', kind: 'tcp', purpose: 'management' });
   await (live['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
     { id: 'outage-d', kind: 'udp', purpose: 'dns' });
+  await (live['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'outage-dtcp', kind: 'tcp', purpose: 'dns' });
   const outageSupply = linesWith('VPN_SOCKET_SUPPLY|');
-  check('B3 with the latch still SET, a usable network serves management AND the DNS socket',
-    outageSupply.length === 2 &&
+  check('B3 with the latch still SET, a usable network serves management and DNS UDP/TCP',
+    outageSupply.length === 3 &&
     outageSupply.every((l: string): boolean => fieldOf(l, 'protect') === 'protected') &&
     outageSupply.every((l: string): boolean => fieldOf(l, 'reason') === '') &&
-    supplyOf('MGMT_OPEN') === 1 && supplyOf('ICE_OPEN') === 1,
+    supplyOf('MGMT_OPEN') === 2 && supplyOf('ICE_OPEN') === 1,
     JSON.stringify({ lines: outageSupply, mgmt: supplyOf('MGMT_OPEN'), dns: supplyOf('ICE_OPEN') }));
-  const protectedAtInfo = outageSupply.length === 2 && outageSupply.every((l: string): boolean =>
+  const protectedAtInfo = outageSupply.length === 3 && outageSupply.every((l: string): boolean =>
     logs().some((raw: string): boolean => raw.indexOf('[I] VPN_SOCKET_SUPPLY|') === 0));
   // A REFUSAL, on the other hand, must survive a W-level capture — on this ROM
   // the I-level A02900 lines never reach the buffer, which is exactly why

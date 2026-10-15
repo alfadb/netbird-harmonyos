@@ -239,6 +239,10 @@ pub mod phone_log;
 pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;
+pub mod dns_resolver;
+pub mod dns_runtime;
+pub mod dns_transport;
+pub mod dns_upstream;
 // Bounded audit formatting for accepted management route rows.
 pub mod route_audit;
 // Pure NetID-level route selection state (default-on, HA groups, exit-node

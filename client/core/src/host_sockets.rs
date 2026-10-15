@@ -331,8 +331,9 @@ pub fn feed_dns_servers(servers: &[std::net::Ipv4Addr]) -> Result<(), String> {
 
 /// Host-side socket-supply responder: the shell's `poll`/`reply` loop, host
 /// flavor. Every request the protected seams raise is answered with a PLAIN
-/// socket of the requested kind (`udp` → fresh unbound UDP, anything else →
-/// pre-bound unconnected TCP); the reply duplicates it into the waiting dial
+/// socket of the requested kind (`udp` → fresh unbound UDP, `tcp` →
+/// pre-bound unconnected TCP); unsupported kinds are rejected. The reply
+/// duplicates it into the waiting dial
 /// and the provider's original closes immediately (the device-shell contract,
 /// minus protect). One thread per CLI run; [`HostSocketSupplier::stop`] (or
 /// Drop) ends it. `served`/`failed` are the observability counters.
@@ -406,7 +407,11 @@ fn supply_loop(
             continue;
         }
         let kind = doc.as_ref().and_then(|d| doc_str(d, "kind")).unwrap_or_default();
-        let opened = if kind == "udp" { open_udp_unbound() } else { open_tcp_prebound() };
+        let opened = match kind.as_str() {
+            "udp" => open_udp_unbound(),
+            "tcp" => open_tcp_prebound(),
+            _ => Err(HostSocketError { token: "unsupported-socket-kind", errno: 0 }),
+        };
         match opened {
             Ok(fd) => {
                 let reply = crate::socket_supply::reply_json(&id, fd, "protected");

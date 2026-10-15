@@ -4258,6 +4258,81 @@ try {
     return (G['__NB_CREATED_CONFIGS'] ?? []) as Record<string, unknown>[];
   }
 
+  // Local resolver contract: drive BOTH real submission legs with the new
+  // schema, including management-DNS disabled with the runtime still ready.
+  const localDnsMap = JSON.parse(NETCFG_0021);
+  localDnsMap.dns = { service_enable: false, servers: [{ ip: '9.9.9.9', port: 5353 }],
+    local_resolver_ip: '100.108.255.254', local_resolver_ready: true,
+    search_domains: ['NETBIRD.INTERNAL.', 'netbird.internal'],
+    custom_zone_count: 1, record_count: 2, nameserver_group_count: 3 };
+  const localDnsText = JSON.stringify(localDnsMap);
+  const localDnsAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(undefined);
+  resetLog();
+  const localDnsInitial = await driveInitialLeg(localDnsAbility, localDnsText);
+  const localDnsRecreate = await driveRecreateCapture(localDnsAbility, localDnsText);
+  for (const [leg, submissions] of [['initial', localDnsInitial],
+    ['recreate', localDnsRecreate]] as const) {
+    const submitted = submissions[0];
+    check(`DNS ${leg} submits runtime resolver and normalized search domains`,
+      submissions.length === 1 && deepEq(submitted?.dnsAddresses, ['100.108.255.254']) &&
+      deepEq(submitted?.searchDomains, ['netbird.internal']));
+    const dnsHosts = ((submitted?.routes ?? []) as Array<Record<string, unknown>>).filter((r) => {
+      const destination = r.destination as Record<string, unknown>;
+      return (destination.address as Record<string, unknown>).address === '100.108.255.254' &&
+        destination.prefixLength === 32;
+    });
+    check(`DNS ${leg} submits exactly one non-excluded virtual /32`,
+      dnsHosts.length === 1 && dnsHosts[0].isExcludedRoute !== true &&
+      dnsHosts[0].interface === 'vpn-tun');
+  }
+
+  // Change the live map inside platform create's await, after the real mapper
+  // submitted A. Both real Ability legs must ACK the submitted A, not live B.
+  const createPrototype = FakeConnection.prototype as Record<string, unknown>;
+  const originalDnsCreate = createPrototype['create'] as (config: unknown) => Promise<number>;
+  try {
+    for (const leg of ['initial', 'recreate'] as const) {
+      for (const variant of ['not-ready', 'ip', 'search'] as const) {
+        const a = structuredClone(localDnsMap);
+        a.dns.search_domains = ['XN--BCHER-KVA.Example.', 'xn--bcher-kva.example'];
+        if (variant === 'not-ready') { a.dns.local_resolver_ready = false; }
+        const b = structuredClone(a);
+        b.serial = (a.serial ?? 0) + 1;
+        b.dns.local_resolver_ready = true;
+        if (variant === 'ip') { b.dns.local_resolver_ip = '100.109.255.254'; }
+        if (variant === 'search') { b.dns.search_domains = ['other.internal']; }
+        let changedDuringCreate = false;
+        createPrototype['create'] = async function(config: unknown): Promise<number> {
+          const pending = originalDnsCreate.call(this, config);
+          await Promise.resolve();
+          G['__NB_NETCFG'] = JSON.stringify(b);
+          changedDuringCreate = true;
+          return await pending;
+        };
+        G['__NB_ACK'] = undefined;
+        const ability = freshAbility(mod, FIXTURE_FILESDIR);
+        const submissions = leg === 'initial'
+          ? await driveInitialLeg(ability, JSON.stringify(a))
+          : await driveRecreateCapture(ability, JSON.stringify(a));
+        const ack = G['__NB_ACK'] as Record<string, unknown> | undefined;
+        const payload = ack === undefined ? undefined : JSON.parse(ack.payload as string);
+        const expected = variant === 'not-ready'
+          ? { local_resolver_ip: '', search_domains: [] }
+          : { local_resolver_ip: a.dns.local_resolver_ip, search_domains: ['xn--bcher-kva.example'] };
+        check(`DNS ${leg} ${variant} ACK keeps create snapshot across await`,
+          changedDuringCreate && submissions.length === 1 &&
+          deepEq(payload?.applied_dns, expected) &&
+          (variant === 'not-ready' ||
+            (deepEq(submissions[0].dnsAddresses, [expected.local_resolver_ip]) &&
+             deepEq(submissions[0].searchDomains, expected.search_domains))),
+          JSON.stringify({ ack, submitted: submissions[0] }));
+      }
+    }
+  } finally {
+    createPrototype['create'] = originalDnsCreate;
+  }
+
   // ---- D0: wiring pins + "the diag keys never reach the core" -------------
   const diagReadAt = extSource.indexOf('this.readDiagSwitches();');
   const subnetInitialAt = extSource.indexOf("this.injectTunnelSubnetRoute(merged, 'initial')");

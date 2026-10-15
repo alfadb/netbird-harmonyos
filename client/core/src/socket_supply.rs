@@ -77,10 +77,26 @@ impl Purpose {
         }
     }
 
-    fn kind(self) -> &'static str {
+    fn default_kind(self) -> SocketKind {
         match self {
-            Self::Dns => "udp",
-            _ => "tcp",
+            Self::Dns => SocketKind::Udp,
+            _ => SocketKind::Tcp,
+        }
+    }
+}
+
+/// Transport requested from the protected socket provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketKind {
+    Udp,
+    Tcp,
+}
+
+impl SocketKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
         }
     }
 }
@@ -88,6 +104,7 @@ impl Purpose {
 #[derive(Debug)]
 struct Pending {
     purpose: Purpose,
+    kind: SocketKind,
     started: Instant,
     sender: oneshot::Sender<Result<OwnedFd, SocketSeamError>>,
 }
@@ -157,7 +174,15 @@ impl SocketSupply {
         self.request_with_id(purpose).await.map(|(_, fd)| fd)
     }
 
+    pub async fn request_socket(&self, purpose: Purpose, kind: SocketKind) -> Result<OwnedFd, SocketSeamError> {
+        self.request_socket_with_id(purpose, kind).await.map(|(_, fd)| fd)
+    }
+
     pub async fn request_with_id(&self, purpose: Purpose) -> Result<(u64, OwnedFd), SocketSeamError> {
+        self.request_socket_with_id(purpose, purpose.default_kind()).await
+    }
+
+    async fn request_socket_with_id(&self, purpose: Purpose, kind: SocketKind) -> Result<(u64, OwnedFd), SocketSeamError> {
         let (sender, receiver) = oneshot::channel();
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed) + 1;
         {
@@ -165,7 +190,7 @@ impl SocketSupply {
             if state.closed {
                 return Err(SocketSeamError::Supply("socket-supply-closed"));
             }
-            state.pending.insert(id, Pending { purpose, started: Instant::now(), sender });
+            state.pending.insert(id, Pending { purpose, kind, started: Instant::now(), sender });
             state.queue.push_back(id);
         }
         // Wake the shell with the state lock DROPPED (a serving hook re-enters
@@ -174,7 +199,7 @@ impl SocketSupply {
         // "the queue is not empty" is exactly the lost notification.
         notify_enqueued(id);
         let _cleanup = RequestCleanup { supply: self, id };
-        hilog::emit(&format!("socket-supply: request id={id} purpose={} kind={}", purpose.name(), purpose.kind()));
+        hilog::emit(&format!("socket-supply: request id={id} purpose={} kind={}", purpose.name(), kind.name()));
         match tokio::time::timeout(WAIT, receiver).await {
             Ok(Ok(result)) => result.map(|fd| (id, fd)),
             Ok(Err(_)) => Err(SocketSeamError::Supply("socket-supply-closed")),
@@ -187,19 +212,23 @@ impl SocketSupply {
     }
 
     pub fn poll_request(&self) -> Option<(u64, Purpose)> {
+        self.poll_socket_request().map(|(id, purpose, _)| (id, purpose))
+    }
+
+    fn poll_socket_request(&self) -> Option<(u64, Purpose, SocketKind)> {
         let mut state = self.state.lock().expect("socket supply");
         while let Some(id) = state.queue.pop_front() {
             if let Some(pending) = state.pending.get(&id) {
-                return Some((id, pending.purpose));
+                return Some((id, pending.purpose, pending.kind));
             }
         }
         None
     }
 
     pub fn poll(&self) -> String {
-        match self.poll_request() {
-            Some((id, purpose)) => format!("{{\"id\":\"{id}\",\"kind\":\"{}\",\"purpose\":\"{}\"}}",
-                purpose.kind(), purpose.name()),
+        match self.poll_socket_request() {
+            Some((id, purpose, kind)) => format!("{{\"id\":\"{id}\",\"kind\":\"{}\",\"purpose\":\"{}\"}}",
+                kind.name(), purpose.name()),
             None => "{\"id\":\"\"}".into(),
         }
     }
@@ -219,7 +248,7 @@ impl SocketSupply {
         };
         let token = match &outcome { Ok(_) => "protected", Err(e) => e.token() };
         hilog::emit(&format!("socket-supply: result id={id} purpose={} kind={} fd={fd} result={token} elapsed_ms={}",
-            pending.purpose.name(), pending.purpose.kind(), pending.started.elapsed().as_millis()));
+            pending.purpose.name(), pending.kind.name(), pending.started.elapsed().as_millis()));
         let ok = outcome.is_ok();
         let delivered = pending.sender.send(outcome).is_ok();
         format!("{{\"ok\":{}}}", ok && delivered)

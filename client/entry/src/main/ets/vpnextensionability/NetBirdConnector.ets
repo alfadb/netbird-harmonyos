@@ -431,8 +431,19 @@ export interface CoreDnsServer {
 }
 
 export interface CoreDnsConfig {
+  // Legacy/UI fields retain upstream ports; do not select platform DNS from
+  // flattened servers once local_resolver_ready is present.
   service_enable: boolean;
   servers: CoreDnsServer[];
+  // Frozen core -> shell contract. Optional only for old-core compatibility.
+  // Runtime readiness is independent of service_enable: the permanent local
+  // service can still forward to physical DNS when management DNS is disabled.
+  local_resolver_ip?: string;
+  local_resolver_ready?: boolean;
+  search_domains?: string[];
+  custom_zone_count?: number;
+  record_count?: number;
+  nameserver_group_count?: number;
 }
 
 export interface CorePeerSummary {
@@ -917,9 +928,19 @@ export interface RouteSetAppliedResult {
 // entry accepts for `'user'`. This wrapper never short-circuits an empty list
 // and never substitutes a placeholder route for it; a refusal must come from
 // the native answer (`ok:false` + `error`), never from this side.
+// Native DNS platform shape captured before create, never from a later map.
+// Empty IP means the submitted config did not activate the native resolver.
+export interface AppliedDns {
+  local_resolver_ip: string;
+  search_domains: string[];
+}
+
 export function connectorRouteSetApplied(routes: string[], isRecreate: boolean,
-  kind?: string): RouteSetAppliedResult {
+  kind?: string, appliedDns?: AppliedDns): RouteSetAppliedResult {
   const payload: Record<string, Object> = { 'routes': routes };
+  if (appliedDns !== undefined) {
+    payload['applied_dns'] = appliedDns;
+  }
   if (kind === undefined) {
     return JSON.parse(core.connector_route_set_applied(JSON.stringify(payload), isRecreate)) as
       RouteSetAppliedResult;

@@ -660,7 +660,8 @@ try {
       'ACKed it as isRecreate=true / kind=user',
       JSON.stringify(G['__NB_SELECTION_SET_ARGS']) === JSON.stringify(SELECTION_OFF) &&
       ack['isRecreate'] === true && ack['kind'] === 'user' &&
-      JSON.stringify(ack['payload']) === JSON.stringify({ routes: DESIRED }),
+      JSON.stringify(ack['payload']) === JSON.stringify({ routes: DESIRED,
+         applied_dns: { local_resolver_ip: '', search_domains: [] } }),
       JSON.stringify({ selection: G['__NB_SELECTION_SET_ARGS'], ack: ack }));
     check('L1d the recreate really submitted a rebuilt platform config',
       (G['__NB_CREATE_CONFIGS'] as unknown[]).length === 1);
@@ -708,7 +709,8 @@ try {
       hasRoute('10.20.20.0', 24) && hasRoute('100.108.0.0', 16) &&
       !hasRoute('10.10.10.0', 24) &&
       ack['isRecreate'] === true && ack['kind'] === 'user' &&
-      JSON.stringify(ack['payload']) === JSON.stringify({ routes: DESIRED_ADVANCED }),
+      JSON.stringify(ack['payload']) === JSON.stringify({ routes: DESIRED_ADVANCED,
+         applied_dns: { local_resolver_ip: '', search_domains: [] } }),
       JSON.stringify({ ack: ack, submitted: submitted }));
     check('L13b the answer reports the ACKed set B, never the setter\'s earlier desired A',
       doc !== undefined && doc['state'] === 'applied' && doc['mode'] === 'recreated' &&
@@ -760,7 +762,8 @@ try {
       doc !== undefined && doc['state'] === 'applied' && doc['mode'] === 'recreated' &&
       JSON.stringify(doc['routes']) === JSON.stringify([]) &&
       count('__NB_CREATE_CALLS') === 1 && count('__NB_TUN_FEED_CALLS') === 1 &&
-      JSON.stringify(ack['payload']) === JSON.stringify({ routes: [] }),
+      JSON.stringify(ack['payload']) === JSON.stringify({ routes: [],
+         applied_dns: { local_resolver_ip: '', search_domains: [] } }),
       JSON.stringify({ doc: doc, ack: ack }));
     // the initial leg: an AVAILABLE map with an EMPTY desired set is ACKed as []
     G['__NB_ACK_CALLS'] = 0;
@@ -1403,8 +1406,8 @@ try {
     extSource.indexOf('this.performControlledRecreate(`vpn-iface-lost:${source}`).catch(') > 0 &&
     extSource.indexOf("`route-apply:${requestId}`, 'user', acked);") > 0);
   check('P4 the ACK kind is explicit at BOTH legs (initial / the recreate leg\'s ackKind)',
-    extSource.includes("connectorRouteSetApplied(routes, false, 'initial')") &&
-    extSource.includes('connectorRouteSetApplied(routeNetworks, true, ackKind)'));
+    extSource.includes("connectorRouteSetApplied(routes, false, 'initial', dns)") &&
+    extSource.includes('connectorRouteSetApplied(routeNetworks, true, ackKind, appliedDns)'));
   check('P5 the two NEW teardown re-checks sit after the create and after the interface ' +
     'verification (four in total, the two pre-existing ones unchanged)',
     extSource.split("throw new Error('recreate-interrupted-by-teardown');").length === 5 &&

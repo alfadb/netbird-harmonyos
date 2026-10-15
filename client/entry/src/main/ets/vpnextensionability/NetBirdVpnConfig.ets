@@ -62,6 +62,7 @@ export interface VpnTunnelConfig {
   // TODO(未验证): placeholder until the control plane supplies real values;
   // on-device DNS behavior never verified in a spike.
   dnsServers: string[];
+  searchDomains?: string[];
   // MTU in bytes, platform-accepted range [576,1500] (SDK VpnConfig.mtu,
   // @since 11; a value outside it makes create() fail, device-verified
   // 2026-09-15). The value is the official client's default 1280 — see the
@@ -218,6 +219,32 @@ export function loadVpnTunnelConfig(): VpnTunnelConfig {
 // instead of "base always": an announced `PeerConfig.mtu` (snapshot tail field
 // `mtu`, usable only inside [576,1500]) replaces the base default — see
 // selectTunnelMtu.
+// The network-config overlay documented above is implemented below this
+// normalization helper.
+// Core exports standard ASCII domains (IDNs must already be punycode).
+// The shell canonicalizes case/root dots and removes duplicates for the SDK.
+export function normalizeSearchDomains(domains: string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < domains.length; i++) {
+    const domain: string = domains[i].trim().toLowerCase().replace(/\.+$/, '');
+    if (domain.length === 0 || domain.length > 253 || result.indexOf(domain) >= 0) {
+      continue;
+    }
+    const labels: string[] = domain.split('.');
+    let valid: boolean = true;
+    for (let j = 0; j < labels.length; j++) {
+      if (labels[j].length > 63 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(labels[j])) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      result.push(domain);
+    }
+  }
+  return result;
+}
+
 export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig): VpnTunnelConfig {
   const address: string =
     net.address !== undefined && net.address !== null && net.address.length > 0
@@ -279,9 +306,35 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
   }
 
   const dnsServers: string[] = [];
+  let searchDomains: string[] | undefined = base.searchDomains;
   if (net.dns !== undefined && net.dns !== null) {
-    for (let i = 0; i < net.dns.servers.length; i++) {
-      dnsServers.push(net.dns.servers[i].ip);
+    if (net.dns.local_resolver_ready === true) {
+      const resolver: string = net.dns.local_resolver_ip ?? '';
+      // Core supplies the official WG-network-derived address, never a port
+      // or a peer route. Do not hand an unusable address to the platform.
+      if (isStrictTargetIpv4(resolver)) {
+        dnsServers.push(resolver);
+        // Exact duplicates (including a conflicting /32 exclusion) are replaced
+        // by one local-service route. Broader LAN exclusions remain untouched;
+        // this /32 is more specific and must still enter TUN.
+        for (let i = routes.length - 1; i >= 0; i--) {
+          if (routes[i].destination === resolver && routes[i].prefixLength === 32) {
+            routes.splice(i, 1);
+          }
+        }
+        routes.push({
+          destination: resolver, prefixLength: 32, gateway: address,
+          hasGateway: true, isDefaultRoute: false, isExcludedRoute: false,
+          source: 'local-dns'
+        });
+        searchDomains = normalizeSearchDomains(net.dns.search_domains ?? []);
+      }
+    } else if (net.dns.local_resolver_ready === undefined) {
+      // Old schema only. Explicit ready=false retains base/current DNS and
+      // never falls through to flattened upstreams or the advertised virtual IP.
+      for (let i = 0; i < net.dns.servers.length; i++) {
+        dnsServers.push(net.dns.servers[i].ip);
+      }
     }
   }
 
@@ -291,6 +344,7 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
     interfaceName: base.interfaceName,
     routes: routes,
     dnsServers: dnsServers.length > 0 ? dnsServers : base.dnsServers,
+    searchDomains: searchDomains,
     mtu: selectTunnelMtu(base.mtu, net.mtu),
     peerEndpoint: base.peerEndpoint
   };
@@ -316,6 +370,7 @@ export function withEndpointExclusions(base: VpnTunnelConfig,
     interfaceName: base.interfaceName,
     routes: mergeExcludedRouteEntries(base.routes, derived),
     dnsServers: base.dnsServers,
+    searchDomains: base.searchDomains,
     mtu: base.mtu,
     peerEndpoint: base.peerEndpoint
   };
@@ -344,6 +399,7 @@ export function gateDefaultRoutes(config: VpnTunnelConfig, allowed: boolean): Vp
     interfaceName: config.interfaceName,
     routes: held,
     dnsServers: config.dnsServers,
+    searchDomains: config.searchDomains,
     mtu: config.mtu,
     peerEndpoint: config.peerEndpoint
   };
@@ -478,6 +534,7 @@ export function withTunnelSubnetRoute(config: VpnTunnelConfig): TunnelSubnetRout
     interfaceName: config.interfaceName,
     routes: routes,
     dnsServers: config.dnsServers,
+    searchDomains: config.searchDomains,
     mtu: config.mtu,
     peerEndpoint: config.peerEndpoint
   };
@@ -624,6 +681,7 @@ export function withCaptureRoute(config: VpnTunnelConfig, target: string): Captu
     interfaceName: config.interfaceName,
     routes: routes,
     dnsServers: config.dnsServers,
+    searchDomains: config.searchDomains,
     mtu: config.mtu,
     peerEndpoint: config.peerEndpoint
   };
@@ -687,6 +745,9 @@ export function buildPlatformVpnConfig(config: VpnTunnelConfig,
   };
   if (config.dnsServers.length > 0) {
     vpnConfig.dnsAddresses = config.dnsServers;
+  }
+  if (config.searchDomains !== undefined && config.searchDomains.length > 0) {
+    vpnConfig.searchDomains = config.searchDomains.slice();
   }
   vpnConfig.mtu = config.mtu;
   // S2 (see the doc comment): present ONLY when a non-empty list was passed.

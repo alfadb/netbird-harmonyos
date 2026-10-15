@@ -65,6 +65,8 @@ tower-service = "0.3"
 # its outbound half (hand-rolled over tokio mpsc). futures-core is ALREADY in
 # Cargo.lock as a tonic/hyper dependency — no new package, offline-safe.
 futures-core = "0.3"
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp", "socket-tcp-reno"] }
+hickory-proto = { version = "=0.25.2", default-features = false, features = ["std", "text-parsing"] }
 
 [profile.release]
 panic = "abort"
