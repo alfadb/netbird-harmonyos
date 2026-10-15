@@ -192,7 +192,7 @@ import {
   PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
   PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
   PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
-  peerListNavBarWidthFor, peerListCardWidthVp, peerRowCondensed, peerRowIpWidthFor,
+  peerListNavBarWidthFor, peerRowCondensed, peerRowIpWidthFor,
   peerRowNameWidthFor, RAIL_CARD_PADDING_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
   RAIL_INFO_COPY_SLOT_VP, RAIL_INFO_MIN_VALUE_VP,
@@ -5814,9 +5814,11 @@ struct Index {
         // search. Over an empty list it took a whole row of the narrow column to
         // offer a filter for nothing; the empty blocks below already carry the ONE
         // action each state has. 0.0.41 (I6) §3: its width is the peer list CARD's
-        // own width (peerSearchWidth → peerListCardWidthVp) — the field's left and
-        // right edges are the list's, and the narrow branch keeps today's
-        // full width ('100%').
+        // own box. 0.0.48 (I13): that box is this Column's content width — the field
+        // and the List below it are both `width('100%')` children of the same
+        // page-padded Column — NOT an absolute number the page derives from the
+        // design's column table (see peerSearchWidth for the 0.0.47 frame that
+        // measured the difference and the framework rule behind it).
         if (this.peersList().length > 0) {
           TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
             .fontSize(TYPE_BODY_FP)
@@ -5832,14 +5834,14 @@ struct Index {
             .borderRadius(12)
             .backgroundColor($r('app.color.nb_input_background'))
             .border({ width: 1, color: $r('app.color.nb_card_border') })
-            // 0.0.47 (I12) §2 — THE THIRD AXIS. The field's OUTER edges are already
-            // the list card's (I6 §3), so what the re-review measured was the text
-            // inside it: the placeholder started at the framework's own TextInput
-            // inset. The explicit padding puts the field's text on the SAME axis the
-            // peer names and addresses sit on (PEER_SEARCH_TEXT_INSET_VP = the row's
-            // reserved 3 vp marker + the shared 12 vp content padding) and ends it at
-            // the shared content padding, i.e. the row text region's own two edges. No
-            // new magic number: both terms are the constants the row already spends.
+            // 0.0.47 (I12) §2 — THE THIRD AXIS, kept; 0.0.48 (I13) is what makes it
+            // land. The padding puts the field's text on the SAME axis the peer names
+            // and addresses sit on (PEER_SEARCH_TEXT_INSET_VP = the row's reserved 3 vp
+            // marker + the shared 12 vp content padding) and ends it at the shared
+            // content padding, i.e. the row text region's own two edges. No new magic
+            // number: both terms are the constants the row already spends. It is
+            // measured from the field's own left border, so it can only be the row axis
+            // while that border IS the card's (peerSearchWidth below).
             .padding({
               left: PEER_SEARCH_TEXT_INSET_VP, right: PEER_ROW_CONTENT_PADDING_VP
             })
@@ -7345,21 +7347,35 @@ struct Index {
   }
 
   /**
-   * 0.0.38 (I3) F: the search field's width. Narrow branch: today's full width.
-   * Wide branch: the peer list CARD's own width — the same number the row-text
-   * budget is measured from, so the field and the list below it share their left
-   * and right edge by construction.
+   * 0.0.38 (I3) F: the search field's width. 0.0.48 (I13) — THE BOX, NOT A NUMBER.
    *
-   * 0.0.41 (I6) §3: the wide branch used to be capped at 320 vp
-   * (PEER_SEARCH_MAX_WIDTH_VP), which the owner's 0.0.40 frame measured as the
-   * field ending ~34 vp short of the list on EACH side. That cap is retired; the
-   * field is the card's width, with the same radius (12) and height (42) it had.
+   * History: the wide branch was capped at 320 vp (PEER_SEARCH_MAX_WIDTH_VP) until
+   * 0.0.41 (I6) §3 replaced the cap with the design's own column table minus the page
+   * padding (peerListCardWidthVp of peerListNavBarWidth). That number is a MODEL of
+   * the list column, and the framework does not have to render the model: navBarWidth
+   * is only a REQUEST. Navigation's `maxNavBarWidth` defaults to **40% of the pane**
+   * (SDK navigation.d.ts: "the maximum width defaults to 40% of the component width"),
+   * and it wins whenever the requested column is above it.
+   *
+   * The owner's 0.0.47 PC frame is exactly that case. Its window is 1250 vp, so the
+   * table asks for a 440 vp column, but the pane is 972 vp and 40% of it is 389 vp: the
+   * RENDERED column is 389, the card (a `width('100%')` child of this page-padded
+   * Column) is 357, and the field — still carrying the model's 408 vp — was 51 vp too
+   * wide. This Column CENTRES an over-wide child, so the surplus split evenly: 25 vp of
+   * overhang per side, of which the navBar's own clip showed the 16 vp page padding.
+   * Measured in that frame: field border x 794/1387, card border x 819/1362,
+   * placeholder glyph 804, peer-name glyph 843 (1.5214 px/vp) — the field one page
+   * padding wide of the card on EACH side, its text (correctly padded by 15 vp from ITS
+   * left border) 25 vp left of the row text axis.
+   *
+   * So the width is not derived, it is SHARED. On both branches the field is
+   * `width('100%')` of this Column's content box — the SAME source as the List card
+   * below it — so its outer left/right edge equals the card's at every window, whatever
+   * the framework decides the column is. Its INNER text axis is the row's own constants
+   * (see the `.padding` at the call site).
    */
   private peerSearchWidth(): Length {
-    if (!this.wideLayout()) {
-      return '100%';
-    }
-    return peerListCardWidthVp(this.peerListNavBarWidth());
+    return '100%';
   }
 
   /**

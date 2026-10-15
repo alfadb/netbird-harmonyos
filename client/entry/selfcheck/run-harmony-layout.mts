@@ -62,7 +62,10 @@ function check(name: string, condition: boolean, detail?: string): void {
 try {
   // The pure module is imported byte-identical (only the extension changes).
   const layoutFixture = join(dir, 'NetBirdHarmonyLayout.ts');
-  writeFileSync(layoutFixture, readFileSync(join(ets, 'pages', 'NetBirdHarmonyLayout.ets')));
+  // 0.0.48 (I13): the module's TEXT is kept as well, so the DERIVATION of the search
+  // field's text axis (a `peerRowTextStartVp()` call, not a written 15) is checked too.
+  const LAYOUT = readFileSync(join(ets, 'pages', 'NetBirdHarmonyLayout.ets'), 'utf8');
+  writeFileSync(layoutFixture, LAYOUT);
   const m = await import(pathToFileURL(layoutFixture).href);
   // 0.0.40 (I5) §3: the peer-row KEY is executed here too, because the selected
   // state had to join it — the same byte-identical fixture run-peer-list-render.mts
@@ -1493,20 +1496,46 @@ try {
     !PAGE.includes('peerRowHighlightCornerClearanceVp') &&
     !PAGE.includes('peerRowHighlightConcentricRadiusVp'));
 
-  // ---- (a2) 0.0.47 (I12) §2: the search field's text sits on the row text axis -----
-  check('I12 §2: the search field\'s INNER padding is the row text\'s own axis, and its ' +
-    'outer width is still the list card\'s',
+  // ---- (a2) 0.0.47 (I12) §2 · 0.0.48 (I13): THE FIELD'S BOX AND ITS TEXT AXIS ------
+  // The owner's 0.0.47 PC frame (1250 vp window ⇒ 972 vp pane, 1.5214 px/vp) measured the
+  // field's outer border at x 794/1387 px and the list card's at 819/1362 px: the field
+  // was one page padding (16 vp) wider than the card on EACH side, and its placeholder
+  // (804 px) sat 39 px left of the peer names (843 px). Cause: the field's width was the
+  // absolute `peerListCardWidthVp(peerListNavBarWidthFor(window))` = 408 vp — the column
+  // TABLE's answer — while the framework caps the real list column at `maxNavBarWidth`
+  // (default 40% of the pane) and rendered 389 vp. The card, being `width('100%')`,
+  // followed the real column, and the page-padded Column CENTRED the 51 vp surplus into
+  // one page padding of visible overhang per side. So BOTH halves are pinned as SOURCES,
+  // not as numbers:
+  //   * the field's OUTER box is the card's, taken the way the card takes it —
+  //     `width('100%')` of this same page-padded Column — so no window width, no
+  //     framework cap and no table change can separate them again;
+  //   * the field's INNER text axis is the row text's own start — the reserved selection
+  //     marker plus the shared content padding, DERIVED by peerRowTextStartVp(), which is
+  //     also exactly what peerRowTextWidthVp spends on the row's left.
+  check('I13: the search field takes the list card\'s own box (100% of the page-padded ' +
+    'column, never a width from the column table) and pads its text onto the row axis',
     m.PEER_SEARCH_TEXT_INSET_VP === m.peerRowTextStartVp() &&
     m.PEER_SEARCH_TEXT_INSET_VP === m.PEER_ROW_SELECT_BAR_VP + m.PEER_ROW_CONTENT_PADDING_VP &&
-    PAGE.includes('private peerSearchWidth(): Length {') &&
+    // the inset is the row's two constants DERIVED, not the literal 15 vp
+    LAYOUT.includes(
+      'export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();') &&
+    // the field's own two edges are those constants; its width is the shared-box helper
     PAGE.includes('.width(this.peerSearchWidth())') &&
     PAGE.includes('.padding({\n              left: PEER_SEARCH_TEXT_INSET_VP, ' +
       'right: PEER_ROW_CONTENT_PADDING_VP\n            })') &&
-    // the field's OUTER width is still the list card's own width (I6 §3): the page hands
-    // the field the same pure table it hands the list, and the narrow branch keeps 100%
-    PAGE.includes('return peerListCardWidthVp(this.peerListNavBarWidth());') &&
-    m.peerListCardWidthVp(m.peerListNavBarWidthFor(1440)) ===
-      m.peerListNavBarWidthFor(1440) - 2 * m.RAIL_PAGE_PADDING_VP);
+    /private peerSearchWidth\(\): Length \{\n    return '100%';\n  \}/.test(PAGE) &&
+    (() => {
+      const body = PAGE.slice(PAGE.indexOf('peerListBody() {'),
+        PAGE.indexOf('// ---- 设置'));
+      return body.includes('List({ space: 0 })') &&
+        // ONE box source for the field and the card: width-100% children of one padded
+        // Column (the header, the two empty blocks and the List are the other three)
+        (body.match(/\.width\('100%'\)/g) ?? []).length >= 3 &&
+        // negative control: the absolute width this replaced cannot come back
+        !/\.width\(this\.peerListNavBarWidth\(\)\)/.test(PAGE) &&
+        !/\.width\(peerListCardWidthVp\(/.test(PAGE);
+    })());
 
   // ---- (a3) 0.0.47 (I12) §3: the disclosure indicator is a drawn 12 vp chevron ------
   check('I12 §3: the collapsed sections\' chevron is a 10-12 vp DRAWN mark in the same ' +

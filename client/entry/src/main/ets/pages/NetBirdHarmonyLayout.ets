@@ -832,6 +832,14 @@ export function peerContentMinWidthVp(windowVp: number): number {
  * reservation, which the split shell never mounts) the answer is the framework
  * default, and a nonsense pane width answers the same — never NaN, never a
  * negative width.
+ *
+ * 0.0.48 (I13): THIS IS A REQUEST, NOT THE ANSWER. The page hands it to
+ * `Navigation.navBarWidth`, and the framework may render less: `maxNavBarWidth`
+ * defaults to 40% of the pane ("the maximum width defaults to 40% of the component
+ * width", SDK navigation.d.ts) and beats a larger request. At the owner's 0.0.47 PC
+ * window (1250 vp window, 972 vp pane) the table asks for 440 vp and the rendered
+ * column is 389 vp — the 51 vp the search field was wrongly sized from. Nothing whose
+ * edge must match the rendered card may be derived from this number.
  */
 export function peerListNavBarWidthVp(paneWidthVp: number, windowVp: number): number {
   const room: number = paneWidthVp - peerContentMinWidthVp(windowVp);
@@ -869,9 +877,17 @@ export function peerRowCondensed(windowVp: number): boolean {
  * the row-text budget below was always measured from it, while the search field
  * was additionally capped at a PEER_SEARCH_MAX_WIDTH_VP of 320 — in the owner's
  * 0.0.40 frame the field therefore ended ~34 vp short of the card on EACH side
- * ("搜索框比下面的对端列表窄"). The cap is gone and both callers read this
- * function, so the field and the list have the same left and right edge by
- * construction rather than by arithmetic that happens to agree.
+ * ("搜索框比下面的对端列表窄"). The cap is gone.
+ *
+ * 0.0.48 (I13) — IT IS A BUDGET, NOT A BOX. Handing a component this number makes
+ * it the MODEL's width, and the framework is free not to render the model: it caps
+ * the list column at `maxNavBarWidth`, whose default is 40% of the pane (see
+ * peerListNavBarWidthVp), so at the owner's 0.0.47 window the real column was 389 vp
+ * where this function's caller had assumed 440 — and the search field, 51 vp too
+ * wide, overhung the card by one page padding on each side. Anything that must LINE
+ * UP WITH THE CARD therefore takes the card's box (`'100%'` of the page-padded
+ * column), never this number. The row-text budget below is the one legitimate
+ * caller left: it is a lower bound on what the columns must fit, not a rectangle.
  */
 export function peerListCardWidthVp(navBarWidthVp: number): number {
   const full: number = navBarWidthVp - 2 * RAIL_PAGE_PADDING_VP;
@@ -1186,14 +1202,19 @@ export function peerRowHighlightWidthVp(cardWidthVp: number): number {
 /**
  * 0.0.47 (I12) §2 — THE SEARCH FIELD'S TEXT SITS ON THE ROW TEXT'S AXIS.
  *
- * The field's OUTER edges are already the list card's (I6 §3: `peerSearchWidth` →
- * `peerListCardWidthVp`, so left and right edge match by construction). What the
- * re-review measured was the third axis: the placeholder started at the framework's
- * own TextInput inset instead of at the axis the peer names and addresses sit on. The
- * field therefore carries an EXPLICIT horizontal padding, and it is not a new magic
+ * The field carries an EXPLICIT horizontal padding, and it is not a new magic
  * number — the left edge is the row text's own start (`peerRowTextStartVp`, i.e. the
  * reserved marker plus the shared content padding) and the right edge is the shared
  * content padding, exactly as the row's text region ends.
+ *
+ * 0.0.48 (I13) — THE PADDING IS HALF THE JOB. It is measured from the field's own
+ * left border, so it puts the placeholder on the row axis only while that border IS
+ * the card's left border. Under I12 the field's WIDTH was still an absolute number
+ * from the column table (peerListCardWidthVp), the framework rendered a narrower
+ * column, and the 25 vp the field overhung by on the left carried the placeholder —
+ * padded correctly, in the wrong place — 39 px left of the peer names in the owner's
+ * 0.0.47 frame. The page therefore shares the CARD's box (`.width('100%')`) with the
+ * field and keeps this padding (see Index.peerSearchWidth).
  */
 export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();
 
