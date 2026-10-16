@@ -211,6 +211,7 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return files()[path];\n' +
   '  },\n' +
   '  openSync: (path) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("open:" + path);\n' +
   '    const code = (g().__NB_FS_OPEN_ERROR || {})[path];\n' +
   '    if (code !== undefined) {\n' +
   '      const e = new Error("open failed: " + path); e.code = code; throw e;\n' +
@@ -218,6 +219,7 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return { fd: path };\n' +
   '  },\n' +
   '  writeSync: (fd, text) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("write:" + fd);\n' +
   '    const err = (g().__NB_FS_WRITE_ERROR || {})[fd];\n' +
   '    if (err !== undefined) {\n' +
   '      files()[fd] = ""; // the open already TRUNCed; nothing got written\n' +
@@ -228,7 +230,9 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return bytes;\n' +
   '  },\n' +
   '  closeSync: () => {},\n' +
-  '  unlinkSync: (path) => { delete files()[path]; },\n' +
+  '  unlinkSync: (path) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("unlink:" + path); delete files()[path];\n' +
+  '  },\n' +
   // The SDK's SYNCHRONOUS temp+fsync+rename document pattern, kept functional
   // for any staged writer that uses it: renameSync moves the stored text
   // exactly like the real 13900002-less happy path, and throws the SDK's
@@ -1081,6 +1085,14 @@ const SHIMS = {
 };
 
 export function resolve(specifier, context, next) {
+  if (specifier === '../../../../build/default/generated/profile/default/BuildProfile') {
+    // Each EntryAbility module URL selects an immutable profile. Distinct data
+    // URLs keep debug/release isolated even when both run in the same process.
+    const debug = new URL(context.parentURL).searchParams.get('build') === 'debug';
+    return { url: 'data:text/javascript,' + encodeURIComponent(
+      'export default class BuildProfile { static DEBUG = ' + debug + '; }'),
+      shortCircuit: true };
+  }
   if (specifier === './NetBirdN2Control') {
     // N2 T3 §3 (2026-09-28): the positive-control sender the REAL extension now
     // calls from its armed-only `pollN2Control` (the control channel's missing

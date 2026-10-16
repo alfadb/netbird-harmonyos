@@ -1240,7 +1240,13 @@ try {
   // by the RESOLVED path, so the two processes meet on ONE file — exactly the
   // cross-process filesDir mechanism the device already validated for the
   // credentials.
-  const entryMod = await import(pathToFileURL(join(dir, 'EntryAbility.ts')).href) as
+  // C0: fixed generated-profile stubs, isolated by module URL (no mutable
+  // global DEBUG switch). The exact same byte-identical class runs both modes.
+  const releaseEntryMod = await import(
+    pathToFileURL(join(dir, 'EntryAbility.ts')).href + '?build=release') as
+    Record<string, unknown>;
+  const entryMod = await import(
+    pathToFileURL(join(dir, 'EntryAbility.ts')).href + '?build=debug') as
     Record<string, unknown>;
   const ARM_PAYLOAD = '{"posctl_port":41000,"probe_wait_ms":900,' +
     '"peer_b2a_probe_id":"N2H-posctl-fixture"}';
@@ -1256,6 +1262,88 @@ try {
     G['__NB_FS_WRITE_ERROR'] = {};
     G['__NB_ARM_OPTS'] = undefined;
   };
+
+  // Every injected file, including all six mutually exclusive request channels.
+  const injectedFiles: Array<[string, string, string]> = [
+    ['netbird_config', 'netbird-device-config.json', '{"fixture":"replacement"}'],
+    ['netbird_setup_key', 'netbird-setup-key', 'synthetic-setup-key'],
+    ['protectDeviation', 'netbird-protect-deviation', 'route-exclusion'],
+    ['n2h_arm_options', ARM_TICKET_NAME, ARM_PAYLOAD],
+    ['n2_stimulus', 'netbird-n2-stimulus', '{"fixture":"stimulus"}'],
+    ['n2_control', 'netbird-n2-control', '{"fixture":"control"}'],
+    ['n2_a_event', 'netbird-n2-a-event', '{"fixture":"a-event"}'],
+    ['n2_cd_plan', 'netbird-n2-cd-plan', '{"fixture":"cd-plan"}'],
+    ['n2_ring_dump', 'netbird-n2-ring-dump', '{"fixture":"ring-dump"}'],
+    ['n2_ring_ack', 'netbird-n2-ring-ack', '{"fixture":"ring-ack"}']
+  ];
+  const allInjection = Object.fromEntries(injectedFiles.map(([key, , value]) => [key, value]));
+  const releaseWants: Array<[string, Record<string, unknown> | undefined]> = [
+    ['no parameters', undefined],
+    ['all parameters', allInjection],
+    ...injectedFiles.map(([key, , value]): [string, Record<string, unknown>] =>
+      [key, { [key]: value }])
+  ];
+  for (const seeded of [true, false]) {
+    for (const lifecycle of ['onCreate', 'onNewWant']) {
+      for (const [label, parameters] of releaseWants) {
+        resetFs();
+        if (seeded) {
+          for (const [, name] of injectedFiles) {
+            seedFile(`${FIXTURE_FILESDIR}/${name}`, `original:${name}:λ\n`);
+          }
+        }
+        const before = JSON.stringify(G['__NB_FS']);
+        G['__NB_FS_MUTATIONS'] = [];
+        const entry = new (releaseEntryMod['default'] as new () => Record<string, unknown>)();
+        entry['context'] = { filesDir: FIXTURE_FILESDIR };
+        // Observe the real last lifecycle step after the gate, without replacing
+        // its behaviour. This also proves parameter-less callbacks return normally.
+        let completed = false;
+        const show = entry['showHiddenWindow'] as (reason: string) => void;
+        entry['showHiddenWindow'] = (reason: string): void => {
+          show.call(entry, reason);
+          completed = reason === lifecycle;
+        };
+        resetLog();
+        const want = parameters === undefined ? { bundleName: 'cn.alfadb.netbird' } :
+          { bundleName: 'cn.alfadb.netbird', parameters };
+        (entry[lifecycle] as (w: unknown, l: unknown) => void)(want, {});
+        check(`C0 release ${lifecycle} ${label} (${seeded ? 'existing' : 'empty'} files): ` +
+          'unchanged bytes, no writes/deletes, lifecycle completed',
+          completed && JSON.stringify(G['__NB_FS']) === before &&
+          (G['__NB_FS_MUTATIONS'] as string[]).length === 0,
+          JSON.stringify({ completed, mutations: G['__NB_FS_MUTATIONS'] }));
+      }
+    }
+  }
+  G['__NB_FS_MUTATIONS'] = undefined;
+  resetFs();
+  // Debug onNewWant retains the original credential/arm write path. The full
+  // pre-existing C and request-channel groups below keep driving debug onCreate.
+  const debugWarmEntry = newEntry();
+  (debugWarmEntry['onNewWant'] as (w: unknown, l: unknown) => void)({
+    bundleName: 'cn.alfadb.netbird', parameters: {
+      netbird_config: allInjection['netbird_config'],
+      netbird_setup_key: allInjection['netbird_setup_key'],
+      protectDeviation: 'route-exclusion', n2h_arm_options: ARM_PAYLOAD
+    }
+  }, {});
+  check('C0 debug onNewWant still writes valid config, setup key, deviation and arm',
+    fileOf(`${FIXTURE_FILESDIR}/netbird-device-config.json`) === allInjection['netbird_config'] &&
+    fileOf(`${FIXTURE_FILESDIR}/netbird-setup-key`) === 'synthetic-setup-key\n' &&
+    fileOf(`${FIXTURE_FILESDIR}/netbird-protect-deviation`) === 'route-exclusion\n' &&
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD, 'synthetic fixture writes');
+  // Re-drive release AFTER debug import/use to catch shared mutable profile state.
+  const releaseWarmEntry = new (releaseEntryMod['default'] as new () => Record<string, unknown>)();
+  releaseWarmEntry['context'] = { filesDir: FIXTURE_FILESDIR };
+  const afterDebug = JSON.stringify(G['__NB_FS']);
+  G['__NB_FS_MUTATIONS'] = [];
+  (releaseWarmEntry['onNewWant'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: allInjection }, {});
+  check('C0 release remains closed after debug class use (module cache isolation)',
+    JSON.stringify(G['__NB_FS']) === afterDebug &&
+    (G['__NB_FS_MUTATIONS'] as string[]).length === 0, 'fixed per-module DEBUG');
+  G['__NB_FS_MUTATIONS'] = undefined;
 
   // C1: the explicit non-secret want lands byte-verbatim in filesDir, logged
   // as file name + byte count, payload never printed. The count is the payload's

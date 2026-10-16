@@ -1,3 +1,4 @@
+import BuildProfile from '../../../../build/default/generated/profile/default/BuildProfile';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { Configuration } from '@ohos.app.ability.Configuration';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
@@ -761,6 +762,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   private persistCredentialOverrides(want: Want): void {
+    if (!BuildProfile.DEBUG) {
+      return;
+    }
     const params: Record<string, Object> | undefined = want.parameters;
     if (params !== undefined && params !== null) {
       const config: Object | undefined = params[CONFIG_PARAM];
