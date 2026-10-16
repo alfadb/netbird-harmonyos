@@ -22,8 +22,8 @@ try {
   const mod = await import(pathToFileURL(fixture).href);
 
   // --- constants stay on the SHARED credential protocol (--ps channel) ---
-  check('default management url is the project deployment',
-    mod.DEFAULT_MANAGEMENT_URL === 'https://api.netcenter.alfadb.cn');
+  check('default management url requires a user-supplied server',
+    mod.DEFAULT_MANAGEMENT_URL === '');
   check('config file name matches the --ps channel / extension reader',
     mod.SETUP_CONFIG_FILE === 'netbird-device-config.json');
   check('setup key file name matches the --ps channel / extension reader',
@@ -31,9 +31,9 @@ try {
 
   // --- management URL validation + normalization ---
   const cases: Array<[string, string, string]> = [
-    ['https://api.netcenter.alfadb.cn', 'https://api.netcenter.alfadb.cn', 'plain https url'],
-    ['  https://api.netbird.io:443  ', 'https://api.netbird.io:443', 'surrounding whitespace trimmed'],
-    ['https://api.netcenter.alfadb.cn/', 'https://api.netcenter.alfadb.cn', 'trailing slash stripped'],
+    ['https://management.example.test', 'https://management.example.test', 'plain https url'],
+    ['  https://management.example.test:443  ', 'https://management.example.test:443', 'surrounding whitespace trimmed'],
+    ['https://management.example.test/', 'https://management.example.test', 'trailing slash stripped'],
     ['https://API.NetCenter.Example:443/', 'https://api.netcenter.example:443', 'scheme+host lowercased, port kept'],
     ['https://netbird.example.com:443/api?x=1', 'https://netbird.example.com:443', 'path and query stripped']
   ];
@@ -44,10 +44,10 @@ try {
   const bad: Array<[string, string]> = [
     ['', 'empty input'],
     ['   ', 'whitespace-only input'],
-    ['api.netcenter.alfadb.cn', 'missing scheme'],
-    ['//api.netcenter.alfadb.cn', 'scheme without name'],
-    ['http://api.netcenter.alfadb.cn', 'http scheme'],
-    ['HTTP://api.netcenter.alfadb.cn', 'uppercase http scheme'],
+    ['management.example.test', 'missing scheme'],
+    ['//management.example.test', 'scheme without name'],
+    ['http://management.example.test', 'http scheme'],
+    ['HTTP://management.example.test', 'uppercase http scheme'],
     ['ftp://h.example', 'ftp scheme'],
     ['https://', 'empty host'],
     ['https:///api', 'empty host before path'],
@@ -98,6 +98,85 @@ try {
     mod.buildSetupKeyFileText('abc-123') === 'abc-123\n');
   check('setup key file text trims surrounding whitespace',
     mod.buildSetupKeyFileText('  abc-123 \n') === 'abc-123\n');
+
+  // Execute the page's unchanged methods with in-memory storage and side-effect
+  // counters. This is host coverage, not a fresh-install/device UI acceptance.
+  const page = readFileSync(join(here, '..', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
+  function pageMethod(begin: string, end: string): string {
+    const start = page.indexOf(begin);
+    const stop = page.indexOf(end, start);
+    if (start < 0 || stop < 0) { throw new Error('page method boundary missing'); }
+    return page.slice(start, stop);
+  }
+  check('first-run input and logout reset both use the default constant',
+    page.includes('@State urlInput: string = DEFAULT_MANAGEMENT_URL;') &&
+    page.includes('this.urlInput = DEFAULT_MANAGEMENT_URL;'));
+  check('generic server placeholder stays available',
+    page.includes('服务器地址（https://…）'));
+  const uiFixture = join(dir, 'SetupPageHarness.ts');
+  writeFileSync(uiFixture, `${readFileSync(source, 'utf8')}
+const ACCOUNT_MODE_SETUP_KEY = 'setup-key';
+const ACCOUNT_MODE_ACCOUNT = 'account';
+const ACCOUNT_MODE_FILE_NAME = 'auth-mode';
+const ACCOUNT_INTENT_SETUP = 'setup';
+const getContext = (page: any) => ({ filesDir: '/fixture' });
+const files = new Map<string, string>();
+const fs = {
+  accessSync: (path: string) => files.has(path),
+  readTextSync: (path: string) => files.get(path) ?? ''
+};
+const parseAuthMode = (text: string) => text.trim();
+export class SetupPageHarness {
+  configured = false; configuredUrl = ''; urlInput = DEFAULT_MANAGEMENT_URL;
+  authMode = ACCOUNT_MODE_SETUP_KEY; keyInput = 'synthetic-test-key';
+  accountLoginBusy = false; accountLoginCommitting = false;
+  writes = 0; starts = 0; discoveries = 0;
+  accountModeSwitchBlocked() { return false; }
+  devicePrivateKey() { return 'synthetic-test-identity'; }
+  deviceRelayEnabled() { return true; }
+  writeSetupFile(name: string, text: string) {
+    this.writes++; files.set('/fixture/' + name, text); return true;
+  }
+  requestStart() { this.starts++; }
+  cancelAccountLogin(value: boolean) {}
+  async openAccountLogin(intent: string, url: string, extend: boolean) { this.discoveries++; }
+  storedConfig() { return files.get('/fixture/' + SETUP_CONFIG_FILE) ?? ''; }
+  ${pageMethod('private refreshSetupState(): void', '// Save the form:')}
+  ${pageMethod('private saveSetup(): void', 'private beginConfigurationEdit(): void')}
+  ${pageMethod('private beginConfigurationEdit(): void', 'private selectAuthMode(')}
+  ${pageMethod('private async beginAccountLogin(): Promise<void>', '// The ONE ArkWeb PKCE surface opener')}
+}
+`);
+  const uiMod = await import(pathToFileURL(uiFixture).href);
+  const ui = new uiMod.SetupPageHarness();
+  ui.saveSetup();
+  await ui.beginAccountLogin();
+  check('empty default cannot save config or start VPN', ui.writes === 0 && ui.starts === 0);
+  check('empty default cannot reach account discovery', ui.discoveries === 0);
+  check('empty default produces a readable error', hasCjk(ui.formError));
+  const userUrl = 'https://user-managed.example.test:8443';
+  ui.urlInput = userUrl;
+  ui.saveSetup();
+  const savedConfig = ui.storedConfig();
+  check('user server saves and reads back despite empty factory default',
+    ui.writes === 3 && ui.starts === 1 && ui.configured && ui.configuredUrl === userUrl &&
+    mod.readStoredManagementUrl(savedConfig) === userUrl);
+  ui.urlInput = mod.DEFAULT_MANAGEMENT_URL;
+  ui.refreshSetupState();
+  check('loading existing config preserves its original server and bytes',
+    ui.configuredUrl === userUrl && ui.storedConfig() === savedConfig && ui.writes === 3);
+  ui.beginConfigurationEdit();
+  check('editing existing config starts from the saved user server', ui.urlInput === userUrl);
+  ui.urlInput = 'https://unsaved.example.test';
+  ui.cancelConfigurationEdit();
+  check('canceling edit restores saved server without rewriting config',
+    ui.urlInput === userUrl && ui.configuredUrl === userUrl &&
+    ui.storedConfig() === savedConfig && ui.writes === 3);
+  ui.beginConfigurationEdit();
+  ui.keyInput = 'synthetic-test-key';
+  ui.saveSetup();
+  check('saving unchanged server after editing preserves original config bytes',
+    ui.configuredUrl === userUrl && ui.storedConfig() === savedConfig && ui.writes === 6);
 
   // --- stored relay switch read-back (reconfigure preservation) ---
   const storedText = '{"management_url":"https://x.example","private_key":"pk-1"}';
