@@ -4,7 +4,7 @@
 
 ## 应用与服务
 
-Netbird 是面向用户选择的自建 NetBird 网络的 HarmonyOS 非官方客户端。应用运营主体为[待确认]。用户所选管理服务、身份提供方及网络服务各自的数据处理规则也会影响实际使用。
+Netbird 是面向用户自行搭建的 NetBird 网络的 HarmonyOS 非官方客户端，仅限异地组网工具使用。客户端开发者提供软件，不运营或提供网络接入、线路、管理平台、信令、中继/代理等网络服务；由用户自行部署、配置和管理其组网及相关服务。客户端软件发布主体为[待确认]，与用户所选组网服务运营者的角色分开；相关管理服务、身份提供方及网络服务各自负责其服务中的数据处理，账户体系由相关组网服务或身份提供方（IdP）负责。客户端中的信息处理仍按下述实际数据流说明。
 
 ## 处理的信息、用途与去向
 
@@ -19,7 +19,7 @@ Netbird 是面向用户选择的自建 NetBird 网络的 HarmonyOS 非官方客�
 
 SSO 使用的 ArkWeb 可能依平台及身份站点行为产生 cookie、缓存等数据；JWT不由应用业务代码落盘，不代表这些浏览数据不存在。身份提供方决定其账号、认证记录及保留规则。
 
-应用会按所选部署及下发配置联系管理、signal、对端、STUN、中继和 DNS 服务；管理配置的 DNS 与物理网络 fallback 也可能接收解析请求。实际服务位置、接收方和跨境情况由用户及其组织的网络配置决定，不能用固定项目服务器名单概括。经出口节点访问的流量受该出口服务的处理规则影响。
+应用会按所选部署及下发配置联系管理、signal、对端、STUN、中继和 DNS 服务；管理配置的 DNS 与物理网络 fallback 也可能接收解析请求。当前基础 VPN 配置含 Google Public DNS（8.8.8.8）作为回退，是否使用取决于最终生效配置：ready 的本地 resolver / 下发 DNS 配置优先，没有可用配置时可能回到基础值。这是配置阶段回退，不表示私域解析请求失败后会自动转发 Google。第三方服务并非我方运营，实际处理地域需按服务和部署核对；不能保证一切节点均由用户自建或全程境内。实际服务位置、接收方和跨境情况还取决于用户及其组织的网络配置，不能用固定项目服务器名单概括。经出口节点访问的流量受该出口服务的处理规则影响。
 
 ## 存储、保留与用户操作
 
@@ -41,4 +41,5 @@ SSO 使用的 ArkWeb 可能依平台及身份站点行为产生 cookie、缓存�
 - [SSO](../../../client/entry/src/main/ets/login/NetBirdAccountLogin.ets):344–408：provider 决定 token 选择，JWT用于当次注册/延长，不持久保存；ArkWeb存储行为需独立看待。
 - [连接配置](../../../client/entry/src/main/ets/vpnextensionability/NetBirdConnector.ets):650–658：默认部分 metadata 是 `netbird-ohos / harmonyos / unknown / 0.1.0`，不据此声称读取真实硬件标识。
 - [UI日志预算](../../../client/entry/src/main/ets/vpnextensionability/NetBirdDiagnosticsCore.ets):195–196 与[native日志预算](../../../client/core/src/phone_log.rs):215–217 为4+96 MiB；[导出模块](../../../client/entry/src/main/ets/vpnextensionability/NetBirdLogExport.ets):15–27确认口径。旧“约2+8MiB”不符合此候选源码。
+- [基础 VPN 配置](../../../client/entry/src/main/ets/vpnextensionability/NetBirdVpnConfig.ets)：`dnsServers = 8.8.8.8` 为既有基础值；ready 本地 resolver / 下发 DNS 配置优先，需按最终生效配置核实第三方 DNS 使用，本文不改变行为。
 - [注销流程](../../../client/entry/src/main/ets/pages/Index.ets):4133 起与[权限声明](../../../client/entry/src/main/module.json5):75 起是当前核对依据；第三方完整清单待负责作者提供。
