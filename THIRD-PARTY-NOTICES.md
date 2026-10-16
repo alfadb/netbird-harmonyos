@@ -1,95 +1,23 @@
-# THIRD-PARTY-NOTICES — 第三方依赖与归属清单
+# THIRD-PARTY-NOTICES — 0.0.49 候选依赖与归属
 
-本清单只列本仓库 `client/core`（Rust/NAPI cdylib）实际解析并编译的第三方依赖，数据来源：`client/core/Cargo.toml`（直接依赖）、`client/core/Cargo.lock`（锁定版本）、crates.io API 按锁定版本查询的已发布 manifest `license` 字段。查询日期：2026-09-13。
+本材料对应本地候选 `cac219fb3cc4773e1ed55a32e24cae21c17eb729` 的实际锁定依赖输入。候选未 push，尚未发布；许可材料仍有明确缺口，不表示已获商业法律许可或已满足公开发布门槛。项目根 LICENSE 为 AGPLv3；项目源文件政策明确采用 AGPL-3.0-or-later，第三方原许可及版权声明继续适用。
 
-范围说明：本版列出**直接依赖**及 boringtun 0.7.1 的 normal、非 optional 一层传递依赖（共 18 项，全部许可已确认，无"待确认"项）。dev-dependencies、optional 依赖与更深层传递依赖未在本版逐项列出；按 [发布前门槛](docs/license-and-headers-policy-20260913.md)，公开发布前须刷新本清单为 Cargo.lock 全量闭包（当前锁文件共 86 个包）并生成 SBOM。
+- [完整机器清单与依赖图](docs/release/0.0.49/dependencies/dependency-manifest.json)：260 个第三方 Cargo 组件，逐项与 client/core/Cargo.lock 对账；含精确版本、checksum、声明许可、来源、特性、作用域和文本指纹。该文件是项目 JSON manifest，不声称符合 CycloneDX/SPDX 标准。
+- [逐组件许可证与版权文本索引](docs/release/0.0.49/dependencies/dependency-licenses.md)：原样保留离线精确版本包内发现的 458 份许可证/NOTICE 等文本，另补 13 个固定 commit 的许可/版权文本引用，合计 471 个组件文本引用；来源依据及 SHA-256 在机器清单。许可证标签不能代替版权全文，机械收集也不等于完整逐文件法律审查。
+- [对应源码获取、固定上游证据、范围与发布缺口](docs/release/0.0.49/dependencies/source-availability.md)：公开仓库、候选未公开状态、发布前源码要求、构建入口、SDK 与渠道待核条款。
 
-## 直接依赖（client/core/Cargo.toml）
+## 实际范围
 
-| 名称 | 版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| boringtun | 0.7.1（锁定 `=0.7.1`） | BSD-3-Clause | WireGuard 协议的 Rust 实现（Noise 会话与加解密）；本项目网络核心的唯一直接依赖，以 `default-features = false` + `ffi-bindings` 特性使用（TUN `device` 特性按治理条款保持禁用） |
+核心目标为 aarch64-unknown-linux-ohos；client/core/build.sh 不启用 root cli feature。离线锁定 metadata 全图包含 260 个第三方组件；OHOS 过滤后的源依赖图分类为 runtime 170、build 70、dev 64、其他平台或未选中 23，分类重叠。包括新增 DNS 依赖 smoltcp 0.12.0（0BSD）和 hickory-proto 0.25.2（MIT OR Apache-2.0），其全部锁定传递依赖均列出。构建/测试依赖与跨平台包保留用于完整审计；这些是 metadata 源图上集，不是最终 libnetbird_core.so 的精确链接清单。过程宏在编译期执行，dev feature 统一和 host/target 上下文亦可能扩大集合。
 
-## boringtun 0.7.1 的传递依赖（normal、非 optional，一层）
+两个产品 ohpm 配置均无 dependencies/devDependencies，产品目录没有 oh-package-lock.json5 或 npm 包清单/锁文件。历史 spikes 的依赖不列为产品依赖。HarmonyOS/OpenHarmony SDK、Rust 编译器/标准库及 libc.so、libhilog_ndk.z.so、libace_napi.z.so 单独登记为外部工具链/系统组件；不将它们的源码当成本项目可再分发源码，也不声称整个 SDK 进入最终 so。
 
-| 名称 | 锁定版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| aead | 0.5.2 | MIT OR Apache-2.0 | AEAD（认证加密）算法通用 trait |
-| base64 | 0.22.1 | MIT OR Apache-2.0 | base64 编解码 |
-| blake2 | 0.10.6 | MIT OR Apache-2.0 | BLAKE2 哈希函数 |
-| chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT | ChaCha20Poly1305 认证加密（纯 Rust 实现） |
-| hex | 0.4.3 | MIT OR Apache-2.0 | 十六进制编解码 |
-| hmac | 0.12.1 | MIT OR Apache-2.0 | HMAC 消息认证码通用实现 |
-| ip_network | 0.4.1 | BSD-2-Clause | IPv4/IPv6 网络地址结构体 |
-| ip_network_table | 0.2.0 | BSD-2-Clause | IPv4/IPv6 网络快速查表 |
-| libc | 0.2.189 | MIT OR Apache-2.0 | 平台 libc 的原始 FFI 绑定 |
-| nix | 0.31.3 | MIT | *nix 系统 API 的 Rust 友好封装 |
-| parking_lot | 0.12.5 | MIT OR Apache-2.0 | 更紧凑高效的同步原语（锁） |
-| portable-atomic | 1.15.0 | Apache-2.0 OR MIT | 可移植原子类型（含无原生原子目标支持） |
-| rand_core | 0.6.4 | MIT OR Apache-2.0 | 随机数生成器核心 trait |
-| ring | 0.17.14 | manifest 字段 `Apache-2.0 AND ISC`；包内为逐目录许可（新代码 ISC；BoringSSL 来源代码 Apache-2.0/ISC；once_cell 来源 MIT/Apache-2.0 等，以包内 `LICENSE*` 文件为准） | 底层密码学原语；发布前刷新时须按包内许可文本逐份核对 |
-| tracing | 0.1.44 | MIT | 应用层结构化日志/追踪 |
-| untrusted | 0.9.0 | ISC | 不可信输入的安全零 panic 解析 |
-| x25519-dalek | 2.0.1 | BSD-3-Clause | X25519 椭圆曲线 Diffie-Hellman 密钥交换（纯 Rust） |
+## NetBird 归属
 
-## 引入的上游源文件（N3-2，2026-09-13；N4a 增补 2026-09）
+NetBird GmbH & AUTHORS 的 BSD-3-Clause 原版权、条款与免责全文保存在 [固定 67c2041 上游 LICENSE](docs/release/0.0.49/dependencies/licenses/netbird-67c2041/LICENSE)。文本取自 `67c2041fb5534c19d7b2320617cfc3aaab8e7d3d` 的 git 对象：除顶层 management/、signal/、relay/、combined/ 外适用 BSD-3-Clause，上述服务端目录适用 AGPLv3；已保存能取得的相应目录许可证。未用上游最新 main 的声明替代固定 snapshot。
 
-| 文件 | 来源（上游 commit `791401060d2b95e5f51e3439c0649729132f571e`） | 许可 | 引入目的 |
-| --- | --- | --- | --- |
-| `client/core/proto/management.proto` | netbirdio/netbird `shared/management/proto/management.proto`（逐字复制，sha256 `9d54ca25ecc65076d8b371bb0c5c1e15e1566ab8eb66d52d50a68889a352e9f5` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（上游根 LICENSE 声明仅顶层 `management/`、`signal/`、`relay/`、`combined/` 为 AGPLv3；本文件在 `shared/` 下，按登记记录 `仓B/records/upstream-bump-79140106-20260913.json` 的目录映射为 BSD-3-Clause） | NetBird 真实注册/登录走 gRPC `ManagementService/Login`（上游无 REST setup-key 注册端点）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，protox + tonic-prost-build，免 protoc、不依赖网络）。详见 `client/core/proto/README.md` |
-| `client/core/proto/signalexchange.proto` | netbirdio/netbird `shared/signal/proto/signalexchange.proto`（N4a 逐字复制，sha256 `9374413168551f7ded6c009dda2bfaa55e111bf138f2fe61780752a05c566ab9` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（同上目录映射：本文件在 `shared/` 下，非顶层 AGPLv3 四目录） | NetBird signal 服务通道（peer 发现/候选交换）：`SignalExchange/Send` + `SignalExchange/ConnectStream`（bidi 流）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，同上离线管线）。协议侦察与行号证据见 `docs/n3-signal-notes.md`、`client/core/proto/README.md` |
+引入的 management.proto 和 signalexchange.proto 位于上游 shared/；历史基线为 `791401060d2b95e5f51e3439c0649729132f571e`，management.proto 另含固定 67c2041 的 SessionExtend 追加字段。当前 SHA-256、准确路径与新增历史固定许可证据见源码说明。客户端还参照固定 67c2041 的协议和行为实现；未核全逐行来源，不作“全部只来自 BSD”或已完成所有许可义务的结论。独立非官方项目不代表 NetBird 维护、背书或支持。WireGuard 等名称/商标归各权利人所有。
 
-## 直接依赖（2026-09-13 增量，N3-2 gRPC/TLS 栈）
+## 尚存缺口
 
-许可取自 cargo registry 内**锁定版本**已发布 manifest 的 `license` 字段（本环境 crates.io
-API 不可达；registry 内容即 crates.io 发布清单的本地副本）。
-
-### normal（client/core/Cargo.toml `[dependencies]`）
-
-| 名称 | 锁定版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| tokio | 1.53.1 | MIT | 异步运行时（rt-multi-thread/net/time，gRPC 客户端驱动；`docs/n3-stack-freeze-20260913.md` 冻结项） |
-| tonic | 0.14.6 | MIT | gRPC 客户端/服务端框架（transport+codegen+router+tls-ring，default-features 关闭） |
-| tonic-prost | 0.14.6 | MIT | tonic 生成代码的 prost 编解码运行时（ProstCodec） |
-| prost | 0.14.4 | Apache-2.0 | protobuf 编解码运行时 |
-| prost-types | 0.14.4 | Apache-2.0 | protobuf well-known types（management.proto 的 Timestamp/Duration 字段） |
-| rustls | 0.23.44 | Apache-2.0 OR ISC OR MIT | TLS（REST `https://` 传输 `TlsHttpTransport`；ring provider，无系统信任根——信任根由调用方注入） |
-| crypto_box | 0.9.1 | Apache-2.0 OR MIT | NaCl crypto_box（X25519 + XSalsa20-Poly1305）：管理信封 body 加解密（N3-3，上游 Go `nacl/box` 的 Rust 对应物） |
-| base64 | 0.22.1 | Apache-2.0 OR MIT | `ServerKeyResponse.key` / `wgPubKey` 的 base64 编解码（与 boringtun 既有 0.22.1 单副本统一） |
-
-#### N3-3 信封新增传递依赖（crypto_box 0.9.1 闭包，normal）
-
-| 名称 | 锁定版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| crypto_secretbox | 0.1.1 | Apache-2.0 OR MIT | XSalsa20-Poly1305 AEAD 实现（crypto_box 的底层 secretbox） |
-| salsa20 | 0.10.2 | MIT OR Apache-2.0 | XSalsa20 流密码 |
-| poly1305 | 0.8.0 | Apache-2.0 OR MIT | Poly1305 消息认证码 |
-| universal-hash | 0.5.1 | MIT OR Apache-2.0 | universal hash trait（poly1305 依赖） |
-| opaque-debug | 0.3.1 | MIT OR Apache-2.0 | 调试不泄密宏（salsa20 依赖） |
-| cpufeatures | 0.2.17 | MIT OR Apache-2.0 | 目标 CPU 特性探测（salsa20 依赖） |
-
-说明：aead 0.5.2 / curve25519-dalek 4.1.3 / x25519-dalek 2.0.1 / zeroize 1.9.0 /
-subtle 2.6.1 / getrandom 0.2.17 由 boringtun 0.7.1 已带入（见上节传递依赖表），
-crypto_box 与其单副本并存，未引入任何重复 major。
-
-### build（`[build-dependencies]`）
-
-| 名称 | 锁定版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| protox | 0.9.1 | MIT OR Apache-2.0 | 纯 Rust protobuf 编译器（免 protoc；内嵌 well-known types 解析器） |
-| tonic-prost-build | 0.14.6 | MIT | tonic/prost 构建期代码生成（`build.rs`） |
-
-### dev（`[dev-dependencies]`，仅测试）
-
-| 名称 | 锁定版本 | 许可 | 用途 |
-| --- | --- | --- | --- |
-| tokio（macros 特性） | 1.53.1 | MIT | `#[tokio::test]` |
-| tokio-stream | 0.1.19 | MIT | 测试内 tonic 服务器的 `TcpListenerStream` |
-| rcgen | 0.14.10 | MIT OR Apache-2.0 | 测试自签 CA/证书生成（真实 TLS 握手） |
-| prost / prost-types | 同上 | Apache-2.0 | 测试中对 `LoginRequest`/`LoginResponse` 的编解码断言 |
-
-## 归属与许可文本说明
-
-- 各依赖的许可均取自 crates.io 该锁定版本已发布 manifest 的 `license` 字段（`license-file` 未出现）；本清单不转写各许可全文，分发制品时须按各 crate 包内随附的许可文本与版权声明保留归属。
-- boringtun 上游为 cloudflare/boringtun（BSD-3-Clause）；其 WireGuard® 名称与商标归 WireGuard 等相应权利人所有。
-- 上游 NetBird（netbirdio/netbird）的名称、商标与其客户端侧/服务端代码许可不在本清单范围，见 [README 许可证节](README.md) 与 [安全与合规基线](docs/security-and-compliance.md)。
+9 个原先缺独立文本项已补齐对应固定版本原文；8 个旧斜杠字段中 6 个有明确任选依据，原字段仍逐字保留，另记 OR 解释；ring 0.17.14 已完成本范围的混合来源文本/代表性源码头复核并补 fiat AUTHORS，VCS dirty=true 的限制明确保留。原 17 个组件中 15 个完成本范围资料修补，仍有 **fnv 1.0.7、minimal-lexical 0.2.1** 两项表达式解释 gap，原因见[逐项复核记录](docs/release/0.0.49/dependencies/license-gap-review.md)。历史 7914010 的固定 LICENSE/AUTHORS 也已从官方 raw HTTP 补齐，本地无该 git 对象的事实如实记录。新增[根 NOTICE](NOTICE) 列主要直接组件与完整索引。仍须核全源码逐行来源、最终工具链/二进制范围、对应源码公开获取及渠道 AGPL 兼容条款；本次不声称公开发布门槛已通过。
