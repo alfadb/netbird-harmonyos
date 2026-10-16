@@ -315,8 +315,10 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // (plan parse + bearer classification + direction verdict + target choice)
   // and the ring-dump pure module the REAL extension imports.
   'NetBirdN2CdPlan',
+  'NetBirdN2Evidence',
   'NetBirdN2Ring'];
 const SHIM_TYPES: Record<string, string[]> = {
+  NetBirdN2Evidence: ['N2EvidenceDecision', 'N2EvidenceOptions'],
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
@@ -625,7 +627,10 @@ try {
     "export const QUIT_REASON_SETTINGS = 'settings-quit';\n" +
     "export const QUIT_REASON_SYSTEM = 'system-quit';\n");
 
-  const mod = await import(pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href) as
+  const vpeUrl = pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href;
+  const mod = await import(vpeUrl + '?build=debug&n2=real') as
+    Record<string, unknown>;
+  const releaseVpe = await import(vpeUrl + '?build=release&n2=real') as
     Record<string, unknown>;
   const cfg = await import(pathToFileURL(join(dir, 'NetBirdVpnConfig.ts')).href) as
     Record<string, unknown>;
@@ -4345,6 +4350,61 @@ try {
     await driveRecreate(ability, netcfgText);
     return (G['__NB_CREATED_CONFIGS'] ?? []) as Record<string, unknown>[];
   }
+
+  // Release/debug use separate immutable BuildProfile modules and the REAL
+  // N2 parser/transform; both VPN submission legs run through the REAL class.
+  const legacyN2 = { trusted_self: true, capture_32: ['198.51.100.88'],
+    outer_destinations: ['udp/198.51.100.88:53'] };
+  for (const [mode, module] of [['debug', mod], ['release', releaseVpe]] as const) {
+    for (const [kind, payload] of [['valid', legacyN2], ['invalid', { trusted_self: false }],
+      ['absent', undefined]] as const) {
+      const ticket = JSON.stringify({ n2_evidence: payload });
+      setSwitchTicket(ticket);
+      const gated = freshAbility(module, FIXTURE_FILESDIR);
+      resetLog();
+      const initial = await driveInitialLeg(gated, NETCFG_0021);
+      const enabled = mode === 'debug' && kind === 'valid';
+      const rejected = mode === 'debug' && kind === 'invalid';
+      check(`N2G ${mode} ${kind} samples expected evidence state`,
+        (gated['n2Evidence'] !== undefined) === enabled &&
+        ((gated['n2EvidenceError'] as string).length > 0) === rejected);
+      check(`N2G ${mode} ${kind} preserves legacy ticket`,
+        (G['__NB_FS'] as Record<string, string>)[ARM_TICKET_PATH] === ticket);
+      if (rejected) {
+        check('N2G debug invalid still refuses startup', initial.length === 0);
+      } else {
+        const recreated = await driveRecreateCapture(gated, NETCFG_0021);
+        for (const [leg, submissions] of [['initial', initial], ['recreate', recreated]] as const) {
+          const submitted = submissions[0];
+          check(`N2G ${mode} ${kind} ${leg} keeps expected application scope`,
+            submissions.length === 1 && (enabled ?
+              deepEq(submitted?.trustedApplications, [SELF_BUNDLE]) :
+              !('trustedApplications' in (submitted ?? {}))) &&
+            !('blockedApplications' in (submitted ?? {})));
+          check(`N2G ${mode} ${kind} ${leg} keeps expected business DNS`,
+            enabled ? submitted !== undefined && !('dnsAddresses' in submitted) :
+              deepEq(submitted?.dnsAddresses, ['9.9.9.9']));
+        }
+      }
+      (gated['stopStatusAndNetcfgWatcher'] as () => void)();
+      (gated['n2RingStopStats'] as () => void)();
+    }
+  }
+  // Re-sampling clears any previous in-memory arm before the release gate.
+  setSwitchTicket(JSON.stringify({ n2_evidence: legacyN2, diag_protect_process_net: true }));
+  const releaseResample = freshAbility(releaseVpe, FIXTURE_FILESDIR);
+  releaseResample['n2Evidence'] = { capture32: ['198.51.100.88'] };
+  releaseResample['n2EvidenceError'] = 'old-error';
+  (releaseResample['readDiagSwitches'] as () => void)();
+  check('N2G release resample clears previous evidence and error',
+    releaseResample['n2Evidence'] === undefined && releaseResample['n2EvidenceError'] === '');
+  check('N2G release preserves independent process-protect diagnostic switch',
+    releaseResample['diagProtectProcessNet'] === true);
+  releaseResample['protectDeviationRouteExclusion'] = true;
+  (releaseResample['readDiagSwitches'] as () => void)();
+  check('N2G release does not change ordinary protectDeviation state',
+    releaseResample['protectDeviationRouteExclusion'] === true);
+  setSwitchTicket(undefined);
 
   // Local resolver contract: drive BOTH real submission legs with the new
   // schema, including management-DNS disabled with the runtime still ready.

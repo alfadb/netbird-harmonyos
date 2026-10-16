@@ -1,3 +1,4 @@
+import BuildProfile from '../../../../build/default/generated/profile/default/BuildProfile';
 import VpnExtensionAbility from '@ohos.app.ability.VpnExtensionAbility';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import Want from '@ohos.app.ability.Want';
@@ -3736,6 +3737,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
     }
     this.diagCaptureTarget = this.readProtectProbeTarget(doc);
+    // Release ignores legacy N2 evidence tickets without changing stored files
+    // or the independent diagnostic switches above.
+    if (!BuildProfile.DEBUG) {
+      return;
+    }
     const decision: N2EvidenceDecision = parseN2Evidence(doc['n2_evidence'],
       this.diagBlockedSelf, this.diagCaptureRoute, this.n2ForceDefaultRoute === true, exclusionSetting);
     this.n2EvidenceError = decision.error;

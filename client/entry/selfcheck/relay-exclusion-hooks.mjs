@@ -315,6 +315,12 @@ const SHIMS = {
 };
 
 export function resolve(specifier, context, next) {
+  if (specifier === '../../../../build/default/generated/profile/default/BuildProfile') {
+    const debug = new URL(context.parentURL).searchParams.get('build') === 'debug';
+    return { url: 'data:text/javascript,' + encodeURIComponent(
+      'export default class BuildProfile { static DEBUG = ' + debug + '; }'),
+      shortCircuit: true };
+  }
   if (specifier === './NetBirdN2Control') {
     // N2 T3 §3 (2026-09-28): functional and recording like the other seams —
     // the REAL extension's armed-only `pollN2Control` imports this sender.

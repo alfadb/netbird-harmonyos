@@ -471,6 +471,7 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '}\n' +
   'export default {\n' +
   '  n2_socket_trace_arm: () => JSON.stringify({ ok: true }),\n' +
+  '  n2_tun_dest_configure: () => JSON.stringify({ ok: true }),\n' +
   '  n2_socket_trace_protect: () => JSON.stringify({ ok: true }),\n' +
   // N2 T5a「B 断流刺激」(2026-09-28): the shell's armed-only stimulus entry.
   // Functional and recording like the other seams — every call is counted and
@@ -1086,7 +1087,7 @@ const SHIMS = {
 
 export function resolve(specifier, context, next) {
   if (specifier === '../../../../build/default/generated/profile/default/BuildProfile') {
-    // Each EntryAbility module URL selects an immutable profile. Distinct data
+    // Each ability module URL selects an immutable profile. Distinct data
     // URLs keep debug/release isolated even when both run in the same process.
     const debug = new URL(context.parentURL).searchParams.get('build') === 'debug';
     return { url: 'data:text/javascript,' + encodeURIComponent(
@@ -1128,6 +1129,10 @@ export function resolve(specifier, context, next) {
       '};'), shortCircuit: true };
   }
   if (specifier === './NetBirdN2Evidence') {
+    if (new URL(context.parentURL).searchParams.get('n2') === 'real') {
+      return { url: new URL('NetBirdN2Evidence.shim.ts', context.parentURL).href,
+        shortCircuit: true };
+    }
     return { url: 'data:text/javascript,' + encodeURIComponent(
       'export const N2EvidenceOptions = undefined; export const N2EvidenceDecision = undefined; ' +
       'export const parseN2Evidence = () => ({ options: undefined }); ' +
