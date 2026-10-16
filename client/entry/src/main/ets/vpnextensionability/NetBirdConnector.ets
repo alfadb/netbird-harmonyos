@@ -956,6 +956,8 @@ export function connectorRouteSetApplied(routes: string[], isRecreate: boolean,
 // shared filesDir instead; the UI reads that document.
 export interface PublishedStatus {
   updated_at_ms: number;
+  // Extension writer identity; older documents omit it.
+  pid?: number;
   request_id?: string;
   state: string;
   peer_count: number;

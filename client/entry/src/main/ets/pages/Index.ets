@@ -29,11 +29,13 @@ import { currentPublishedStatus, shouldReapplyPublishedStatus, statusDocumentSta
 // does not have to wait ~10 s for the document to age out.
 import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
   RECONNECT_ACTION_LIMIT, RECONNECT_ACTION_RECONNECT, RECONNECT_ACTION_VERIFY_FAILED,
-  RECONNECT_MARKER_OPEN, RECONNECT_MAX_ATTEMPTS,
+  RECONNECT_MARKER_OPEN, RECONNECT_MAX_ATTEMPTS, RECONNECT_REASON_MARKER_OPEN,
   RECONNECT_RESULT_FAILED, RECONNECT_RESULT_LIMIT, RECONNECT_RESULT_RECONNECTED,
-  RECONNECT_RESULT_SKIPPED, RECONNECT_TRIGGER_BACKGROUND, RECONNECT_TRIGGER_FOREGROUND,
+  RECONNECT_RESULT_REQUESTED, RECONNECT_RESULT_SKIPPED,
+  RECONNECT_TRIGGER_BACKGROUND, RECONNECT_TRIGGER_FOREGROUND,
   decideReconnect, reconnectInitialState, reconnectOnActive,
-  reconnectOnStartRejected } from '../vpnextensionability/NetBirdReconnectPolicy';
+  reconnectOnStartRejected, reconnectStatusMatchesAttempt,
+  reconnectWithAttemptMarker } from '../vpnextensionability/NetBirdReconnectPolicy';
 // 2026-10-08 自动重连判据⑦: the ONE proof that the extension process really is
 // gone. The status document going stale cannot be it (the system suspends the
 // background extension for minutes while it stays alive), so the UI process's
@@ -2019,7 +2021,7 @@ struct Index {
     // 本拍时刻写回，下一拍（2 s 后）的间隔就恢复正常，不会重复触发。
     //
     // 恢复后的 10 s 内本来就要多复查几次（APP_KILLED 可能在恢复瞬间才投递，第一次复查时文档
-    // 已过期却还没有终止事件，按既有策略会 skip 成 vpn-not-confirmed-dead——这是安全行为）。
+    // 已过期却还没有终止事件，按既有策略会 skip 成 kill-record-absent——这是安全行为）。
     // 这里不为它新增定时器：页面自己的 2 s 轮询在 10 s 内就是 5 拍，每拍都重读文档、每拍都会
     // 重新判一次重连（节流与上限仍在纯策略里），所以"多做几次复查"就是既有节拍本身。
     const nowMs: number = Date.now();
@@ -2054,6 +2056,7 @@ struct Index {
     // age below measure the same clock.
     const status: PublishedStatus | null = currentPublishedStatus(
       readPublishedStatus(getContext(this).filesDir), nowMs);
+    this.refreshReconnectAttemptMarker();
     // 0.0.20 判据②放宽: a kill event naming the pid that wrote the open marker
     // proves the extension is gone, so there is nothing left to wait for — the
     // document simply has not aged out of its freshness window yet (~10 s). When
@@ -2127,6 +2130,22 @@ struct Index {
       return;
     }
     this.observedPublishedStatus = true;
+    // Verification has its own clock and must run even for an unchanged document.
+    // A fresh report from the reclaimed writer cannot settle the new attempt.
+    if (vpnActiveState(live.state) &&
+      reconnectStatusMatchesAttempt(this.reconnectState, live.pid, live.updated_at_ms)) {
+      const verifiedAttempt: boolean = this.reconnectState.verifyingSinceMs > 0;
+      this.reconnectState = reconnectOnActive(this.reconnectState, Date.now());
+      if (verifiedAttempt) {
+        this.diagAutoReconnect(this.pageVisible
+          ? RECONNECT_TRIGGER_FOREGROUND : RECONNECT_TRIGGER_BACKGROUND,
+          RECONNECT_RESULT_RECONNECTED, RECONNECT_REASON_MARKER_OPEN,
+          this.reconnectState.attempts);
+      }
+    } else if (this.reconnectState.verifyingSinceMs > 0) {
+      // Keep the 30 s failure verdict reachable for old or non-active reports.
+      this.runAutoReconnect(requestInFlight);
+    }
     // 0.0.34 peer-status lag fix (device report §5 F3): the document's own
     // identity — its write stamp plus the core's edge revision. Nothing below
     // can differ while the extension has not republished THIS exact document,
@@ -2160,13 +2179,6 @@ struct Index {
       // (the attempt DID start after all — the pending-start window is not
       // proof of anything) supersedes it, exactly like the verdict above.
       this.actionError = '';
-      // 2026-10-08 扩展被系统回收后的自动重连 / 0.0.20: the tunnel is up again —
-      // the outstanding attempt has succeeded (its verification window closes
-      // now), and the attempt counter is forgiven ONLY once this active run has
-      // lasted RECONNECT_ACTIVE_RESET_MS: with the keep-alive task the UI process
-      // outlives many reclaims, so a tunnel that dies again a few seconds later
-      // must stay on the same chain of failures.
-      this.reconnectState = reconnectOnActive(this.reconnectState, Date.now());
       if (live.request_id !== undefined && live.request_id.length > 0) {
         this.requestId = live.request_id;
       }
@@ -2183,6 +2195,26 @@ struct Index {
       this.requestId = `ui-${Date.now()}`;
     }
     this.published = live;
+  }
+
+  // Only an outstanding automatic attempt pays for this extra marker read.
+  private refreshReconnectAttemptMarker(): void {
+    if (this.reconnectState.verifyingSinceMs <= 0 ||
+      this.reconnectState.attemptMarkerPid > 0) {
+      return;
+    }
+    try {
+      const markerPath: string = recordPath(getContext(this).filesDir, MARKER_BASENAME_VPN);
+      if (markerPath.length > 0 && fs.accessSync(markerPath)) {
+        const marker: Marker | null = parseMarker(fs.readTextSync(markerPath));
+        if (marker !== null) {
+          this.reconnectState = reconnectWithAttemptMarker(this.reconnectState,
+            Date.parse(marker.ts), marker.pid);
+        }
+      }
+    } catch (error) {
+      // No identity proof yet; keep the existing verification deadline.
+    }
   }
 
   // 0.0.20 判据②放宽: is the extension process proven gone while the status
@@ -2343,10 +2375,9 @@ struct Index {
     const decision: ReconnectDecision = decideReconnect(this.reconnectState, facts);
     this.reconnectState = decision.state;
     if (decision.action === RECONNECT_ACTION_RECONNECT) {
-      // The decision is recorded BEFORE the action: the log then says why the
-      // page started a VPN, not that it merely tried. The trigger is the
-      // decision's own (foreground / background), never re-derived here.
-      this.diagAutoReconnect(decision.trigger, RECONNECT_RESULT_RECONNECTED,
+      // Dispatch is a request, not proof of an active extension. The matching
+      // status branch records reconnected once this attempt is verified.
+      this.diagAutoReconnect(decision.trigger, RECONNECT_RESULT_REQUESTED,
         decision.reason, decision.attempt);
       hilog.warn(DOMAIN, TAG,
         'UI_AUTO_RECONNECT|trigger=%{public}s|reason=%{public}s|attempt=%{public}d' +

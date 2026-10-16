@@ -7556,6 +7556,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
         this.requestId, Date.now(), ifacePresent, this.managementUrl,
         this.managementEndpoint, this.appliedTunnelMtu);
+      doc.pid = process.pid;
+      // pid is constant for this extension instance; its debounce latches start
+      // empty in each new instance, so identity cannot be swallowed by the key.
       // 0.0.34 peer-status lag fix (device report §5 F4, write debounce): the
       // 5 s heartbeat must stay (the reader's freshness gate is built on it),
       // but a publication whose document would be IDENTICAL to the one already
