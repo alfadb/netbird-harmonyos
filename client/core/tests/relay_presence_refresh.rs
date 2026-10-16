@@ -417,6 +417,14 @@ async fn arm_lane_with_bouncing_remote(
     carrier.set_peers(&[REMOTE_KEY.to_string()]);
     let pump = tokio::spawn(pump_loop(carrier.clone(), client.clone(), REMOTE_KEY));
 
+    // Frame receipt is counted before the registry update. Wait for the
+    // actual one-shot interest while the remote is still offline.
+    wait_for(
+        FUSE,
+        || server.has_online_interest(&local_id(), &remote_id()),
+        "server registered the offline remote's one-shot online interest",
+    )
+    .await;
     let remote = connect_remote(server).await;
     wait_for(
         FUSE,

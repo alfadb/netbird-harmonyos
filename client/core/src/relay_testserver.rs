@@ -350,6 +350,17 @@ impl RelayTestServer {
         self.shared.stats.lock().expect("stats lock").clone()
     }
 
+    /// Whether `subscriber` has a pending one-shot online interest in `peer`.
+    /// Host tests use this registry observation to await subscription processing.
+    #[cfg(not(target_env = "ohos"))]
+    pub fn has_online_interest(&self, subscriber: &PeerId, peer: &PeerId) -> bool {
+        let reg = self.shared.registry.lock().expect("registry lock");
+        let Some(conn_id) = reg.peer_conn.get(subscriber) else {
+            return false;
+        };
+        reg.interest_online.get(peer).is_some_and(|waiters| waiters.contains(conn_id))
+    }
+
     /// Resolve once at least `n` connections have been accepted. Deterministic
     /// (notification-driven) with `budget` as a fuse, never a sleep.
     pub async fn wait_connections(&self, n: usize, budget: Duration) -> Result<(), Duration> {

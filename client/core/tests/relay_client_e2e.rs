@@ -698,7 +698,10 @@ async fn expired_token_never_touches_the_wire_until_refreshed() {
     );
 
     wait_for(FUSE, || {
-        client.stats().last_error_class == Some(RelayErrorClass::TokenExpired)
+        let stats = client.stats();
+        stats.last_error_class == Some(RelayErrorClass::TokenExpired)
+            && stats.state == RelayState::Reconnecting
+            && stats.token_expired_refusals >= 1
     }, "fail-closed on the expired token")
     .await;
     let stats = client.stats();
