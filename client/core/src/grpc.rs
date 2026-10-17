@@ -792,6 +792,20 @@ pub struct ExtendAuthSessionOutcome {
     pub session_deadline_unix: Option<i64>,
 }
 
+/// Human-readable OS display name for `PeerSystemMeta.os` (field 6).
+///
+/// Upstream splits the two fields: `goOS` stays lowercase
+/// (`android`, `windows`) while `OS` is the human-readable form
+/// (`Android`, `Windows`). HarmonyOS follows the same convention; any other
+/// platform passes through unchanged.
+fn human_os_name(os_name: &str) -> String {
+    if os_name.eq_ignore_ascii_case("harmonyos") {
+        "HarmonyOS".to_string()
+    } else {
+        os_name.to_string()
+    }
+}
+
 /// Wire `PeerSystemMeta` from the minimal [`PeerMeta`] — shared by Login,
 /// Sync first frame and ExtendAuthSession (upstream `infoToMetaData`,
 /// grpc.go:995-1057, fills the full posture-check surface; we send the
@@ -805,11 +819,12 @@ pub fn build_peer_system_meta(meta: &PeerMeta) -> proto::PeerSystemMeta {
     proto::PeerSystemMeta {
         hostname: meta.hostname.clone(),
         go_os: meta.os_name.clone(),
-        // `OS` (field 6) is what the management dashboard's Meta.OS shows and
-        // was left empty by this crate; the platform's OS family is the one
-        // stable fact the shell reports, so mirror goOS here (Login, Sync and
-        // Extend all share this conversion).
-        os: meta.os_name.clone(),
+        // `OS` (field 6) is what the management dashboard's Meta.OS shows.
+        // Upstream keeps goOS lowercase but sends a human-readable OS name
+        // (`android`/`windows` vs `Android`/`Windows`), so mirror goOS and
+        // map it to the display form (Login, Sync and Extend all share this
+        // conversion).
+        os: human_os_name(&meta.os_name),
         os_version: meta.os_version.clone(),
         netbird_version: meta.netbird_version.clone(),
         ..Default::default()
@@ -910,11 +925,10 @@ mod tests {
         let meta = req.meta.as_ref().expect("meta set");
         assert_eq!(meta.hostname, "ohos-dev");
         assert_eq!(meta.go_os, "harmonyos");
-        // Field 6 (`OS`) is what the management dashboard displays; this
-        // crate mirrors the platform OS family into it (see
-        // build_peer_system_meta). Without this the dashboard's OS column
-        // stays empty even though goOS is right.
-        assert_eq!(meta.os, "harmonyos");
+        // Field 6 (`OS`) is what the management dashboard displays; goOS
+        // stays lowercase while `OS` carries the human-readable name (see
+        // build_peer_system_meta / human_os_name).
+        assert_eq!(meta.os, "HarmonyOS");
         assert_eq!(meta.os_version, "26.0.0");
         assert_eq!(meta.netbird_version, "0.1.0");
         assert!(req.dns_labels.is_empty());
@@ -923,6 +937,15 @@ mod tests {
         let bytes = req.encode_to_vec();
         let decoded = proto::LoginRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded.setup_key, "SETUP-KEY-1");
+    }
+
+    #[test]
+    fn human_os_name_maps_only_harmonyos() {
+        assert_eq!(human_os_name("harmonyos"), "HarmonyOS");
+        assert_eq!(human_os_name("HarmonyOS"), "HarmonyOS");
+        // every other platform keeps its reported value verbatim
+        assert_eq!(human_os_name("android"), "android");
+        assert_eq!(human_os_name("windows"), "windows");
     }
 
     #[test]
