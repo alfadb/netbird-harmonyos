@@ -60,6 +60,9 @@
 
 已知限制：控制台系统图标需上游 dashboard 增加 HarmonyOS 映射，客户端无法修复；控制台 "Update available" 来自其把 peer 上报版本与上游最新 tag（v0.81.2）比较，管理端无关闭开关，属版本号方案差异，不建议伪报版本号消除。以上不改变 DRAFT、未发布就绪的结论，品牌授权、运营主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
 
+上游功能请求已提交（待回复）：已按用户授权在 netbirdio/netbird 的 Ideas & Feature Requests 发布 [Discussion #8239](https://github.com/netbirdio/netbird/discussions/8239)（2026-10-17T16:39:28Z），请求 dashboard 增加 HarmonyOS 系统图标映射，并为独立版本号体系客户端提供隐藏 "Update available" 提示的方式。
+dashboard 仓库 issue 因账号只读（viewerCanCreateIssues=false）无法创建，未发布；请求尚无回复，不代表上游接受或实现，也不代表品牌授权（品牌授权仍为 #8228 未回复）。
+
 ## 用户字段与待确认状态
 
 用户本轮明确先处理账号区别与推荐；运营主体、联系邮箱和政策 URL 暂缓提供，以下不得由草案代填；不在此提供口令、证书、私钥或设备标识。
