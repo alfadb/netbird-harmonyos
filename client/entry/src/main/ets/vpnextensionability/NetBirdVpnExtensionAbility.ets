@@ -200,6 +200,10 @@ const PROTECT_BOX_MS: number = 5000;
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
 const DNS_RESOLVE_BOX_MS: number = 5000;
+// Startup owns this finite DNS retry budget; later network recovery is unchanged.
+export const MANAGEMENT_DNS_MAX_ATTEMPTS: number = 3;
+export const MANAGEMENT_DNS_RETRY_FIRST_MS: number = 3000;
+export const MANAGEMENT_DNS_RETRY_SECOND_MS: number = 15000;
 // N3-7 gap 3: consecutive connector_status() native-call failures before the
 // watcher concludes the connector is unreachable and tears the VPN down.
 const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
@@ -2259,15 +2263,52 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let connectAddr: string = '';
     try {
       mgmtEndpoint = parseManagementEndpoint(device.management_url);
-      connectAddr = await resolveManagementIp(mgmtEndpoint, DNS_RESOLVE_BOX_MS);
+      // The shared parser accepts an empty host before an explicit port.
+      // Treat that missing configuration as a hard error, without a DNS call.
+      if (mgmtEndpoint.host.length === 0) {
+        throw new Error('management-url-malformed');
+      }
     } catch (error) {
+      this.writeConnectFailureForUi('parse');
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dns|' +
         'errorClass=%{public}s|summary=%{public}s',
-        this.requestId, (error as Error).message ?? 'dns-failed',
-        safeError(error as Error));
+        this.requestId, 'management-url-malformed', safeError(error as Error));
       return;
     }
+    for (let attempt: number = 1; attempt <= MANAGEMENT_DNS_MAX_ATTEMPTS; attempt++) {
+      if (this.destroyRequested || this.destroyPromise !== undefined) { return; }
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECTOR_DNS|requestId=%{public}s|stage=dns|attempt=%{public}d|' +
+        'maxAttempts=%{public}d', this.requestId, attempt, MANAGEMENT_DNS_MAX_ATTEMPTS);
+      try {
+        connectAddr = await resolveManagementIp(mgmtEndpoint, DNS_RESOLVE_BOX_MS);
+        break;
+      } catch (error) {
+        // A destroy latched during resolution owns the exit, not a late failure.
+        if (this.destroyRequested || this.destroyPromise !== undefined) { return; }
+        const retryMs: number = attempt >= MANAGEMENT_DNS_MAX_ATTEMPTS ? 0 :
+          (attempt === 1 ? MANAGEMENT_DNS_RETRY_FIRST_MS : MANAGEMENT_DNS_RETRY_SECOND_MS);
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dns|' +
+          'errorClass=%{public}s|summary=%{public}s|attempt=%{public}d|' +
+          'maxAttempts=%{public}d|retryMs=%{public}d',
+          this.requestId, (error as Error).message ?? 'dns-failed', safeError(error as Error),
+          attempt, MANAGEMENT_DNS_MAX_ATTEMPTS, retryMs);
+        const dnsFields: DiagFields = {
+          'stage': 'dns', 'detail': this.requestId, 'count': attempt,
+          'code': String((error as BusinessFailure).code ?? 'none'), 'reason': 'network'
+        };
+        this.diagMilestone('vpn_connector_aborted', dnsFields);
+        if (retryMs === 0) {
+          this.writeConnectFailureForUi('network');
+          return;
+        }
+        if (!await this.waitManagementDnsRetry(retryMs)) { return; }
+      }
+    }
+    // Resolution success can race teardown too; never open a socket afterwards.
+    if (this.destroyRequested || this.destroyPromise !== undefined) { return; }
 
     // 2. open the management TCP socket (unconnected — no packet flows yet)
     let mgmtFd: number = -1;
@@ -2650,6 +2691,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         reason: 'create-rejected'
       };
     });
+  }
+
+  // Same short-sleep/destroy-latch mechanism as waitNetworkConfigBounded.
+  // No per-poll logging; stop exits within one NETWORK_MAP_POLL_MS (500 ms)
+  // timer turn. The finite slice budget also bounds a backwards wall-clock jump.
+  private async waitManagementDnsRetry(delayMs: number): Promise<boolean> {
+    let remainingMs: number = delayMs;
+    while (remainingMs > 0) {
+      if (this.destroyRequested || this.destroyPromise !== undefined) { return false; }
+      const stepMs: number = Math.min(remainingMs, NETWORK_MAP_POLL_MS);
+      await sleep(stepMs);
+      remainingMs -= stepMs;
+    }
+    return !this.destroyRequested && this.destroyPromise === undefined;
   }
 
   // Bounded wait for the first network map (NETWORK_MAP_WAIT_MS box,
@@ -7507,6 +7562,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
         this.requestId, Date.now(), ifacePresent, this.managementUrl,
         this.managementEndpoint, this.appliedTunnelMtu);
+      doc.pid = process.pid;
+      // pid is constant for this extension instance; its debounce latches start
+      // empty in each new instance, so identity cannot be swallowed by the key.
       // 0.0.34 peer-status lag fix (device report §5 F4, write debounce): the
       // 5 s heartbeat must stay (the reader's freshness gate is built on it),
       // but a publication whose document would be IDENTICAL to the one already

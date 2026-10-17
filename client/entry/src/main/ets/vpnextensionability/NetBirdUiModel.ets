@@ -170,6 +170,8 @@ export interface UiPeerEntry {
 }
 
 export interface UiStatusDocument {
+  // Extension fills this at its single publication exit; old documents omit it.
+  pid?: number;
   // ---- legacy fields (exact shape of the pre-phase-1 document) ----
   updated_at_ms: number;
   request_id?: string;
