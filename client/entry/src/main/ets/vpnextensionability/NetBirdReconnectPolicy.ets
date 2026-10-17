@@ -96,11 +96,10 @@
 //   cooldown            < RECONNECT_MIN_INTERVAL_MS since the last attempt
 //   attempt-limit       RECONNECT_MAX_ATTEMPTS reached in this process
 //   no-active-in-30s    the previous attempt is a failure (verification window)
-//   vpn-not-confirmed-dead  the UI process has no APP_KILLED naming the pid that
-//                           wrote the open marker: a SUSPENDED process looks
-//                           exactly like a dead one from the status document, so
-//                           the extension is never started on top of a possibly
-//                           live one
+//   kill-record-absent  no VPN APP_KILLED record in this UI process
+//   marker-pid-invalid the marker cannot identify a usable writer pid
+//   vpn-pid-mismatch   the recorded death names another VPN writer
+// These all mean unknown death: never start over a possibly live extension.
 
 export const RECONNECT_MIN_INTERVAL_MS: number = 60000;
 export const RECONNECT_MAX_ATTEMPTS: number = 3;
@@ -135,7 +134,8 @@ export const RECONNECT_ACTION_SKIPPED: string = 'skipped';
 export const RECONNECT_ACTION_LIMIT: string = 'limit';
 export const RECONNECT_ACTION_VERIFY_FAILED: string = 'verify-failed';
 
-// The `result` token of the page's ONE diagnostic record per decision.
+// Closed result vocabulary: requested = dispatch, reconnected = verified active.
+export const RECONNECT_RESULT_REQUESTED: string = 'requested';
 export const RECONNECT_RESULT_RECONNECTED: string = 'reconnected';
 export const RECONNECT_RESULT_SKIPPED: string = 'skipped';
 export const RECONNECT_RESULT_LIMIT: string = 'limit';
@@ -163,7 +163,9 @@ export const RECONNECT_REASON_CONNECT_FAILURE: string = 'connect-failure';
 export const RECONNECT_REASON_COOLDOWN: string = 'cooldown';
 export const RECONNECT_REASON_ATTEMPT_LIMIT: string = 'attempt-limit';
 export const RECONNECT_REASON_VERIFY_TIMEOUT: string = 'no-active-in-30s';
-export const RECONNECT_REASON_VPN_NOT_DEAD: string = 'vpn-not-confirmed-dead';
+export const RECONNECT_REASON_KILL_RECORD_ABSENT: string = 'kill-record-absent';
+export const RECONNECT_REASON_MARKER_PID_INVALID: string = 'marker-pid-invalid';
+export const RECONNECT_REASON_VPN_PID_MISMATCH: string = 'vpn-pid-mismatch';
 
 // The anti-loop counters of ONE UI process.
 export interface ReconnectPolicyState {
@@ -175,6 +177,9 @@ export interface ReconnectPolicyState {
   // lasted RECONNECT_ACTIVE_RESET_MS. Kept across a reconnect decision, because a
   // reconnect is what ENDS the previous run: the next one gets its own clock.
   activeSinceMs: number;
+  // Identity of the outstanding automatic attempt only; cleared on settlement.
+  attemptDispatchedAtMs: number;
+  attemptMarkerPid: number;
 }
 
 // Everything the decision is allowed to depend on. `nowMs` is passed in (never
@@ -269,14 +274,45 @@ export function reconnectOnStartRejected(
 }
 
 function reconnectState(attempts: number, lastAttemptAtMs: number,
-  verifyingSinceMs: number, activeSinceMs: number): ReconnectPolicyState {
+  verifyingSinceMs: number, activeSinceMs: number, attemptDispatchedAtMs: number = 0,
+  attemptMarkerPid: number = 0): ReconnectPolicyState {
   const state: ReconnectPolicyState = {
     attempts: attempts,
     lastAttemptAtMs: lastAttemptAtMs,
     verifyingSinceMs: verifyingSinceMs,
-    activeSinceMs: activeSinceMs
+    activeSinceMs: activeSinceMs,
+    attemptDispatchedAtMs: attemptDispatchedAtMs,
+    attemptMarkerPid: attemptMarkerPid
   };
   return state;
+}
+
+// Latch the first marker written AFTER dispatch, never the reclaimed writer's
+// marker. Once latched, a later marker cannot change this attempt's identity.
+export function reconnectWithAttemptMarker(state: ReconnectPolicyState,
+  markerAtMs: number, markerPid: number): ReconnectPolicyState {
+  if (state.verifyingSinceMs <= 0 || state.attemptMarkerPid > 0 ||
+    markerAtMs <= state.attemptDispatchedAtMs || !Number.isFinite(markerAtMs) ||
+    !Number.isInteger(markerPid) || markerPid <= 0) {
+    return state;
+  }
+  return reconnectState(state.attempts, state.lastAttemptAtMs, state.verifyingSinceMs,
+    state.activeSinceMs, state.attemptDispatchedAtMs, markerPid);
+}
+
+// Only the outstanding automatic attempt is gated. Older documents omit pid;
+// those fall back to the write time with a 1 s clock tolerance. A present pid
+// never falls back to time, even while the new marker has not been observed yet.
+export function reconnectStatusMatchesAttempt(state: ReconnectPolicyState,
+  pid: number | undefined, updatedAtMs: number): boolean {
+  if (state.verifyingSinceMs <= 0) {
+    return true;
+  }
+  if (pid !== undefined) {
+    return state.attemptMarkerPid > 0 && pid === state.attemptMarkerPid;
+  }
+  return Number.isFinite(updatedAtMs) &&
+    updatedAtMs >= state.attemptDispatchedAtMs - 1000;
 }
 
 function reconnectDecision(action: string, reason: string, trigger: string,
@@ -383,9 +419,14 @@ export function decideReconnect(state: ReconnectPolicyState,
   //     start on top of a possibly live process is never guessed. This is also
   //     what makes the 0.0.20 backgrounds trigger and the relaxed criterion (2)
   //     safe: the caller may ask earlier, the answer is still "go" only here.
-  if (input.killedVpnPid === null || input.markerPid <= 0 ||
-    input.killedVpnPid !== input.markerPid) {
-    return skipped(RECONNECT_REASON_VPN_NOT_DEAD, trigger, state);
+  if (input.killedVpnPid === null) {
+    return skipped(RECONNECT_REASON_KILL_RECORD_ABSENT, trigger, state);
+  }
+  if (input.markerPid <= 0) {
+    return skipped(RECONNECT_REASON_MARKER_PID_INVALID, trigger, state);
+  }
+  if (input.killedVpnPid !== input.markerPid) {
+    return skipped(RECONNECT_REASON_VPN_PID_MISMATCH, trigger, state);
   }
   // (8) Go: one attempt, counted now, verified by the caller within
   //     RECONNECT_VERIFY_MS. activeSinceMs is cleared because this attempt ENDS
@@ -393,5 +434,5 @@ export function decideReconnect(state: ReconnectPolicyState,
   //     its own 5-minute clock (reconnectOnActive).
   const attempt: number = state.attempts + 1;
   return reconnectDecision(RECONNECT_ACTION_RECONNECT, RECONNECT_REASON_MARKER_OPEN,
-    trigger, attempt, reconnectState(attempt, input.nowMs, input.nowMs, 0));
+    trigger, attempt, reconnectState(attempt, input.nowMs, input.nowMs, 0, input.nowMs));
 }
