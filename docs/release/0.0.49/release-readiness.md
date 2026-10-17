@@ -5,6 +5,7 @@
 ## 已证事实与边界
 
 - 当前候选：发布分支 `rel/0.0.49` 的源码提交为 `05b87f61bca3044bd698df390250373ec88ed2b0`（`fix(peer-meta): report real app version and HarmonyOS OS identity`）：`netbird_version` 上报运行时应用版本（bundle versionName），`os_version` 上报数值系统版本（`major.senior.feature.build`，缺失时依次回退 `displayVersion` / `osFullName` / `sdkApiVersion` / `unknown`），Rust 协议 `meta.os` 填 `harmonyos`，Login / Sync / Extend 共用。完整 Rust 1114 passed / 0 failed / 53 个结果单元；Node 55 个 runner 全部 exit 0（修复前 8 个因新增 import 失败，修复夹具后全过）。两端已用该候选覆盖安装、启动并重新连接成功，配置与 20 个 peers 保留；控制台字段待用户刷新人工确认，详见[peer-meta 修复与双端重装补记](device-acceptance.md#2026-10-17-peer-meta-修复与双端重装补记当前候选utc)。该候选仍为 debug 设备签名，不是正式发行签名；本轮文档增量不属于已冻结产物。
+- 更新后的当前候选（OS 展示名修复）：发布分支 `rel/0.0.49` 的源码提交为 `d1c481b70132b14cb3418e368dce05f7b27e1e03`（`fix(peer-meta): report HarmonyOS as the OS display name`），在上一条基础上 1 个文件、+33/−10：`grpc.rs` 新增 `human_os_name`，协议 OS 展示名上报 `HarmonyOS`，GoOS 仍为 `harmonyos`；完整 Rust 1115 passed / 0 failed / 53 个结果单元（含新增测试）。两端已用该候选覆盖安装、启动并重新连接成功，配置与 peers 保留；控制台预期 OS 列显示 `HarmonyOS 7.0.0.x`、VERSION 仍为 `0.0.49`，待用户刷新人工确认。详见[OS 展示名修复与双端重装补记](device-acceptance.md#2026-10-17-os-展示名修复与双端重装补记当前候选utc)与下节当前候选产物表。该候选仍为 debug 设备签名，不是正式发行签名；本轮文档增量不属于已冻结产物。
 - 前序候选（已被 peer-meta 修复提交 `05b87f61` 取代）：发布分支 `rel/0.0.49` 的源码提交为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（merge: integrate main VPN recovery fixes），包含主线 `2360a4a` 的启动 DNS 有界重试（3× + 3/15s 退避，耗尽上报 UI）、重连验证绑定本次尝试、日志语义/死亡证据细分；合并时 Node 54/54、Rust 1114 passed / 0 failed 通过。该候选 0.0.49/49 的产物及验签结果见下节前序表；手机已覆盖安装并完成有限验收，当时两端均已安装该候选；PC MateBook Fold（API26）覆盖安装及启动成功，版本仍为 0.0.49/49，初始四项 DNS/ICMP 通过，完成已连接→未连接→已连接；重连立即两私域解析成功但 ICMP 丢包，等待 10 秒后四项均恢复，属单次重连瞬态观测，详见[PC 验收补记](device-acceptance.md#2026-10-17-pc-验收补记当前候选)。先前 `ceda4da` 候选已被此后续提交取代；该候选仍不是正式发行签名，本轮文档增量不属于已冻结产物。
 - 历史候选（已被取代）：固定提交 `37e881e`，0.0.49 / versionCode 49；Node 全部 54 组通过，已从该提交构建 `unsigned.app` 及 PC / phone debug 候选并完成验签，PC 和 phone 已各一次从 48 覆盖安装至 49 并启动。该记录不能作为当前候选的双端验收。
 - 原生测试同步修复后最后完整运行为 **1114 passed / 0 failed，53 个结果单位，exit 0**；历史 1112 passed / 2 failed 与 1113 passed / 1 failed 保留为前序结果。首装管理 URL 默认值已在源码清空，相关 145 项自检通过并保留已存配置；这些后续改动尚未加入已装的 `37e881e` 包，未做首装或注销真实 UI 验证。
@@ -42,6 +43,22 @@
 | `source.tar.gz` | 27007938 | `e9600a931a686872d64f7ba1b09b6cf69cf9611b53c71dc72b649b8b777338cb` |
 
 双端安装状态：手机 updateTime `1792243000570` → `1792252900764`，PC `1792249249672` → `1792252904688`；两端均为覆盖安装、启动成功并重新连接，配置与 20 个 peers 保留。手机三个对端 ping 分别 37ms / 6ms / 247ms，均 0% 丢包；PC 两个对端 7ms / 246ms 均 0% 丢包，另一对端首次 ping 解析成功但尚在 ICE 握手 / 转中继，1 发 0 收，按约定未重测。控制台原显示 `0.1.0` / `unknown`，修复后预期 `VERSION=0.0.49`、系统 `harmonyos 7.0.0.107`；当前为已安装并重连，等待控制台人工确认，不写已确认、不代表已授权或已上架。完整脱敏摘要与限制见[peer-meta 修复与双端重装补记](device-acceptance.md#2026-10-17-peer-meta-修复与双端重装补记当前候选utc)。以上不改变 DRAFT、未发布就绪的结论，品牌授权、运营主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
+
+## 当前候选产物（2026-10-17，OS 展示名修复后）
+
+候选产物目录为 `/home/worker/n2h-kit/release-prep-49/build-final49-d1c481b-20261017T162049.399780Z/`，源码提交 `d1c481b70132b14cb3418e368dce05f7b27e1e03`；上一节 peer-meta 修复后候选（`05b87f61`）保留用于追溯，不再是当前候选。下表用产物简称，磁盘文件名统一加 `netbird-0.0.49-` 前缀。SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，phone / 2in1 ARM64；debug 签名仅用于 QA，不代表商店发布签名或上架批准。
+
+| 产物 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `unsigned.hap` | 7394634 | `6ca773ad5b116c6e621c116d398394f0a65fe518e9406a25fbf35f598ff36f89` |
+| `unsigned.app` | 3315829 | `79acf4b28b8d0265c596d10fce177a54bfe81985b6fce0379ea58ed0153f194d` |
+| `pc-debug-signed.hap` | 7510139 | `d5808a575f7df836da4d6b76b82d4857fc813c72a3ca6645db532a00fefab33a` |
+| `phone-debug-signed.hap` | 7510144 | `3ba5b89f4ccda55eeb49a70f8faa1310c0c643125a36e2dd9614c6fae376e2a8` |
+| `source.tar.gz` | 27009483 | `d9e1fd9b4c848e44e933b8651e89a09f88c3a28694525ddfc79ab2a29c2afec6` |
+
+双端安装状态：手机 updateTime `1792252900764` → `1792254320430`，PC `1792252904688` → `1792254326315`；两端均为覆盖安装、启动成功并重新连接，配置与 peers 保留。手机三个对端 ping 26ms / 5ms / 237ms，PC 35ms / 3ms / 238ms，均解析成功并收到回包（仅脱敏摘要，不落 peer 明细）。控制台预期 OS 列 `HarmonyOS 7.0.0.x`、VERSION `0.0.49`，待用户刷新人工确认，不写已确认、不代表已授权或已上架。完整脱敏摘要与限制见[OS 展示名修复与双端重装补记](device-acceptance.md#2026-10-17-os-展示名修复与双端重装补记当前候选utc)。
+
+已知限制：控制台系统图标需上游 dashboard 增加 HarmonyOS 映射，客户端无法修复；控制台 "Update available" 来自其把 peer 上报版本与上游最新 tag（v0.81.2）比较，管理端无关闭开关，属版本号方案差异，不建议伪报版本号消除。以上不改变 DRAFT、未发布就绪的结论，品牌授权、运营主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
 
 ## 用户字段与待确认状态
 

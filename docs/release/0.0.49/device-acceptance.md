@@ -74,6 +74,18 @@
 
 限制：两端仍为 debug 设备签名，非商店正式签名；`Index.ets` 身份助手无宿主 runner 覆盖；系统版本字段依赖设备提供；浏览器/TCP/AAAA/长期稳定性仍未系统测试。仍为 DRAFT、未发布就绪，品牌授权、运营主体、隐私 URL、对应源码公开与渠道条款缺口继续保留。
 
+## 2026-10-17 OS 展示名修复与双端重装补记（当前候选，UTC）
+
+本节覆盖上方当前候选状态，旧记录保留用于追溯。修复提交 `d1c481b70132b14cb3418e368dce05f7b27e1e03`（`fix(peer-meta): report HarmonyOS as the OS display name`）1 个文件、+33/−10：`grpc.rs` 新增 `human_os_name`，协议 OS 展示名上报 `HarmonyOS`，GoOS 仍为 `harmonyos`；完整 Rust 1115 passed / 0 failed / 53 个结果单元（含新增测试）。依据上游惯例，GoOS 用小写（`android` / `windows`），OS 展示名首字母大写（`Android` / `Windows`）；服务端不规范化、原样显示；OS 仅用于展示与日志，逻辑判断仍用 GoOS。
+
+- 新候选目录 `release-prep-49/build-final49-d1c481b-20261017T162049.399780Z/`：`pc-debug-signed.hap` 7510139 B / SHA-256 `d5808a575f7df836da4d6b76b82d4857fc813c72a3ca6645db532a00fefab33a`，`phone-debug-signed.hap` 7510144 B / SHA-256 `3ba5b89f4ccda55eeb49a70f8faa1310c0c643125a36e2dd9614c6fae376e2a8`；SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，ARM64。完整五产物及哈希见[准备状态](release-readiness.md#当前候选产物2026-10-17os-展示名修复后)。
+- 双端覆盖安装并启动成功：手机 updateTime `1792252900764` → `1792254320430`，PC `1792252904688` → `1792254326315`；两端均安装成功、启动成功并重新连接，配置与 peers 保留。
+- 手机三个对端 ping 26ms / 5ms / 237ms，PC 35ms / 3ms / 238ms，均解析成功并收到回包；仅保留脱敏摘要，不落私有域名、目标地址或完整 peer 明细。
+- 控制台显示：预期 OS 列为 `HarmonyOS 7.0.0.x`，VERSION 仍为 `0.0.49`；待用户刷新控制台人工确认，本记录不写已确认。
+- 已知限制：控制台系统图标需上游 dashboard 增加 HarmonyOS 映射，客户端无法修复；控制台出现 "Update available" 是因为它把 peer 上报版本与上游最新 tag（v0.81.2）比较，管理端没有关闭开关，属版本号方案差异，不建议伪报版本号来消除。
+
+限制：两端仍为 debug 设备签名，非商店正式签名；`Index.ets` 身份助手无宿主 runner 覆盖；系统版本字段依赖设备提供；浏览器/TCP/AAAA/长期稳定性仍未系统测试。仍为 DRAFT、未发布就绪，品牌授权、运营主体、隐私 URL、对应源码公开与渠道条款缺口继续保留。
+
 ## 证据交回要求
 
 每端仅保留版本/包hash、场景、时间范围、实际输出摘要和结论；截图及日志分享前脱敏。最终验收还应检查公开政策 URL、实际SDK声明、至少三张不同截图及品牌/备案待确认项，入口见[准备状态](release-readiness.md)。不在本页编造测试日期、操作者或通过签字。
