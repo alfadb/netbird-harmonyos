@@ -515,6 +515,13 @@ export interface DeviceConfigFile {
   ca_pem?: string;
   server_name?: string;
   hostname?: string;
+  // Runtime identity the CALLER injects (optional — an absent field keeps the
+  // historical placeholder so every pre-existing two-argument call site stays
+  // byte-identical): the real app version (bundleManager versionName) and the
+  // real OS release string (deviceInfo.osFullName). They are config material
+  // only — never persisted by this module.
+  netbird_version?: string;
+  os_version?: string;
   // N13-D1: relay client switch (core ConnectorConfig JSON key
   // 'relay_enabled'). DEFAULT TRUE — official client parity: relay is always
   // on unless explicitly opted out. Parsed leniently below: only the exact
@@ -654,8 +661,12 @@ export function buildConnectorConfigJson(device: DeviceConfigFile,
     'private_key': device.private_key,
     'hostname': device.hostname !== undefined ? device.hostname : 'netbird-ohos',
     'os_name': 'harmonyos',
-    'os_version': 'unknown',
-    'netbird_version': '0.1.0'
+    // Peer meta version/OS release: the runtime values the caller injected;
+    // the placeholders survive only for callers that inject nothing.
+    'os_version': device.os_version !== undefined && device.os_version.length > 0
+      ? device.os_version : 'unknown',
+    'netbird_version': device.netbird_version !== undefined && device.netbird_version.length > 0
+      ? device.netbird_version : '0.1.0'
   };
   if (device.ca_pem !== undefined && device.ca_pem.length > 0) {
     cfg['ca_pem'] = device.ca_pem;

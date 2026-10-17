@@ -805,6 +805,11 @@ pub fn build_peer_system_meta(meta: &PeerMeta) -> proto::PeerSystemMeta {
     proto::PeerSystemMeta {
         hostname: meta.hostname.clone(),
         go_os: meta.os_name.clone(),
+        // `OS` (field 6) is what the management dashboard's Meta.OS shows and
+        // was left empty by this crate; the platform's OS family is the one
+        // stable fact the shell reports, so mirror goOS here (Login, Sync and
+        // Extend all share this conversion).
+        os: meta.os_name.clone(),
         os_version: meta.os_version.clone(),
         netbird_version: meta.netbird_version.clone(),
         ..Default::default()
@@ -905,6 +910,11 @@ mod tests {
         let meta = req.meta.as_ref().expect("meta set");
         assert_eq!(meta.hostname, "ohos-dev");
         assert_eq!(meta.go_os, "harmonyos");
+        // Field 6 (`OS`) is what the management dashboard displays; this
+        // crate mirrors the platform OS family into it (see
+        // build_peer_system_meta). Without this the dashboard's OS column
+        // stays empty even though goOS is right.
+        assert_eq!(meta.os, "harmonyos");
         assert_eq!(meta.os_version, "26.0.0");
         assert_eq!(meta.netbird_version, "0.1.0");
         assert!(req.dns_labels.is_empty());

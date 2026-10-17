@@ -4,6 +4,8 @@ import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import Want from '@ohos.app.ability.Want';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
+import bundleManager from '@ohos.bundle.bundleManager';
+import deviceInfo from '@ohos.deviceInfo';
 import process from '@ohos.process';
 import vpnExtension from '@ohos.net.vpnExtension';
 import connection from '@ohos.net.connection';
@@ -758,6 +760,62 @@ function safeError(error: Error): string {
   const name: string = clean(error.name || 'Error');
   const message: string = clean(error.message || 'no-message');
   return `code=${code},name=${name},message=${message}`;
+}
+
+// Peer meta identity (2026-10-17 console version/OS fix): the REAL app version
+// and OS release the connector config carries — never the historical
+// placeholders. Fail-soft: a platform refusal answers 'unknown' and must never
+// abort the connect.
+function appVersionName(): string {
+  try {
+    const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
+      bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+    return info.versionName !== undefined && info.versionName !== null &&
+      info.versionName.length > 0 ? info.versionName : 'unknown';
+  } catch (error) {
+    return 'unknown';
+  }
+}
+
+// '' for a missing / non-numeric release component; otherwise its exact text.
+function osNumericPart(value: number | string): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  const text: string = String(value).trim();
+  if (text.length === 0 || !Number.isFinite(Number(text))) {
+    return '';
+  }
+  return text;
+}
+
+function osVersionName(): string {
+  try {
+    // Numeric system release FIRST: major.senior.feature.build (e.g.
+    // "7.0.0.107"). osFullName carries the SAME numbers behind the vendor
+    // prefix ("OpenHarmony-7.0.0.107"), so the console's OS name + OS version
+    // pair would repeat the release twice. Any missing or non-numeric part
+    // skips this whole form and the readable fallbacks below decide.
+    const major: string = osNumericPart(deviceInfo.majorVersion);
+    const senior: string = osNumericPart(deviceInfo.seniorVersion);
+    const feature: string = osNumericPart(deviceInfo.featureVersion);
+    const build: string = osNumericPart(deviceInfo.buildVersion);
+    if (major.length > 0 && senior.length > 0 && feature.length > 0 && build.length > 0) {
+      return `${major}.${senior}.${feature}.${build}`;
+    }
+    const display: string = deviceInfo.displayVersion;
+    if (display !== undefined && display !== null && display.length > 0) {
+      return display;
+    }
+    const full: string = deviceInfo.osFullName;
+    if (full !== undefined && full !== null && full.length > 0) {
+      return full;
+    }
+    const sdk: number = deviceInfo.sdkApiVersion;
+    return sdk !== undefined && sdk !== null ? String(sdk) : 'unknown';
+  } catch (error) {
+    return 'unknown';
+  }
 }
 
 // F4: the numeric capability set of a `NetCapabilityInfo` (`info.netCap` is the
@@ -2355,6 +2413,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // second step on a login-needed verdict (upstream auth.go:208-236).
     const creds: Record<string, Object> = authMode === ACCOUNT_MODE_ACCOUNT
       ? {} : { 'setup_key': setupKey };
+    // Peer meta identity: the runtime app version + OS release (fail-soft
+    // 'unknown'), injected into the SAME config document the page builds.
+    device.netbird_version = appVersionName();
+    device.os_version = osVersionName();
     let start: ConnectorStartResult;
     try {
       start = connectorStartWithSocket(mgmtFd,

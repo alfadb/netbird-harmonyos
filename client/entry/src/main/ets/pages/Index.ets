@@ -4,6 +4,7 @@ import hilog from '@ohos.hilog';
 import cryptoFramework from '@ohos.security.cryptoFramework';
 import util from '@ohos.util';
 import bundleManager from '@ohos.bundle.bundleManager';
+import deviceInfo from '@ohos.deviceInfo';
 import vpnExtension from '@ohos.net.vpnExtension';
 import common from '@ohos.app.ability.common';
 import window from '@ohos.window';
@@ -1915,6 +1916,63 @@ struct Index {
     }
   }
 
+  // Peer meta identity (2026-10-17 console version/OS fix): the REAL app
+  // version and OS release the connector config carries — never a placeholder.
+  // Fail-soft: an unavailable platform answer is the literal 'unknown' and must
+  // never block the login/start path.
+  private peerVersionName(): string {
+    try {
+      const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      return info.versionName !== undefined && info.versionName !== null &&
+        info.versionName.length > 0 ? info.versionName : 'unknown';
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  private peerOsVersion(): string {
+    try {
+      // Numeric system release FIRST: major.senior.feature.build (e.g.
+      // "7.0.0.107"). osFullName carries the SAME numbers behind the vendor
+      // prefix ("OpenHarmony-7.0.0.107"), so the console's OS name + OS
+      // version pair would repeat the release twice. Any missing or
+      // non-numeric part skips this whole form and the readable fallbacks
+      // below decide.
+      const major: string = this.peerOsNumericPart(deviceInfo.majorVersion);
+      const senior: string = this.peerOsNumericPart(deviceInfo.seniorVersion);
+      const feature: string = this.peerOsNumericPart(deviceInfo.featureVersion);
+      const build: string = this.peerOsNumericPart(deviceInfo.buildVersion);
+      if (major.length > 0 && senior.length > 0 && feature.length > 0 && build.length > 0) {
+        return `${major}.${senior}.${feature}.${build}`;
+      }
+      const display: string = deviceInfo.displayVersion;
+      if (display !== undefined && display !== null && display.length > 0) {
+        return display;
+      }
+      const full: string = deviceInfo.osFullName;
+      if (full !== undefined && full !== null && full.length > 0) {
+        return full;
+      }
+      const sdk: number = deviceInfo.sdkApiVersion;
+      return sdk !== undefined && sdk !== null ? String(sdk) : 'unknown';
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  // '' for a missing / non-numeric release component; otherwise its exact text.
+  private peerOsNumericPart(value: number | string): string {
+    if (value === undefined || value === null) {
+      return '';
+    }
+    const text: string = String(value).trim();
+    if (text.length === 0 || !Number.isFinite(Number(text))) {
+      return '';
+    }
+    return text;
+  }
+
   // 0.0.21（挂起长窗口后的恢复复查）：这是唯一入口，恢复信号和 2 s 定时器都走它。单飞保护：
   // 一次只允许一拍照常跑——正在跑的那一拍就是恢复信号要的那次复查，所以直接跳过，不排队、
   // 不叠加、不新增定时器。
@@ -3774,7 +3832,9 @@ struct Index {
         management_url: this.accountManagementUrl(),
         private_key: privateKey,
         ca_pem: caPem,
-        relay_enabled: this.deviceRelayEnabled()
+        relay_enabled: this.deviceRelayEnabled(),
+        netbird_version: this.peerVersionName(),
+        os_version: this.peerOsVersion()
       };
       const connectorConfig: string = buildConnectorConfigJson(device, false, null);
       this.accountLoginCommitting = true;
@@ -3984,7 +4044,9 @@ struct Index {
       management_url: managementUrl,
       private_key: privateKey,
       ca_pem: caPem,
-      relay_enabled: this.deviceRelayEnabled()
+      relay_enabled: this.deviceRelayEnabled(),
+      netbird_version: this.peerVersionName(),
+      os_version: this.peerOsVersion()
     };
     return buildConnectorConfigJson(device, false, null);
   }

@@ -207,7 +207,46 @@ const ACCOUNT_MODE = 'data:text/javascript,' + encodeURIComponent(
   'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
   ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";');
 
+// 2026-10-17 peer meta identity: the REAL NetBirdVpnExtensionAbility.ets now
+// imports bundleManager (the app versionName it sends as `netbird_version`) and
+// deviceInfo (the numeric OS release it sends as `os_version`), so both
+// specifiers must resolve for the byte-identical extension fixture to link.
+// Both stubs are FUNCTIONAL, not empty: the extension builds its start config
+// from them, and this suite's own config assertions must see the values the
+// shipped helpers actually produce. The defaults are fixed host answers; a test
+// may override any field through globalThis.__NB_BUNDLE_INFO /
+// globalThis.__NB_DEVICE_INFO (an own property set to undefined makes that field
+// absent, which is how the fallback chain is exercised). The platform's own
+// BundleFlag values are kept verbatim because the extension passes
+// GET_BUNDLE_INFO_DEFAULT by name.
+const BUNDLE_MANAGER = 'data:text/javascript,' + encodeURIComponent(
+  'const info = () => globalThis.__NB_BUNDLE_INFO || {\n' +
+  '  name: "com.example.netbird", versionName: "0.0.49", versionCode: 49 };\n' +
+  'export default {\n' +
+  '  BundleFlag: { GET_BUNDLE_INFO_DEFAULT: 0, GET_BUNDLE_INFO_WITH_APPLICATION: 1 },\n' +
+  '  getBundleInfoForSelfSync: () => info()\n' +
+  '};');
+
+const DEVICE_INFO = 'data:text/javascript,' + encodeURIComponent(
+  'const field = (name, fallback) => {\n' +
+  '  const over = globalThis.__NB_DEVICE_INFO;\n' +
+  '  return over !== undefined && Object.prototype.hasOwnProperty.call(over, name)\n' +
+  '    ? over[name] : fallback;\n' +
+  '};\n' +
+  'export default {\n' +
+  '  get majorVersion() { return field("majorVersion", 7); },\n' +
+  '  get seniorVersion() { return field("seniorVersion", 0); },\n' +
+  '  get featureVersion() { return field("featureVersion", 0); },\n' +
+  '  get buildVersion() { return field("buildVersion", "107"); },\n' +
+  '  get displayVersion() { return field("displayVersion", "OpenHarmony-7.0.0.107"); },\n' +
+  '  get osFullName() { return field("osFullName", "OpenHarmony-7.0.0.107"); },\n' +
+  '  get sdkApiVersion() { return field("sdkApiVersion", 14); },\n' +
+  '  get deviceType() { return field("deviceType", "default"); }\n' +
+  '};');
+
 const STUBS = {
+  '@ohos.bundle.bundleManager': BUNDLE_MANAGER,
+  '@ohos.deviceInfo': DEVICE_INFO,
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,
   '@ohos.app.ability.Want': EMPTY,
   // 2026-10-08: the extension's onMemoryLevel signature names
