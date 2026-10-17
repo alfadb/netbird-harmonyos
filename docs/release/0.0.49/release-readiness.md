@@ -4,7 +4,8 @@
 
 ## 已证事实与边界
 
-- 当前候选：发布分支 `rel/0.0.49` 的源码提交为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（merge: integrate main VPN recovery fixes），包含主线 `2360a4a` 的启动 DNS 有界重试（3× + 3/15s 退避，耗尽上报 UI）、重连验证绑定本次尝试、日志语义/死亡证据细分；合并时 Node 54/54、Rust 1114 passed / 0 failed 通过。0.0.49/49 当前产物及验签结果见下节；手机已覆盖安装并完成有限验收，两端均已安装同一新候选；PC MateBook Fold（API26）覆盖安装及启动成功，版本仍为 0.0.49/49，初始四项 DNS/ICMP 通过，完成已连接→未连接→已连接；重连立即两私域解析成功但 ICMP 丢包，等待 10 秒后四项均恢复，属单次重连瞬态观测，详见[PC 验收补记](device-acceptance.md#2026-10-17-pc-验收补记当前候选)。先前 `ceda4da` 候选已被此后续提交取代；当前候选仍不是正式发行签名，本轮文档增量不属于已冻结产物。
+- 当前候选：发布分支 `rel/0.0.49` 的源码提交为 `05b87f61bca3044bd698df390250373ec88ed2b0`（`fix(peer-meta): report real app version and HarmonyOS OS identity`）：`netbird_version` 上报运行时应用版本（bundle versionName），`os_version` 上报数值系统版本（`major.senior.feature.build`，缺失时依次回退 `displayVersion` / `osFullName` / `sdkApiVersion` / `unknown`），Rust 协议 `meta.os` 填 `harmonyos`，Login / Sync / Extend 共用。完整 Rust 1114 passed / 0 failed / 53 个结果单元；Node 55 个 runner 全部 exit 0（修复前 8 个因新增 import 失败，修复夹具后全过）。两端已用该候选覆盖安装、启动并重新连接成功，配置与 20 个 peers 保留；控制台字段待用户刷新人工确认，详见[peer-meta 修复与双端重装补记](device-acceptance.md#2026-10-17-peer-meta-修复与双端重装补记当前候选utc)。该候选仍为 debug 设备签名，不是正式发行签名；本轮文档增量不属于已冻结产物。
+- 前序候选（已被 peer-meta 修复提交 `05b87f61` 取代）：发布分支 `rel/0.0.49` 的源码提交为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（merge: integrate main VPN recovery fixes），包含主线 `2360a4a` 的启动 DNS 有界重试（3× + 3/15s 退避，耗尽上报 UI）、重连验证绑定本次尝试、日志语义/死亡证据细分；合并时 Node 54/54、Rust 1114 passed / 0 failed 通过。该候选 0.0.49/49 的产物及验签结果见下节前序表；手机已覆盖安装并完成有限验收，当时两端均已安装该候选；PC MateBook Fold（API26）覆盖安装及启动成功，版本仍为 0.0.49/49，初始四项 DNS/ICMP 通过，完成已连接→未连接→已连接；重连立即两私域解析成功但 ICMP 丢包，等待 10 秒后四项均恢复，属单次重连瞬态观测，详见[PC 验收补记](device-acceptance.md#2026-10-17-pc-验收补记当前候选)。先前 `ceda4da` 候选已被此后续提交取代；该候选仍不是正式发行签名，本轮文档增量不属于已冻结产物。
 - 历史候选（已被取代）：固定提交 `37e881e`，0.0.49 / versionCode 49；Node 全部 54 组通过，已从该提交构建 `unsigned.app` 及 PC / phone debug 候选并完成验签，PC 和 phone 已各一次从 48 覆盖安装至 49 并启动。该记录不能作为当前候选的双端验收。
 - 原生测试同步修复后最后完整运行为 **1114 passed / 0 failed，53 个结果单位，exit 0**；历史 1112 passed / 2 failed 与 1113 passed / 1 failed 保留为前序结果。首装管理 URL 默认值已在源码清空，相关 145 项自检通过并保留已存配置；这些后续改动尚未加入已装的 `37e881e` 包，未做首装或注销真实 UI 验证。
 - 当前产品是面向 self-host 组织私有组网的独立、非官方 NetBird 实现，仅限异地组网工具使用；我方提供客户端软件，不运营或提供网络接入、线路、管理平台、信令、中继/代理等网络服务，由用户自行部署、配置和管理其组网及相关服务。该经营声明不证明没有默认 URL、不调用境外/第三方服务、不能配置出口路由或没有个人信息处理；SDK API 26，Rust core + ArkTS，phone / 2in1 ARM64。
@@ -14,9 +15,9 @@
 - 当前使用个人华为开发者账号，企业账号尚未决定；个人和企业均有上架、团队、商户与 IAP 能力。若由真实公司长期运营，建议企业认证；本应用的国内渠道主体/资质要求仍待核实，不能据此认定必须企业账号。个人账号不能原账号直接变更为企业，需另认证企业账号并按应用转移流程办理；APP ID / 包名可按官方条件保留，旧包与签名材料不能假定自动沿用。
 - 分发范围为**仅中国大陆；海外发布不在本轮范围**。按国内公开发布场景核实渠道和法律要求，不将海外渠道开放或 GDPR 等作为本轮发布前提。仅在国内分发不代表运行时不联系境外服务器：实际接收方、服务位置及跨境情况仍取决于用户所选部署和网络配置，见[隐私草案](privacy-policy-draft.md)。
 
-## 当前候选产物（2026-10-17）
+## 前序候选产物（2026-10-17）
 
-候选产物目录为 `/home/worker/n2h-kit/release-prep-49/build-final49-85c0a447-20261017T131012.703837Z/`；下表用产物简称，磁盘文件名统一加 `netbird-0.0.49-` 前缀。SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，phone / 2in1 ARM64；debug 签名仅用于 QA，不代表商店发布签名或上架批准。
+前序候选产物目录为 `/home/worker/n2h-kit/release-prep-49/build-final49-85c0a447-20261017T131012.703837Z/`（已被 peer-meta 修复提交 `05b87f61` 取代）；下表用产物简称，磁盘文件名统一加 `netbird-0.0.49-` 前缀。SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，phone / 2in1 ARM64；debug 签名仅用于 QA，不代表商店发布签名或上架批准。
 
 | 产物 | 字节数 | SHA-256 |
 | --- | ---: | --- |
@@ -26,7 +27,21 @@
 | `phone-debug-signed.hap` | 7496917 | `c87031db46178c063e5772d3ec508b1ced1edd8bb65d948bbb7028a616eb5413` |
 | `source.tar.gz` | 26994630 | `334d70f12f2dd717ef03d92545e5f8f18e8c7b933122c85cff9717778e077d28` |
 
-当前手机状态：PHYS-1 类 API26 手机覆盖安装成功（2.743s）、启动成功，保留既有配置；首次连接与一轮断开→重连显示已连接（13/20 对端）。2026-10-17 UTC 安装后早期解析/私网 ICMP 曾失败，14:05 起恢复；14:10:29–14:15:15 两个私域及私网 IP 的 20 轮采样各 20/20，持续 connected；14:24:18.734Z 起一次重连计时在 +0.53s / +0.64s / +0.77s 分别完成两个私域解析及 ICMP、私网 IP ICMP，未观测到解析空窗。用户手机浏览器的私域与 IP HTTP URL 均可打开；空白网页截图不作为 DNS 失败证据。早期失败归因未证实且现不可复现，平台 DNS 参数提交无直接日志证据；shell 与普通应用路径差异未完全证明，浏览器/TCP/AAAA/长期稳定性未系统测试，两端均已安装同一新候选；PC MateBook Fold（API26）覆盖安装及启动成功，版本仍为 0.0.49/49，初始四项 DNS/ICMP 通过，完成已连接→未连接→已连接；重连立即两私域解析成功但 ICMP 丢包，等待 10 秒后四项均恢复，属单次重连瞬态观测，详见[PC 验收补记](device-acceptance.md#2026-10-17-pc-验收补记当前候选)。完整脱敏摘要与限制见[手机验收补记](device-acceptance.md#2026-10-17-手机验收补记当前候选utc)。以上不改变 DRAFT、未发布就绪的结论，品牌授权仍待回复，主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
+前序候选手机状态：PHYS-1 类 API26 手机覆盖安装成功（2.743s）、启动成功，保留既有配置；首次连接与一轮断开→重连显示已连接（13/20 对端）。2026-10-17 UTC 安装后早期解析/私网 ICMP 曾失败，14:05 起恢复；14:10:29–14:15:15 两个私域及私网 IP 的 20 轮采样各 20/20，持续 connected；14:24:18.734Z 起一次重连计时在 +0.53s / +0.64s / +0.77s 分别完成两个私域解析及 ICMP、私网 IP ICMP，未观测到解析空窗。用户手机浏览器的私域与 IP HTTP URL 均可打开；空白网页截图不作为 DNS 失败证据。早期失败归因未证实且现不可复现，平台 DNS 参数提交无直接日志证据；shell 与普通应用路径差异未完全证明，浏览器/TCP/AAAA/长期稳定性未系统测试，两端均已安装同一新候选；PC MateBook Fold（API26）覆盖安装及启动成功，版本仍为 0.0.49/49，初始四项 DNS/ICMP 通过，完成已连接→未连接→已连接；重连立即两私域解析成功但 ICMP 丢包，等待 10 秒后四项均恢复，属单次重连瞬态观测，详见[PC 验收补记](device-acceptance.md#2026-10-17-pc-验收补记当前候选)。完整脱敏摘要与限制见[手机验收补记](device-acceptance.md#2026-10-17-手机验收补记当前候选utc)。以上不改变 DRAFT、未发布就绪的结论，品牌授权仍待回复，主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
+
+## 当前候选产物（2026-10-17，peer-meta 修复后）
+
+候选产物目录为 `/home/worker/n2h-kit/release-prep-49/build-final49-05b87f61-20261017T155536.334657Z/`，源码提交 `05b87f61bca3044bd698df390250373ec88ed2b0`；下表用产物简称，磁盘文件名统一加 `netbird-0.0.49-` 前缀。SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，phone / 2in1 ARM64；debug 签名仅用于 QA，不代表商店发布签名或上架批准。
+
+| 产物 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `unsigned.hap` | 7394482 | `f80f6768b944cd152d8163a017eef7bb00d87acc51bcf7f9f52a2f9e23605e59` |
+| `unsigned.app` | 3315542 | `91b8a7f5dcc6eae1c1984aa5388950873a4eeef537a36ed1836dbdcda0a2c3d8` |
+| `pc-debug-signed.hap` | 7510286 | `711b43edef5f2f5066b19b1672c40e1e6c8e0efe447ba13de426839baa52cc8c` |
+| `phone-debug-signed.hap` | 7510296 | `67ac461205314103dc2b0a4f3fdb7146dcefdd252f132d1cdab506a836b9f2ea` |
+| `source.tar.gz` | 27007938 | `e9600a931a686872d64f7ba1b09b6cf69cf9611b53c71dc72b649b8b777338cb` |
+
+双端安装状态：手机 updateTime `1792243000570` → `1792252900764`，PC `1792249249672` → `1792252904688`；两端均为覆盖安装、启动成功并重新连接，配置与 20 个 peers 保留。手机三个对端 ping 分别 37ms / 6ms / 247ms，均 0% 丢包；PC 两个对端 7ms / 246ms 均 0% 丢包，另一对端首次 ping 解析成功但尚在 ICE 握手 / 转中继，1 发 0 收，按约定未重测。控制台原显示 `0.1.0` / `unknown`，修复后预期 `VERSION=0.0.49`、系统 `harmonyos 7.0.0.107`；当前为已安装并重连，等待控制台人工确认，不写已确认、不代表已授权或已上架。完整脱敏摘要与限制见[peer-meta 修复与双端重装补记](device-acceptance.md#2026-10-17-peer-meta-修复与双端重装补记当前候选utc)。以上不改变 DRAFT、未发布就绪的结论，品牌授权、运营主体、隐私 URL、对应源码公开及最终渠道条款等缺口继续保留。
 
 ## 用户字段与待确认状态
 

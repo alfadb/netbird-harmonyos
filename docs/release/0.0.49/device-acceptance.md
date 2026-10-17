@@ -1,6 +1,6 @@
 # 0.0.49 设备验收清单（DRAFT，部分执行）
 
-当前候选为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（2026-10-17 手机验收见下方补记）；PC 已完成当前候选覆盖安装与有限验收（见 PC 补记），仍未发布就绪。本轮仅增量整理文档，没有构建、签名、接触设备或操作网页。
+当前候选为 `05b87f61bca3044bd698df390250373ec88ed2b0`（`fix(peer-meta)`：上报真实应用版本与 HarmonyOS 系统标识）；两端已用该候选重装并重连，控制台字段待用户刷新人工确认（见下方 peer-meta 补记）。先前的 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600` 双端验收记录保留用于追溯，不再代表最新包。仍未发布就绪。本轮仅增量整理文档，没有构建、签名、接触设备或操作网页。
 
 以下为历史记录，所述 `37e881e` 及先前 `ceda4da` 候选均已被当前候选取代，不代表最新包：0.0.49/49 候选为 `37e881e`，PC 和 phone 已各一次从 48 覆盖安装至 49 并启动；当前仍未发布就绪。
 
@@ -43,7 +43,7 @@
 
 ## 2026-10-17 手机验收补记（当前候选，UTC）
 
-本节覆盖上方历史摘要与矩阵中的手机当前状态；旧结果保留用于追溯，不作为当前候选失败或通过的结论。发布分支 `rel/0.0.49` 的候选源码为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（merge: integrate main VPN recovery fixes），包含主线 `2360a4a`：启动 DNS 有界重试（3× + 3/15s 退避，耗尽上报 UI）、重连验证绑定本次尝试、日志语义与死亡证据细分。合并时 Node 54/54、Rust 1114 passed / 0 failed 通过；这不是本轮重跑测试的结果。产物及完整哈希见[准备状态](release-readiness.md#当前候选产物2026-10-17)。
+本节覆盖上方历史摘要与矩阵中的手机当前状态；旧结果保留用于追溯，不作为当前候选失败或通过的结论。发布分支 `rel/0.0.49` 的候选源码为 `85c0a44716bcfd5dd0130ae1aca8cdd7b13a1600`（merge: integrate main VPN recovery fixes），包含主线 `2360a4a`：启动 DNS 有界重试（3× + 3/15s 退避，耗尽上报 UI）、重连验证绑定本次尝试、日志语义与死亡证据细分。合并时 Node 54/54、Rust 1114 passed / 0 failed 通过；这不是本轮重跑测试的结果。产物及完整哈希见[准备状态](release-readiness.md#前序候选产物2026-10-17)。
 
 - PHYS-1 类手机（API26）用当前 `phone-debug-signed.hap` 覆盖安装，输出 `install bundle successfully`，耗时 2.743s；版本保持 0.0.49/49，updateTime 从 `1792121072302` 变为 `1792243000570`；`aa start` 成功。原生界面可直接连接，无需重新输入配置；首次连接与一轮断开→重连均显示已连接（13/20 对端）。
 - 安装后早期 13:17–14:01 多次出现 `Name does not resolve` / `Try again`，同期对私网 IP 的 ping 为 1 发 0 收；14:05 起恢复。14:10:29–14:15:15 的 20 轮采样中，两个私域名及目标私网 IP 均为 20/20、每轮 1 发 1 收，私域 IPv4 解析符合预期，状态持续 connected。此处仅保留脱敏摘要，不落私有域名、目标地址或完整 peer 明细。
@@ -62,6 +62,17 @@
 - 重连后立即复测两个私域，解析成功但 ICMP 各 1 发 0 收；等待 10 秒后四项复测全部 1 发 1 收，依次 41/15/30/228ms。记录为重连瞬态、数据面随后恢复；单次观测不外推长期稳定。
 
 限制：PC 与手机均为 debug 设备签名，非商店正式签名；PC 浏览器/TCP/AAAA/长期稳定性未系统测试。未读取 status、配置或凭据；因同屏有用户浏览器，未截整屏。上述有限验收已完成，上表其余未覆盖项目继续待验，仍非发布就绪。
+
+## 2026-10-17 peer-meta 修复与双端重装补记（当前候选，UTC）
+
+本节覆盖上方当前候选状态，旧记录保留用于追溯。修复提交 `05b87f61bca3044bd698df390250373ec88ed2b0`（`fix(peer-meta): report real app version and HarmonyOS OS identity`）共 7 个文件、+285/−7：`netbird_version` 改为运行时应用版本（bundle versionName），`os_version` 改为数值系统版本（`major.senior.feature.build`，缺失时依次回退 `displayVersion` / `osFullName` / `sdkApiVersion` / `unknown`），Rust 协议 OS 字段填 `harmonyos`；Login / Sync / Extend 共用同一上报路径。完整 Rust 1114 passed / 0 failed / 53 个结果单元；Node 55 个 runner 全部 exit 0（修复前 8 个因新增 import 失败，修复夹具后全过）。
+
+- 新候选目录 `release-prep-49/build-final49-05b87f61-20261017T155536.334657Z/`：`pc-debug-signed.hap` 7510286 B / SHA-256 `711b43edef5f2f5066b19b1672c40e1e6c8e0efe447ba13de426839baa52cc8c`，`phone-debug-signed.hap` 7510296 B / SHA-256 `67ac461205314103dc2b0a4f3fdb7146dcefdd252f132d1cdab506a836b9f2ea`；SDK `verify-app` / `verify-profile` 通过，`DEBUG=false`，release 0.0.49/49，API26，ARM64。完整五产物及哈希见[准备状态](release-readiness.md#当前候选产物2026-10-17peer-meta-修复后)。
+- 双端覆盖安装并启动成功：手机 updateTime `1792243000570` → `1792252900764`，PC `1792249249672` → `1792252904688`；两端均重新连接成功，配置与 20 个 peers 保留。
+- 手机三个对端 ping 分别 37ms / 6ms / 247ms，均 0% 丢包。PC 两个对端 7ms / 246ms，均 0% 丢包；另一对端首次 ping 解析成功，但该对端尚在 ICE 握手 / 转中继，1 发 0 收，按约定未重测。
+- 控制台原显示 `0.1.0` / `unknown`；修复后预期 `VERSION=0.0.49`、系统 `harmonyos 7.0.0.107`。当前状态为已安装并重连，等待控制台人工确认；本记录不写已确认，不代表已授权或已上架。
+
+限制：两端仍为 debug 设备签名，非商店正式签名；`Index.ets` 身份助手无宿主 runner 覆盖；系统版本字段依赖设备提供；浏览器/TCP/AAAA/长期稳定性仍未系统测试。仍为 DRAFT、未发布就绪，品牌授权、运营主体、隐私 URL、对应源码公开与渠道条款缺口继续保留。
 
 ## 证据交回要求
 
