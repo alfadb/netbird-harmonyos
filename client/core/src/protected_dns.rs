@@ -6,10 +6,11 @@
 //! outage REPORT.md §5 N2) it is no longer the ONLY one: one refused or silent
 //! lookup must never leave a caller without an address, so every lookup runs
 //! through [`resolve_chain`] — the protected attempt (per server, in list
-//! order), then ONE retry through the same path when the failure was transient,
-//! then the OS/system resolver, then the supply's last-known-good address. Only
-//! when all of them fail does the lookup return an error (the shell sees an
-//! empty resolution).
+//! order), then ONE retry through the same path when the failure was transient
+//! (0.0.50: never after EPERM, whose retry reproduced the refusal 185/185 on
+//! the phone and 184/184 on the PC), then the OS/system resolver, then the
+//! supply's last-known-good address. Only when all of them fail does the
+//! lookup return an error (the shell sees an empty resolution).
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
@@ -78,11 +79,28 @@ fn os_getaddrinfo(host: &str) -> io::Result<Ipv4Addr> {
 /// `connect(2)`, `send(2)` or `recv(2)`, which the 0.0.33 outage could not
 /// settle.
 fn syscall_error(call: &str, error: io::Error) -> io::Error {
+    #[cfg(test)]
+    if FORCE_EPERM.with(|force| force.get()) {
+        return io::Error::other(format!(
+            "dns:{call}-failed errno=1 (Operation not permitted (os error 1))"));
+    }
     let errno = match error.raw_os_error() {
         Some(code) => code.to_string(),
         None => "none".to_string(),
     };
     io::Error::other(format!("dns:{call}-failed errno={errno} ({error})"))
+}
+
+// Test-only seam for the EPERM skip (0.0.50): a CI host does not refuse a UDP
+// syscall with EPERM on demand, so the in-crate EPERM tests relabel the REAL
+// syscall failure ([`tests::unix_dgram_fd`]'s EINVAL) into the on-device
+// shape. Everything else — the supply handshake, the fresh socket per
+// attempt, the whole chain — stays the production path, so the tests' request
+// counts are real counts. Each test runs on its own thread, so the flag
+// cannot leak into another test.
+#[cfg(test)]
+thread_local! {
+    static FORCE_EPERM: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 /// N2(a): is this failure worth ONE more protected attempt?
@@ -106,6 +124,35 @@ fn is_transient(error: &io::Error) -> bool {
      "socket-supply", "socket-protect-failed", "physical-network-changed"]
         .iter()
         .any(|token| text.starts_with(token))
+}
+
+/// 0.0.50 (`artifacts/analysis-20261019/dns-eperm/REPORT.md`): is this refusal
+/// EPERM? The capture shows the ONE retry is EPERM again every single time —
+/// 185/185 on the phone, 184/184 on the PC — so a second fresh socket buys
+/// 1.5–3 s of latency and nothing else. Matched on the N3 token's
+/// `errno=1 (`: the parenthesised text is locale-independent enough for a
+/// capture but the errno is the stable part, and the trailing space keeps
+/// `errno=10 (` (ECHILD), `errno=13 (` (EACCES) etc. out. All three syscall
+/// tokens (`dns:connect-failed` / `dns:send-failed` / `dns:recv-failed`) are
+/// covered because any of them can carry errno 1.
+///
+/// This is the ONLY transient refusal the retry is skipped for: everything
+/// else that [`is_transient`] accepts is still retried once, and the chain
+/// after stage 1 is untouched (the fail-closed rule is about which stages may
+/// answer, not about how the refused protected leg is counted).
+fn is_permission_denied(error: &io::Error) -> bool {
+    error.to_string().contains("errno=1 (")
+}
+
+/// The `retry-skipped` evidence line is emitted ONCE per process: an EPERM
+/// outage produced 638 such failures on the phone in one capture, and hundreds
+/// of identical lines would drown the per-attempt `protected-dns:` lines that
+/// the count itself comes from. One line proves the new branch ran; the missing
+/// `source=protected-retry` lines prove the retry did not.
+fn retry_skip_line_once() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    !REPORTED.swap(true, Ordering::Relaxed)
 }
 
 pub fn parse_servers(json: &str) -> Result<Vec<Ipv4Addr>, &'static str> {
@@ -245,7 +292,9 @@ pub(crate) async fn resolve_on_port(host: &str, supply: &Arc<SocketSupply>, port
 ///
 /// Order (fixed, and the reason the chain is written linearly):
 ///   1. the protected path over the shell-fed server list — the primary;
-///   2. N2(a): ONE retry through the same path when the failure was transient;
+///   2. N2(a): ONE retry through the same path when the failure was transient,
+///      except EPERM (0.0.50: the retry was EPERM again 185/185 phone, 184/184
+///      PC — pure latency);
 ///   3. N2(b): the OS/system resolver (`getaddrinfo`, bounded);
 ///   4. N2(c): the supply's last-known-good address for this host.
 ///
@@ -295,8 +344,8 @@ pub(crate) async fn resolve_chain_traced(
     // failure of the chain (N3's per-syscall token).
     let mut protected_error = last.to_string();
 
-    // Stage 2 (N2a) — one retry, transient failures only.
-    if is_transient(&last) {
+    // Stage 2 (N2a) — one retry, transient failures only, never for EPERM.
+    if is_transient(&last) && !is_permission_denied(&last) {
         match resolve_on_servers(host, supply, servers).await {
             Ok(ip) => {
                 supply.remember_address(host, ip);
@@ -313,6 +362,18 @@ pub(crate) async fn resolve_chain_traced(
                 last = error;
             }
         }
+    }
+
+    // 0.0.50 (dns-eperm): EPERM is classified transient but is NOT retried —
+    // the retry reproduced errno=1 on 185/185 phone and 184/184 PC attempts,
+    // so it only delays the stages that can answer. One line per process
+    // (see `retry_skip_line_once`) records that the skip ran; the protected
+    // leg's own result line still carries `errno=1`, which is where the count
+    // comes from.
+    if is_transient(&last) && is_permission_denied(&last) && retry_skip_line_once() {
+        lines.push(format!(
+            "protected-dns: retry-skipped host={host} reason={last} elapsed_ms={}",
+            elapsed(&started)));
     }
 
     // Stage 3 (N2b) — the OS/system resolver.
@@ -512,6 +573,7 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::UdpSocket as AsyncUdpSocket;
 
     fn answer(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
@@ -558,6 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn protected_fd_queries_fake_server() {
+        let _guard = crate::n2_stimulus::test_guard();
         let server = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = match server.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
         let supply = Arc::new(SocketSupply::new());
@@ -575,6 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn retries_after_timeout_with_fresh_fd() {
+        let _guard = crate::n2_stimulus::test_guard();
         let silent = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let responder = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let first = match silent.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
@@ -594,6 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_supply_and_missing_servers_send_nothing() {
+        let _guard = crate::n2_stimulus::test_guard();
         let server = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = match server.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
         let supply = Arc::new(SocketSupply::new());
@@ -737,10 +802,131 @@ mod tests {
         assert!(!is_transient(&io::Error::other("dns:no-a-record")));
     }
 
+    // ---------------- 0.0.50: EPERM is not retried (dns-eperm) --------------
+
+    /// 0.0.50: EPERM (errno=1) is the one transient refusal the retry must
+    /// skip, from ANY of the three syscall tokens — and `errno=10 (` (ECHILD)
+    /// must not be mistaken for it.
+    #[test]
+    fn only_errno_one_counts_as_permission_denied() {
+        let _guard = crate::n2_stimulus::test_guard();
+        for call in ["connect", "send", "recv"] {
+            let error = syscall_error(call, io::Error::from_raw_os_error(1));
+            assert!(error.to_string().contains("errno=1 ("), "{error}");
+            assert!(is_permission_denied(&error), "{call} EPERM must skip the retry");
+        }
+        // `errno=1` is a PREFIX of `errno=10`; only the whole `errno=1 (` token
+        // may match, so an ECHILD failure keeps its retry.
+        let echild = io::Error::other("dns:recv-failed errno=10 (No child processes (os error 10))");
+        assert!(!is_permission_denied(&echild));
+        assert!(!is_permission_denied(&syscall_error("send", io::Error::from_raw_os_error(13))));
+        assert!(!is_permission_denied(&io::Error::other("socket-protect-failed")));
+        assert!(!is_permission_denied(&io::Error::other("dns:timeout")));
+    }
+
+    /// Make the syscall failures of THIS test thread report EPERM (see the
+    /// `FORCE_EPERM` test seam); production never sets it.
+    fn force_eperm(on: bool) {
+        FORCE_EPERM.with(|force| force.set(on));
+    }
+
+    /// Serve protected requests until `stop` is set, returning how many were
+    /// served. Unlike the fixed-count providers, this can ASSERT the attempt
+    /// count without hanging when the code under test — correctly — asks for
+    /// fewer sockets than the test's upper bound.
+    async fn serve_until_stopped(
+        supply: Arc<SocketSupply>,
+        stop: Arc<AtomicBool>,
+        fd_of: fn() -> OwnedFd,
+    ) -> usize {
+        let mut served = 0;
+        loop {
+            if let Some((id, purpose)) = supply.poll_request() {
+                assert_eq!(purpose, Purpose::Dns);
+                let fd = fd_of();
+                assert!(supply.reply(id, fd.as_raw_fd(), "protected").contains("true"));
+                served += 1;
+                continue;
+            }
+            if stop.load(Ordering::SeqCst) { return served; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// 0.0.50: EPERM on the FIRST attempt is not retried — the supply is
+    /// requested exactly ONCE — and the chain still falls through to the OS
+    /// resolver, which answers.
+    #[tokio::test]
+    async fn eperm_first_attempt_is_not_retried_and_os_resolver_still_answers() {
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("os-fallback.test", &supply, &[unreached()], os_resolves_the_test_host).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 1, "EPERM must not be retried (one supply request)");
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
+        assert!(lines.iter().all(|l| !l.contains("source=protected-retry")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("source=os-resolver ip=198.51.100.7")), "{lines:?}");
+        force_eperm(false);
+    }
+
+    /// 0.0.50: with EPERM the chain still walks stage 4 (last-known-good) and,
+    /// when that is empty too, reports the protected EPERM in the aggregate.
+    /// Both legs cost exactly ONE supply request.
+    #[tokio::test]
+    async fn eperm_still_reaches_last_known_good_and_exhaustion() {
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+
+        let cached = Arc::new(SocketSupply::new());
+        cached.remember_address("cached.test", Ipv4Addr::new(203, 0, 113, 9));
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(cached.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("cached.test", &cached, &[unreached()], os_failing).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 1, "EPERM must not be retried (one supply request)");
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(203, 0, 113, 9));
+        assert!(lines.iter().any(|l| l.contains("source=last-known-good ip=203.0.113.9")), "{lines:?}");
+
+        let dead = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(dead.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) = resolve_chain_traced("dead.test", &dead, &[unreached()], os_failing).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 1, "EPERM must not be retried (one supply request)");
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.starts_with("dns:fallbacks-exhausted"), "{error}");
+        assert!(error.contains("protected=dns:connect-failed errno=1 ("), "{error}");
+        assert!(error.contains("os=dns:os-resolver-failed"), "{error}");
+        assert!(lines.iter().all(|l| !l.contains("source=protected-retry")), "{lines:?}");
+        force_eperm(false);
+    }
+
+    /// 0.0.50 control: a NON-EPERM syscall refusal (EINVAL here) still earns
+    /// the one retry — exactly TWO supply requests.
+    #[tokio::test]
+    async fn a_non_eperm_syscall_refusal_is_still_retried_once() {
+        let _guard = crate::n2_stimulus::test_guard();
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("os-fallback.test", &supply, &[unreached()], os_resolves_the_test_host).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 2, "a non-EPERM syscall refusal still retries once");
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
+        assert!(lines.iter().any(|l| l.contains("source=protected-retry")), "{lines:?}");
+    }
+
     /// N2: the protected path refuses (both the attempt and its retry) → the OS
     /// resolver answers.
     #[tokio::test]
     async fn a_protected_refusal_falls_back_to_the_os_resolver() {
+        let _guard = crate::n2_stimulus::test_guard();
         let supply = Arc::new(SocketSupply::new());
         let provider = tokio::spawn(supply_requests(supply.clone(), 2, false));
         let (outcome, lines) =
@@ -757,6 +943,7 @@ mod tests {
     /// answers, and the lookup is NOT empty.
     #[tokio::test]
     async fn the_last_known_address_is_the_final_fallback() {
+        let _guard = crate::n2_stimulus::test_guard();
         let supply = Arc::new(SocketSupply::new());
         supply.remember_address("cached.test", Ipv4Addr::new(203, 0, 113, 9));
         let provider = tokio::spawn(supply_requests(supply.clone(), 2, false));
@@ -771,6 +958,7 @@ mod tests {
     /// line carries the per-syscall token of the last protected failure.
     #[tokio::test]
     async fn all_fallbacks_failing_return_empty_with_the_syscall_token() {
+        let _guard = crate::n2_stimulus::test_guard();
         let supply = Arc::new(SocketSupply::new());
         let provider = tokio::spawn(supply_requests_with(supply.clone(), 2, unix_dgram_fd));
         let (outcome, lines) =
@@ -793,6 +981,7 @@ mod tests {
     /// protected answer (no fallback line).
     #[tokio::test]
     async fn a_protected_success_is_remembered_as_the_last_known_address() {
+        let _guard = crate::n2_stimulus::test_guard();
         let server = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = match server.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
         let supply = Arc::new(SocketSupply::new());

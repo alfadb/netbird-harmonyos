@@ -115,6 +115,21 @@ function fieldOf(line: string, key: string): string {
   const hit = line.split('|').find((f: string): boolean => f.indexOf(key + '=') === 0);
   return hit === undefined ? '' : hit.slice(key.length + 1);
 }
+// 0.0.50 C: the diagnostics writer's `event` calls (recorded by the shim below),
+// so a persistent `vpn_recovery_stage` record is assertable on the host.
+function diagEvents(): Record<string, unknown>[] {
+  return (G['__NB_DIAG_EVENTS'] as Record<string, unknown>[]) ?? [];
+}
+function resetDiagEvents(): void {
+  G['__NB_DIAG_EVENTS'] = [];
+}
+function stageRecorded(stage: string, result: string): boolean {
+  return diagEvents().some((e: Record<string, unknown>): boolean => {
+    const fields: Record<string, string> = (e['fields'] as Record<string, string>) ?? {};
+    return e['name'] === 'vpn_recovery_stage' && fields['stage'] === stage &&
+      fields['result'] === result;
+  });
+}
 // The level the recording hilog stub prefixes each line with ('[W] ' etc.).
 function levelLoggedWarn(prefix: string): boolean {
   return logs().some((l: string): boolean => l.indexOf('[W] ' + prefix) === 0);
@@ -254,10 +269,19 @@ try {
         .join('\n') + '\n');
   }
   // The two platform-IO siblings the REAL extension imports by value are bridged
-  // with no-op modules (host-checked by their own suites, never here).
+  // with no-op modules (host-checked by their own suites, never here). The
+  // diagnostics `event` is NOT dropped: 0.0.50 C's persistent last-known-good
+  // evidence is a `vpn_recovery_stage` event, so every call is recorded in
+  // globalThis.__NB_DIAG_EVENTS for the assertions below (production code and
+  // its real writer are untouched).
   writeFileSync(join(dir, 'NetBirdDiagnostics.shim.ts'),
     'export const start = () => undefined;\n' +
-    'export const event = () => false;\n' +
+    'export const event = (name, fields) => {\n' +
+    '  const g = globalThis;\n' +
+    '  g.__NB_DIAG_EVENTS = g.__NB_DIAG_EVENTS || [];\n' +
+    '  g.__NB_DIAG_EVENTS.push({ name: name, fields: fields });\n' +
+    '  return false;\n' +
+    '};\n' +
     'export const appendSystemEvent = () => false;\n' +
     'export const stop = () => undefined;\n');
   writeFileSync(join(dir, 'NetBirdSystemEvents.shim.ts'),
@@ -313,7 +337,9 @@ try {
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
   resetSupply();
   resetLog();
-  const live = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good address for this group — it measures the
+  // protected-DNS abort path itself (the fallback is group K's subject).
+  const live = recoveryAbility(mod, 101, FakeConnection, '');
   (live['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 314, 314);
   await sleepMs(300);
@@ -390,7 +416,9 @@ try {
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
   resetSupply();
   resetLog();
-  const stuck = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good — the recovery must keep failing so the
+  // retry window stays measurable.
+  const stuck = recoveryAbility(mod, 101, FakeConnection, '');
   stuck['lanRoamArmed'] = false;
   (stuck['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 314, 314);
@@ -582,7 +610,9 @@ try {
   await sleepMs(300);
   resetLog();
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
-  const n1 = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good — this group measures the empty-resolution
+  // abort and the retry that follows it.
+  const n1 = recoveryAbility(mod, 101, FakeConnection, '');
   n1['lanRoamArmed'] = false;
   (n1['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 514, 514);
@@ -711,6 +741,85 @@ try {
     pdnsText.includes('dns:{call}-failed errno={errno} ({error})'));
   check('J3 the OS resolver is no longer a hard OHOS error (N2b)',
     !iceText.includes('return Err(fail("stun:protected-dns-required".into()));'));
+
+  // -------------------------------------------------------------------------
+  // K. 0.0.50 C (10-19 02:52–03:13): the protected resolver can fail for a
+  // whole window while this process already owns a dial address. A recovery
+  // round must use that last-known-good address instead of aborting until the
+  // system resolver returns.
+  // -------------------------------------------------------------------------
+  seedCellular(614, '10.41.63.59');
+  await sleepMs(300); // let any earlier group's resolver await land
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const lkg = recoveryAbility(mod, 101, FakeConnection); // 203.0.113.9:33073
+  lkg['lanRoamArmed'] = false;
+  (lkg['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 614, 614);
+  await sleepMs(400);
+  const k1Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '614');
+  const k1Recovered = lastLine('VPN_NETWORK_RECOVERED|');
+  check('K1 an empty resolution falls back to the last-known-good address: NO protected-dns ' +
+    'abort, the recovery COMPLETES',
+    k1Aborts.length === 0 && k1Recovered.indexOf('netId=614') > 0 &&
+    supplyOf('WG_FEED') === 1 && supplyOf('MGMT_ADDR') === 1,
+    JSON.stringify({ aborts: k1Aborts, recovered: k1Recovered }));
+  check('K2 the fallback is a PERSISTENT vpn_recovery_stage record ' +
+    '(stage=mgmt-dns result=last-known-good)',
+    stageRecorded('mgmt-dns', 'last-known-good') && !stageRecorded('mgmt-dns', 'ok'),
+    JSON.stringify(diagEvents().filter((e: Record<string, unknown>): boolean =>
+      e['name'] === 'vpn_recovery_stage')));
+
+  // A mismatched port is NOT the frozen management endpoint: still fail closed.
+  seedCellular(714, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const badPort = recoveryAbility(mod, 101, FakeConnection, '203.0.113.9:33074');
+  badPort['lanRoamArmed'] = false;
+  (badPort['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 714, 714);
+  await sleepMs(300);
+  const k3Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '714');
+  check('K3 a last-known-good address on ANOTHER port is refused: protected-dns still aborts',
+    k3Aborts.length === 1 && k3Aborts[0].indexOf('|stage=protected-dns|') > 0 &&
+    !stageRecorded('mgmt-dns', 'last-known-good'),
+    JSON.stringify({ aborts: k3Aborts }));
+
+  // No address at all (the very first session before any resolution) is the
+  // same fail-closed path.
+  seedCellular(814, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const noAddr = recoveryAbility(mod, 101, FakeConnection, '');
+  noAddr['lanRoamArmed'] = false;
+  (noAddr['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 814, 814);
+  await sleepMs(300);
+  const k4Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '814');
+  check('K4 no last-known-good address at all still aborts protected-dns',
+    k4Aborts.length === 1 && k4Aborts[0].indexOf('|stage=protected-dns|') > 0 &&
+    !stageRecorded('mgmt-dns', 'last-known-good'),
+    JSON.stringify({ aborts: k4Aborts }));
+
+  check('K5 the chase falls back only via managementLastKnownIp (IPv4 literal + same port) and ' +
+    'records it once',
+    extText.includes('let managementIp: string = await this.recoveryAwait(') &&
+    recoveryBody.includes('managementIp = this.managementLastKnownIp();') &&
+    recoveryBody.includes("this.recoveryStageRecord('mgmt-dns', 'last-known-good');") &&
+    extText.includes('private managementLastKnownIp(): string {') &&
+    extText.includes("if (addr.slice(colon + 1) !== String(this.managementEndpoint.port)) " +
+      "{ return ''; }") &&
+    extText.includes("return isIPv4Literal(ip) ? ip : '';") &&
+    extText.includes('function isIPv4Literal(host: string): boolean {'));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

@@ -535,6 +535,10 @@ try {
     // 2026-10-13 device report §D: the effective tunnel MTU and its provenance
     // (default vs network-map), once per config build.
     ['vpn_tunnel_mtu', ['stage', 'mtu', 'source']],
+    // 0.0.50 recovery leg: the awaited step's outcome (ok/timeout, one record
+    // per step) and the retry's silent early-return reason (once per epoch).
+    ['vpn_recovery_stage', ['stage', 'result']],
+    ['vpn_recovery_skip', ['reason']],
     // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the extension's
     // publication stamp + the core's edge revision + the two peer counts the F5
     // label change moves — one record per REAL write (the debounce above folds
@@ -881,8 +885,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 20 reviewed names / 25 helper calls',
-    milestones.length === 20 && extText.split('this.diagMilestone(').length === 26);
+  check('the wired milestone surface is exactly the 22 reviewed names / 27 helper calls',
+    milestones.length === 22 && extText.split('this.diagMilestone(').length === 28);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

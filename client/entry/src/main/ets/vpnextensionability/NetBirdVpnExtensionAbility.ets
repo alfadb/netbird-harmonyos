@@ -261,6 +261,14 @@ const LAN_ROAM_STABLE_MS: number = 2500;
 // storm (the capture already dropped 0.72 % of its lines and every dropped line
 // is lost evidence, REPORT.md §1).
 const PHYSICAL_RECOVERY_RETRY_MIN_MS: number = 15000;
+// 0.0.50 A (10-18/19 capture Q2/Q3): ONE physical-recovery attempt stalled past
+// its own abort — 89.0 min in Q2 (the attempt sat after the mux was armed while
+// `networkRecoveryActive` stayed true, so all 5 s retries returned silently) and
+// 20.6 min in Q3 (protected-DNS). The stages' awaits (resolve / protect / mux
+// arm / feed) had no bound at all. Every stage await of the chase now races this
+// box: a hang costs at most this window, then the EXISTING abort stage token is
+// reported and the retry takes over. No new abort token is introduced.
+const RECOVERY_STAGE_TIMEOUT_MS: number = 15000;
 // N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
 // evidence collector. The file only carries NON-SENSITIVE window options; its
 // EXISTENCE is the arm request. No arm file ⇒ the collector stays inert.
@@ -833,6 +841,29 @@ function capabilityNumbers(caps: number[] | undefined): number[] {
   return out;
 }
 
+// 0.0.50 C: bare IPv4 dotted-quad literal check — the same shape the
+// connector uses at its resolve entry (digits only, 0-255 per octet). The
+// recovery's last-known-good fallback must never hand the core a hostname or a
+// malformed address as a dial target.
+function isIPv4Literal(host: string): boolean {
+  const octets: string[] = host.split('.');
+  if (octets.length !== 4) {
+    return false;
+  }
+  return octets.every((o: string): boolean => {
+    if (o.length === 0 || o.length > 3) {
+      return false;
+    }
+    for (let i = 0; i < o.length; i++) {
+      const code: number = o.charCodeAt(i);
+      if (code < 0x30 || code > 0x39) {
+        return false;
+      }
+    }
+    return Number(o) <= 255;
+  });
+}
+
 // The `netbird-logout` ticket body is `{"issued_at_ms":<ms>}` — the UI's
 // wall-clock stamp used only for the freshness bound (a leftover ticket must
 // never tear a LATER session down). Anything that does not parse to a
@@ -979,6 +1010,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N1(ii): de-duplicates the cheap "already flowing" attempt outcome so a
   // healthy tunnel does not print one line per tick.
   private lastRecoveryOutcome: string = '';
+  // 0.0.50 A (10-18/19 capture Q2): why a 5 s watcher tick did NOT attempt a
+  // recovery — the same "why did nothing happen?" gap the abort stages closed.
+  // One record per reason per network EPOCH: the tick repeats every 5 s, so a
+  // per-tick line would be a storm, while a per-process latch would hide the
+  // blockers of the NEXT generation.
+  private recoverySkipReasons: Set<string> = new Set<string>();
+  private recoverySkipEpoch: number = -1;
   // F4 callback semantics (REPORT.md §5): the first observation after
   // `watchPhysicalNetwork()` subscribes is not a switch, and the capability set
   // of the default handle is the dedupe key for a capability-change trigger.
@@ -1871,6 +1909,56 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagLifecycleMarker('VPN_NETWORK_RECOVERY_ABORT', `stage=${stage}`);
   }
 
+  // 0.0.50 A: bound ONE stage await of the recovery chase. On box expiry the
+  // stage is persisted with result=timeout (the record that separates a HANG
+  // from a refusal; REPORT.md Q2/Q3 had neither) and the fallback value is
+  // returned, so the caller's OWN check reports the EXISTING abort stage token
+  // and breaks/continues — no new token, no new control-flow edge. The box is
+  // cleared as soon as the race settles, so no stale timer outlives its stage.
+  private async recoveryAwait<T>(stage: string, fallback: T, work: Promise<T>): Promise<T> {
+    let boxTimer: number = -1;
+    const box: Promise<T> = new Promise<T>((resolve: (value: T) => void): void => {
+      boxTimer = setTimeout((): void => {
+        this.recoveryStageRecord(stage, 'timeout');
+        resolve(fallback);
+      }, RECOVERY_STAGE_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([work, box]);
+    } finally {
+      if (boxTimer !== -1) { clearTimeout(boxTimer); }
+    }
+  }
+
+  // 0.0.50 A: one per-step boundary record — `stage` names the step and `result`
+  // is `ok` (completed) or `timeout` (the watchdog cut it). Same persistent
+  // diagnostics/tee path as every other milestone above, so the next capture can
+  // read the step a recovery reached instead of inferring it from a missing line.
+  private recoveryStageRecord(stage: string, result: string): void {
+    const milestoneFields: DiagFields = { 'stage': stage, 'result': result };
+    this.diagMilestone('vpn_recovery_stage', milestoneFields);
+  }
+
+  // 0.0.50 C (10-19 02:52-03:13, 22 m without a reconnect): the protected
+  // resolver can fail for a whole window (EPERM + OS-resolver timeout), and
+  // every recovery round used to abort on it until the system resolver came
+  // back. `managementDialAddr` already holds the address THIS process last
+  // resolved and installed — the start leg's `connectAddr` and every completed
+  // recovery's new address — so a round that cannot resolve can still dial the
+  // last-known-good address and finish. Only a well-formed IPv4 literal on the
+  // SAME frozen management port qualifies; a stale address is bounded by the
+  // core's own dial failure/retry and the 15 s recovery retry loop. Not
+  // persisted: a process restart re-resolves and starts from ''.
+  private managementLastKnownIp(): string {
+    const addr: string = this.managementDialAddr;
+    if (this.managementEndpoint === undefined) { return ''; }
+    const colon: number = addr.lastIndexOf(':');
+    if (colon <= 0) { return ''; }
+    if (addr.slice(colon + 1) !== String(this.managementEndpoint.port)) { return ''; }
+    const ip: string = addr.slice(0, colon);
+    return isIPv4Literal(ip) ? ip : '';
+  }
+
   // F2 (v0.0.27 outage REPORT.md §5): the recovery had NO owner and NO retry —
   // its only callers were EDGES (the switch, the recreate finally, the startup
   // settle, the N2 evidence step, its own pending re-entry), so one aborted
@@ -1900,24 +1988,46 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private retryPhysicalNetworkRecovery(): void {
     if (this.destroyRequested || this.networkRecoveryActive ||
       this.recreateInFlight || !this.networkRecoveryReady) {
+      this.noteRecoverySkip(this.destroyRequested ? 'destroy' :
+        this.networkRecoveryActive ? 'active' :
+          this.recreateInFlight ? 'recreate' : 'not-ready');
       return;
     }
     const now: number = Date.now();
     const unhealthy: boolean = this.connectorNeedsRecovery() && this.connectorDownSinceMs > 0 &&
       now - this.connectorDownSinceMs >= PHYSICAL_RECOVERY_RETRY_MIN_MS;
     if (!this.recoveryRetryArmed && !unhealthy) {
+      this.noteRecoverySkip('not-armed');
       return;
     }
     if (this.n2CdProductionBlocked() || physicalDefaultNetId() === 0) {
+      this.noteRecoverySkip('production-gate-or-net0');
       return;
     }
     if (now - this.recoveryRetryAtMs < PHYSICAL_RECOVERY_RETRY_MIN_MS) {
+      this.noteRecoverySkip('15s-floor');
       return;
     }
     this.recoveryRetryAtMs = now;
     this.recoverPhysicalNetwork().catch((error: Error): void => {
       this.n2NetworkRecoveryFail(error);
     });
+  }
+
+  // 0.0.50 A (10-18/19 capture Q2): the retry's four early returns above were
+  // silent — the other half of "why did nothing retry for 89 min?". One record
+  // per reason per network epoch; the tick repeats every 5 s, so the same reason
+  // is recorded once (a per-tick line would be a storm) and a NEW epoch clears
+  // the set so the next generation's own blockers are reported again.
+  private noteRecoverySkip(reason: string): void {
+    if (this.recoverySkipEpoch !== this.networkEpoch) {
+      this.recoverySkipEpoch = this.networkEpoch;
+      this.recoverySkipReasons = new Set<string>();
+    }
+    if (this.recoverySkipReasons.has(reason)) { return; }
+    this.recoverySkipReasons.add(reason);
+    const milestoneFields: DiagFields = { 'reason': reason };
+    this.diagMilestone('vpn_recovery_skip', milestoneFields);
   }
 
   // N1(ii): the cheap "the VPN is connected and traffic flows" reading of the
@@ -2004,10 +2114,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.recoveryAbort('physical-dns', netId, epoch);
           break;
         }
-        const managementIp: string = await resolveProtectedIp(this.managementEndpoint.host);
+        let managementIp: string = await this.recoveryAwait('mgmt-dns', '',
+          resolveProtectedIp(this.managementEndpoint.host));
         if (managementIp.length === 0) {
-          this.recoveryAbort('protected-dns', netId, epoch);
-          break;
+          // 0.0.50 C: the resolver failed THIS round, but the address this
+          // process last installed is still a valid dial target — use it
+          // instead of aborting the whole recovery (10-19: 22 m of aborts).
+          managementIp = this.managementLastKnownIp();
+          if (managementIp.length === 0) {
+            this.recoveryAbort('protected-dns', netId, epoch);
+            break;
+          }
+          this.recoveryStageRecord('mgmt-dns', 'last-known-good');
+        } else {
+          this.recoveryStageRecord('mgmt-dns', 'ok');
         }
         const addr: string = `${managementIp}:${this.managementEndpoint.port}`;
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
@@ -2018,12 +2138,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.recoveryAbort('wg-socket-open', netId, epoch);
           break;
         }
+        this.recoveryStageRecord('wg-open', 'ok');
         let adopted: boolean = false;
         try {
-          if (!await this.protectSocketWithBox(vpn, opened.fd, 'Wb')) {
+          if (!await this.recoveryAwait('wg-protect', false,
+            this.protectSocketWithBox(vpn, opened.fd, 'Wb'))) {
             this.recoveryAbort('wg-protect', netId, epoch);
             break;
           }
+          this.recoveryStageRecord('wg-protect', 'ok');
           if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
             this.connection !== vpn) { continue; }
           const fed: WgFeedResult = connectorWgSocketFeed(opened.fd);
@@ -2031,6 +2154,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
             this.recoveryAbort('wg-feed', netId, epoch);
             break;
           }
+          this.recoveryStageRecord('wg-feed', 'ok');
           adopted = true;
           const oldFd: number = this.outboundSocketFd;
           this.outboundSocketFd = -1;
@@ -2045,6 +2169,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.recoveryAbort('management-address', netId, epoch);
           break;
         }
+        this.recoveryStageRecord('mgmt-address', 'ok');
         // F3: the address that just reached the core is the one the network-change
         // seam must carry from now on (see notifyCoreNetworkChanged).
         this.managementDialAddr = addr;
@@ -2053,25 +2178,29 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.recoveryAbort('dns-feed', netId, epoch);
           break;
         }
+        this.recoveryStageRecord('dns-feed', 'ok');
         // STAGE 3: the ONE shared socket for the NEW network generation. The WG
         // outer socket was opened, protected and fed a few lines above (the
         // device re-attached to it); the mux is armed OVER that same device
         // socket here — one open+bind+protect for ICE and WG together. The core
         // replaces the mux slot and renegotiates the sessions that rode the old
         // one (its reader thread is stopped and its dup closed with it).
-        if (!await this.armIceMux()) {
+        if (!await this.recoveryAwait('ice-mux', false, this.armIceMux())) {
           this.recoveryAbort('ice-mux', netId, epoch);
           break;
         }
+        this.recoveryStageRecord('ice-mux', 'ok');
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         if (this.signalUri.length > 0) {
           const endpoint: ManagementEndpoint = parseSignalEndpoint(this.signalUri, 443);
-          const signalIp: string = await resolveProtectedIp(endpoint.host);
+          const signalIp: string = await this.recoveryAwait('signal-resolve', '',
+            resolveProtectedIp(endpoint.host));
           if (signalIp.length === 0) {
             this.recoveryAbort('signal-resolve', netId, epoch);
             break;
           }
+          this.recoveryStageRecord('signal-resolve', 'ok');
           if (epoch !== this.networkEpoch) { continue; }
           const signalAddr: string = `${signalIp}:${endpoint.port}`;
           const sock: NativeTcpSocketOpen = mgmtSocketOpen();
@@ -2080,9 +2209,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
             this.recoveryAbort('signal-socket-open', netId, epoch);
             break;
           }
+          this.recoveryStageRecord('signal-socket', 'ok');
           let signalFed: boolean = false;
           try {
-            if (await this.protectSocketWithBox(vpn, sock.fd, 'S') &&
+            if (await this.recoveryAwait('signal-feed', false,
+              this.protectSocketWithBox(vpn, sock.fd, 'S')) &&
               epoch === this.networkEpoch && !this.destroyRequested && !this.recreateInFlight &&
               this.connection === vpn && !this.n2CdProductionBlocked(epoch)) {
               signalFed = connectorSignalFeed(sock.fd, signalAddr).ok;
@@ -2092,11 +2223,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
             this.recoveryAbort('signal-feed', netId, epoch);
             break;
           }
+          this.recoveryStageRecord('signal-feed', 'ok');
         }
-        if (!await this.feedSpareProtectedSocket(vpn, epoch)) {
+        if (!await this.recoveryAwait('spare', false,
+          this.feedSpareProtectedSocket(vpn, epoch))) {
           this.recoveryAbort('spare-socket', netId, epoch);
           break;
         }
+        this.recoveryStageRecord('spare', 'ok');
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         this.networkDirty = false;

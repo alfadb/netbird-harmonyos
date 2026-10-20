@@ -9630,6 +9630,12 @@ mod tests {
     /// sections stay captured while the connector slot is busy.
     #[tokio::test(flavor = "multi_thread")]
     async fn resource_status_reports_busy_leaves_as_null_and_never_blocks() {
+        // This test parks a LIVE handle in the process-global connector slot
+        // (phase 2) and clears it at the end. The NAPI route tests assert the
+        // documented `no-connector` answer against that same slot, so a
+        // concurrent window here made them answer `ok:true` spuriously. Hold
+        // the shared lib-test lock those tests hold, for the whole test.
+        let _quiet = ring_quiet();
         struct BusyProbeFactory;
         impl ManagementFactory for BusyProbeFactory {
             fn connect(
