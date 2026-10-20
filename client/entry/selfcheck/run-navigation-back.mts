@@ -32,7 +32,7 @@ const systemBack = sliceFrom(PAGE, 'onBackPress(): boolean', 'build() {');
 const homeDetailEntry = sliceFrom(PAGE, "UI_DETAIL_STATUS_OPENED|from=home", '.width(100%)');
 const settingsDetailEntry = sliceFrom(PAGE, "this.detailStatusOriginTab = 2;", '});');
 const detailView = sliceFrom(PAGE, 'detailStatusView() {', '@Builder\n  settingsTab()');
-const peerView = sliceFrom(PAGE, 'peersTab() {', '// ---- 设置');
+const peerView = sliceFrom(PAGE, 'peerDetailBody() {', 'peersTab() {');
 // 路由选择 (the internal settings page): its builder and the settings entry.
 const routeView = sliceFrom(PAGE, '@Builder\n  routeSelectionView() {',
   'private openRouteSelection(): void');
@@ -64,9 +64,24 @@ check('configured edit cancels before detail; unconfigured first-run form remain
   navigationBackDecision(false, false, false, true, true, false) === 'cancel-editor' &&
   closeHandler.includes('this.activeTab === 2 && !this.showDiagnostics && this.configured && this.showSetupForm') &&
   navigationBackDecision(false, false, false, false, false, false) === 'exit');
-check('visible peer and detailed-status buttons share the same close helper',
-  peerView.includes('this.closeVisibleSubflow();') && detailView.includes('this.closeVisibleSubflow();') &&
+// 0.0.51: the three back controls are bare arrow glyphs (no filled 返回 button);
+// each one still closes through the SAME helper — no new path into the close logic.
+check('the three back arrows all close through the shared close helper',
+  peerView.includes("Text('‹')") && peerView.includes('this.closeVisibleSubflow();') &&
+  detailView.includes("Text('‹')") && detailView.includes('this.closeVisibleSubflow();') &&
+  routeView.includes("Text('‹')") && routeView.includes('this.closeVisibleSubflow();') &&
+  (PAGE.match(/Text\('‹'\)/g) ?? []).length === 3 &&
+  !PAGE.includes("Button('返回')") &&
   systemBack.includes('return this.closeVisibleSubflow();'));
+// 0.0.51: the settings subpages carry their own title in the back row, so the
+// parent 「设置」 title must NOT render above them (no double title).
+check('settings subpages show only their own title (no parent 设置 title above it)',
+  (() => {
+    const settings = PAGE.slice(PAGE.indexOf('settingsTab() {'),
+      PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
+    return settings.includes('if (!this.showDiagnostics && !this.routeSelectionOpen) {') &&
+      settings.indexOf("Text('设置')") < settings.indexOf('if (this.showDiagnostics) {');
+  })());
 check('root back is not trapped', systemBack.includes('return this.closeVisibleSubflow();') &&
   closeHandler.includes('return false;'));
 // ---- 路由选择 (2026-10-09): an internal SETTINGS page ------------------------

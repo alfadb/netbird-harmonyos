@@ -238,12 +238,18 @@ try {
     ['the 全部启用 / 全部停用 buttons (38 vp)',
       "        Button('全部启用')\n          .fontSize(TYPE_CAPTION_FP)\n" +
       '          .maxFontScale(TYPE_SCALE_MAX_ROW)\n          .height(38)'],
-    ['the peer detail\'s 返回 (40 vp)',
-      "          Button('返回')\n            .fontSize(TYPE_BODY_FP)\n" +
-      '            .maxFontScale(TYPE_SCALE_MAX_ROW)\n            .height(40)'],
-    ['the 详细状态 / 路由选择 返回 buttons (36 vp)',
-      "        Button('返回')\n          .fontSize(TYPE_BODY_FP)\n" +
-      '          .maxFontScale(TYPE_SCALE_MAX_ROW)\n          .height(36)'],
+    ['the peer detail\'s back arrow (40 vp tap target)',
+      "          Row() {\n            Text('‹')\n" +
+      '              .fontSize(TYPE_PAGE_TITLE_FP)\n              .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
+      '              .fontWeight(FontWeight.Medium)\n' +
+      "              .fontColor($r('app.color.nb_text_primary'))\n" +
+      '          }\n          .height(40)'],
+    ['the 详细状态 / 路由选择 back arrows (40 vp tap targets)',
+      "        Row() {\n          Text('‹')\n" +
+      '            .fontSize(TYPE_PAGE_TITLE_FP)\n            .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
+      '            .fontWeight(FontWeight.Medium)\n' +
+      "            .fontColor($r('app.color.nb_text_primary'))\n" +
+      '        }\n        .height(40)'],
     ['the search field (42 vp)',
       "          TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })\n" +
       '            .fontSize(TYPE_BODY_FP)\n            .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
@@ -262,6 +268,15 @@ try {
     const text = row.length === 2 ? row[1] : [row[1], ...row.slice(2)].join('\n');
     check(`C: ${row[0]} carries TYPE_SCALE_MAX_ROW`, PAGE.includes(text));
   }
+
+  // 0.0.51: the three back controls are bare arrow glyphs, not filled 返回 buttons
+  // — and the two settings subpage arrows are the SAME 40 vp tap target.
+  check('C: the three back controls are arrow glyphs with no filled 返回 button left',
+    (PAGE.match(/Text\('‹'\)/g) ?? []).length === 3 &&
+    !PAGE.includes("Button('返回')"));
+  check('C: both settings subpage back arrows carry the same 40 vp tap target',
+    (PAGE.split("            .fontColor($r('app.color.nb_text_primary'))\n" +
+      '        }\n        .height(40)').length - 1) === 2);
 
   // THE GROW DECISIONS. The two multi-line row kinds are minHeight, so a large
   // scale makes them taller and the list/scroll absorbs it; the disclosure chevrons

@@ -4772,6 +4772,33 @@ struct Index {
     requestQuit(host, reason);
   }
 
+  // 设置 → 应用 → 退出应用 is irreversible (the tunnel goes down, the borrowed
+  // keep-alive task is released and the process ends), so it gets the same one-step
+  // confirmation as 注销 (requestLogout): 取消 is the primary button and the
+  // dangerous action is the secondary one in the error role. The tray 退出 and the
+  // window X keep their own behaviour: the tray row is a synchronous platform
+  // callback that arrives with the page already hidden, so a dialog could never be
+  // answered there. UIContext.showAlertDialog is the API-18+ replacement for the
+  // global AlertDialog.show (deprecated).
+  private confirmExplicitQuit(): void {
+    this.getUIContext().showAlertDialog({
+      title: '退出应用',
+      message: '将断开 VPN、停止后台保活并结束应用。确定继续？',
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+        }
+      },
+      secondaryButton: {
+        value: '退出并断开',
+        fontColor: $r('app.color.nb_status_error'),
+        action: (): void => {
+          this.beginExplicitQuit(QUIT_REASON_SETTINGS);
+        }
+      }
+    });
+  }
+
   // ---- 诊断日志导出（设置 → 诊断日志）-------------------------------------
   //
   // ONE user action: the system file picker chooses a destination and
@@ -5643,16 +5670,24 @@ struct Index {
       // 对端详情：展示可得的全部字段。
       Column({ space: 8 }) {
         Row({ space: 12 }) {
-          Button('返回')
-            .fontSize(TYPE_BODY_FP)
-            .maxFontScale(TYPE_SCALE_MAX_ROW)
-            .height(40)
-            .backgroundColor($r('app.color.nb_neutral_button_background'))
-            .fontColor($r('app.color.nb_on_neutral_button'))
-            .hoverEffect(HoverEffect.Highlight)
-            .onClick(() => {
-              this.closeVisibleSubflow();
-            })
+          // 0.0.51: the back control is a bare arrow glyph, not a filled 返回
+          // button. This nested Row is only the tap target (40 vp tall, 10 vp
+          // side padding, no fill): what the screen shows is the arrow.
+          Row() {
+            Text('‹')
+              .fontSize(TYPE_PAGE_TITLE_FP)
+              .maxFontScale(TYPE_SCALE_MAX_ROW)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.nb_text_primary'))
+          }
+          .height(40)
+          .padding({ left: 10, right: 10 })
+          .justifyContent(FlexAlign.Center)
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
+          .onClick(() => {
+            this.closeVisibleSubflow();
+          })
           Text('对端详情')
             .fontSize(TYPE_PAGE_TITLE_FP)
             .fontWeight(FontWeight.Medium)
@@ -6387,15 +6422,22 @@ struct Index {
   detailStatusView() {
     Column({ space: 4 }) {
       Row({ space: 12 }) {
-        Button('返回')
-          .fontSize(TYPE_BODY_FP)
-          .maxFontScale(TYPE_SCALE_MAX_ROW)
-          .height(36)
-          .backgroundColor($r('app.color.nb_neutral_button_background'))
-          .fontColor($r('app.color.nb_on_neutral_button'))
-          .onClick(() => {
-            this.closeVisibleSubflow();
-          })
+        // 0.0.51: same arrow back control as 对端详情 (36 vp tap target, no fill).
+        Row() {
+          Text('‹')
+            .fontSize(TYPE_PAGE_TITLE_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.nb_text_primary'))
+        }
+        .height(40)
+        .padding({ left: 10, right: 10 })
+        .justifyContent(FlexAlign.Center)
+        .hoverEffect(HoverEffect.Highlight)
+        .focusable(true)
+        .onClick(() => {
+          this.closeVisibleSubflow();
+        })
         Text('详细状态')
           .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Medium)
@@ -6592,12 +6634,17 @@ struct Index {
   settingsTab() {
     Scroll() {
       Column({ space: 0 }) {
-        Text('设置')
-          .fontSize(TYPE_PAGE_TITLE_FP)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.nb_text_primary'))
-          .width('100%')
-          .margin({ top: 8, bottom: 4 })
+        // 0.0.51: a subpage (详细状态 / 路由选择) carries its own title in the
+        // back row below, so the parent 「设置」 title is not rendered above it —
+        // one title on screen, not two.
+        if (!this.showDiagnostics && !this.routeSelectionOpen) {
+          Text('设置')
+            .fontSize(TYPE_PAGE_TITLE_FP)
+            .fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.nb_text_primary'))
+            .width('100%')
+            .margin({ top: 8, bottom: 4 })
+        }
         if (this.showDiagnostics) {
           this.detailStatusView()
         } else if (this.routeSelectionOpen) {
@@ -6716,7 +6763,7 @@ struct Index {
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
           .onClick(() => {
-            this.beginExplicitQuit(QUIT_REASON_SETTINGS);
+            this.confirmExplicitQuit();
           })
           Text('关闭窗口只是隐藏到后台，连接保持；「退出应用」和状态栏图标菜单里的「退出」都会先断开 VPN 并停止后台保活，再结束应用。')
             .fontSize(TYPE_CAPTION_FP)
@@ -6795,15 +6842,22 @@ struct Index {
   routeSelectionView() {
     Column({ space: 10 }) {
       Row({ space: 12 }) {
-        Button('返回')
-          .fontSize(TYPE_BODY_FP)
-          .maxFontScale(TYPE_SCALE_MAX_ROW)
-          .height(36)
-          .backgroundColor($r('app.color.nb_neutral_button_background'))
-          .fontColor($r('app.color.nb_on_neutral_button'))
-          .onClick(() => {
-            this.closeVisibleSubflow();
-          })
+        // 0.0.51: same arrow back control as 对端详情 (36 vp tap target, no fill).
+        Row() {
+          Text('‹')
+            .fontSize(TYPE_PAGE_TITLE_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.nb_text_primary'))
+        }
+        .height(40)
+        .padding({ left: 10, right: 10 })
+        .justifyContent(FlexAlign.Center)
+        .hoverEffect(HoverEffect.Highlight)
+        .focusable(true)
+        .onClick(() => {
+          this.closeVisibleSubflow();
+        })
         Text('路由选择')
           .fontSize(TYPE_PAGE_TITLE_FP)
           .fontWeight(FontWeight.Medium)
