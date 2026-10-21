@@ -30,15 +30,15 @@
     },
     {
       "name": "nb_text_muted",
-      "value": "#93A4B0"
+      "value": "#97A8B4"
     },
     {
       "name": "nb_border",
-      "value": "#4A5A66"
+      "value": "#5E7080"
     },
     {
       "name": "nb_card_border",
-      "value": "#4A5A66"
+      "value": "#5E7080"
     },
     {
       "name": "nb_primary",
@@ -90,7 +90,7 @@
     },
     {
       "name": "nb_row_divider",
-      "value": "#33414A"
+      "value": "#3D4D57"
     },
     {
       "name": "nb_on_status",

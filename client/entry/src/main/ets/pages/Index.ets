@@ -188,6 +188,7 @@ import {
   OVERVIEW_CONTENT_MAX_WIDTH_VP, OVERVIEW_OFFLINE_MAX_ROWS, OVERVIEW_TILE_HEIGHT_VP,
   OverviewFacts, overviewRowKeys, PANE_DEST_GUIDE,
   PANE_DEST_PEERS, PANE_DEST_SETTINGS, paneLayoutOf,
+  PANE_TRANSITION_MS, PANE_TRANSITION_TRANSLATE_VP, FOCUS_RING_WIDTH_VP,
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
   peerDetailCopyValue, peerDetailIconKind, peerDetailSectionOf, peerFqdnDuplicatesTitle,
   PEER_LIST_CARD_RADIUS_VP, PEER_ROW_CONTENT_PADDING_VP, PEER_ROW_COPY_GLYPH_VP,
@@ -227,6 +228,20 @@ import {
 // area must say what to do.
 const PEER_PANE_HOME_ROUTE: string = 'peerPaneHome';
 const PEER_DETAIL_ROUTE: string = 'peerDetail';
+
+// 0.0.53 — THE ONE SUBPAGE TRANSITION. Every block that appears/disappears as a
+// CONDITION (the peer list ↔ the peer detail, 设置 ↔ 详细状态, 设置 ↔ 路由选择, the
+// guide pane, both empty states) carries this effect, so a page change reads as one
+// motion instead of a hard cut. It is `.transition()` on the CONDITIONAL node, i.e. it
+// runs on mount/unmount only — never on the 1 s status tick, whose re-publish changes
+// values inside nodes that stay mounted. 250 ms with the platform's friction curve:
+// the spring/fling family's "settles, does not bounce" member; the 8 vp rise is the
+// slight lift that says "a new layer came in" without moving the content far.
+function paneTransition(): TransitionEffect {
+  const param: AnimateParam = { duration: PANE_TRANSITION_MS, curve: Curve.Friction };
+  return TransitionEffect.OPACITY.animation(param)
+    .combine(TransitionEffect.translate({ y: PANE_TRANSITION_TRANSLATE_VP }).animation(param));
+}
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -1472,6 +1487,13 @@ struct SettingsRow {
   @Prop tappable: boolean = false;
   @Prop chevron: boolean = false;
   @Prop danger: boolean = false;
+  // 0.0.53 — KEYBOARD FOCUS IS PAINTED. `focusable` alone made the row reachable but
+  // left nothing visible on it (the group card's `.clip(true)` swallows the framework's
+  // default box, and the row's own fill is transparent), so a keyboard user tabbing
+  // through 设置 had no cursor. @State (not @Prop): focus belongs to this row, nobody
+  // else sets it. The ring is a CONSTANT-width border that is transparent until focus,
+  // so gaining focus cannot shift the row's text by 2 vp.
+  @State focused: boolean = false;
   onTap: () => void = (): void => {
   };
 
@@ -1510,6 +1532,23 @@ struct SettingsRow {
     .alignItems(VerticalAlign.Center)
     .hoverEffect(this.tappable ? HoverEffect.Highlight : HoverEffect.None)
     .focusable(this.tappable)
+    // 0.0.53 — the keyboard's answer to hoverEffect: the same visible state on a row
+    // that the TAB key reached. The fill is the selected-row tint (the app's "you are
+    // here" surface) and the ring is the primary role at FOCUS_RING_WIDTH_VP; both are
+    // painted only while `focused`, so a mouse never sees them and blur restores the
+    // row exactly (the border is reserved at all times, width-wise).
+    .backgroundColor(this.focused
+      ? $r('app.color.nb_row_selected_background') : Color.Transparent)
+    .border({
+      width: FOCUS_RING_WIDTH_VP,
+      color: this.focused ? $r('app.color.nb_primary') : Color.Transparent
+    })
+    .onFocus((): void => {
+      this.focused = true;
+    })
+    .onBlur((): void => {
+      this.focused = false;
+    })
     // NOT `.enabled(false)` for a read-only row: the platform's disabled treatment
     // would dim a 关于 row's value, and a read-only row is not a disabled control. The
     // click handler is gated on the same `tappable` flag instead.
@@ -1554,7 +1593,13 @@ struct PaneEmptyState {
   }
 
   build() {
-    Column({ space: 12 }) {
+    // 0.0.53 — THE P0 SCALE, applied to the empty/error block itself: 20 fp title
+    // (TYPE_PAGE_TITLE_FP), the one-sentence body line at 16 fp (TYPE_BODY_FP — it is
+    // the block's 正文, not a caption), the single action's label at 14 fp
+    // (TYPE_CAPTION_FP), 24 vp of padding and one 8-multiple gap (16). Before this the
+    // body was a 14 fp caption (a third size in a three-line block, so the sentence read
+    // as a footnote to the title) and the action was the 16 fp section size.
+    Column({ space: 16 }) {
       // The verdict dot at empty-state scale: a 48 vp disc holding the same 12 vp
       // dot the status cards use, so the block reads as STATE, not as an error.
       Row() {
@@ -1574,14 +1619,14 @@ struct PaneEmptyState {
         .maxLines(2)
         .textAlign(TextAlign.Center)
       Text(this.message)
-        .fontSize(TYPE_CAPTION_FP)
+        .fontSize(TYPE_BODY_FP)
         .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
         .maxLines(4)
         .textAlign(TextAlign.Center)
       if (this.actionLabel.length > 0) {
         Button(this.actionLabel)
-          .fontSize(TYPE_SECTION_TITLE_FP)
+          .fontSize(TYPE_CAPTION_FP)
           .maxFontScale(TYPE_SCALE_MAX_ROW)
           .height(40)
           .width('100%')
@@ -1692,6 +1737,13 @@ struct Index {
   // attribute expression that reads this @State directly, exactly like the status
   // dots that read stateColor()).
   @State hoveredPeerKey: string = '';
+  // 0.0.53 — THE KEYBOARD'S COUNTERPART to the two hover states above, and one state
+  // per surface: the rail row the TAB key is on (-1 = none) and the peer row it is on
+  // ('' = none, keyed by public key for the same reason hover is). @State because they
+  // paint; neither joins peerRowKey (a focus is not a rendered FIELD of the row,
+  // exactly like the hover state).
+  @State focusedDestination: number = -1;
+  @State focusedPeerKey: string = '';
   // The wide pane's route stacks: ONE per destination (k3 correction 4 / §E R6),
   // so the mode/hideNavBar of a live Navigation is never flipped and the back
   // authority can consult only the VISIBLE destination's stack. 设置 is empty in
@@ -3229,6 +3281,17 @@ struct Index {
    */
   private peerRowHovered(peer: UiPeerEntry): boolean {
     return this.hoveredPeerKey.length > 0 && this.hoveredPeerKey === peer.pub_key;
+  }
+
+  /**
+   * 0.0.53 — is the KEYBOARD on THIS row? The focus counterpart of peerRowHovered,
+   * same identity (public key). It paints the same "you are here" surface the
+   * selected row uses, and NOTHING else: the 3 vp marker stays bound to the selection
+   * alone (a focus is not a selection), so a focused row is told apart from the
+   * selected one by the marker. Hover keeps its own, weaker tint.
+   */
+  private peerRowFocused(peer: UiPeerEntry): boolean {
+    return this.focusedPeerKey.length > 0 && this.focusedPeerKey === peer.pub_key;
   }
 
   /**
@@ -5491,6 +5554,14 @@ struct Index {
     //     the list column is 280 vp and line 1's name is what must fit a real fqdn.
     //     Line 2 has the room (its text width still clears the IP's own one-line
     //     floor plus PEER_ROW_L2_META_COMPACT_VP).
+    //     0.0.53: the CONDENSED form is no longer the compact RAIL TIER's alone — the
+    //     1:2 split leaves a 280…359 vp column from 840 to 1358 vp, where the wide
+    //     98 vp meta column + 21 vp of copy marks cannot keep the name's 196 vp floor,
+    //     so peerRowCondensed now asks the COLUMN. (360…373 vp of raw 1:2 column is
+    //     snapped UP to 374 by peerListSnapToWideFormVp, so the form never flips for a
+    //     few vp of window drag — the 1440 vp window is the one that exposed that.)
+    //     This `if` is the only branch that
+    //     moves (the dot on line 1, the chip + status on line 2).
     // The row renders the SAME fields on both shapes, so peerRowKey is unchanged
     // by the condensation.
     // 0.0.47 (I12) §1 — TWO CONTAINERS, ONE JOB EACH, AND THE FILL IS FULL-BLEED.
@@ -5744,9 +5815,17 @@ struct Index {
       width: { left: PEER_ROW_SELECT_BAR_VP },
       color: this.peerRowSelected(peer) ? $r('app.color.nb_primary') : Color.Transparent
     })
+    // 0.0.53 — THE THREE SURFACES, in their order of authority.
     .backgroundColor(this.peerRowSelected(peer)
       ? $r('app.color.nb_row_selected_background')
-      : this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background') : Color.Transparent)
+      : this.peerRowFocused(peer)
+        ? $r('app.color.nb_row_selected_background')
+        : this.peerRowHovered(peer) ? $r('app.color.nb_row_hover_background') : Color.Transparent)
+    // …and WHAT THE ORDER MEANS. The SELECTION (this tint + the 3 vp bar above) is the
+    // row whose detail is open. The KEYBOARD FOCUS gets the same tint WITHOUT the bar —
+    // a focus is not a selection, and the tab order is the PC's primary navigation, so
+    // the row it reached had `focusable(true)` and not one painted pixel before this.
+    // The pointer's state stays the weakest of the three (I6's neutral lift).
     // 0.0.47 (I12) §1: the fill's own radius is 0 — a full-bleed band is square. What
     // keeps it inside the card's rounded corners is the LIST's own clip
     // (`.clip(true)` on the node that carries PEER_LIST_CARD_RADIUS_VP, see
@@ -5773,6 +5852,18 @@ struct Index {
       }
     })
     .focusable(true)
+    // 0.0.53 — the keyboard's half of the pointer affordance above. The key, not the
+    // object, and the clear is conditional on THIS row being the focused one (the same
+    // rule the hover handler follows: a blur that arrives after the next row's focus
+    // must not clear that row).
+    .onFocus((): void => {
+      this.focusedPeerKey = peer.pub_key;
+    })
+    .onBlur((): void => {
+      if (this.focusedPeerKey === peer.pub_key) {
+        this.focusedPeerKey = '';
+      }
+    })
     .onClick(() => {
       this.selectedPeer = peer;
       // 0.0.36 wide branch: the detail is a NavDestination in the pane's content
@@ -6032,6 +6123,11 @@ struct Index {
       .height('100%')
       .padding(RAIL_PAGE_PADDING_VP)
       .backgroundColor($r('app.color.nb_page_background'))
+      // 0.0.53 — the detail ENTERS and LEAVES with the subpage transition: on the
+      // narrow branch peersTab() swaps this block for the list, and on the wide branch
+      // it is the NavDestination the pane pushes. Nothing here animates the 1 s document
+      // tick — the node stays mounted while the values inside it change.
+      .transition(paneTransition())
   }
 
   // 0.0.36: TODAY'S 对端列表 body (header + search + list), relocated verbatim. The
@@ -6128,6 +6224,9 @@ struct Index {
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
+          // 0.0.53 — the empty state enters/leaves with the subpage transition, so
+          // the list replacing it (the tunnel came up) is a settle, not a cut.
+          .transition(paneTransition())
         } else if (this.visiblePeers().length === 0) {
           Column() {
             PaneEmptyState({
@@ -6146,6 +6245,7 @@ struct Index {
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
+          .transition(paneTransition())
         } else {
           List({ space: 0 }) {
             // 0.0.35 对端列表重绘 (device report 2026-10-14): the key carries what
@@ -6209,13 +6309,17 @@ struct Index {
       .width('100%')
       .height('100%')
       // 0.0.52: the 对端 page keeps the 16 vp margin on BOTH branches, deliberately
-      // NOT the wide branch's 24. In the split shell this body IS the 280…480 vp list
-      // column, and 24 vp per side would take 16 vp out of the row's text budget at
-      // 840 vp — the approved 28-character fqdn floor (203 vp) would fall to 187 and
-      // the pinned guarantee would break. The wide 24 vp belongs to the pages that
-      // actually occupy the pane (设置, the guide, the overview) — see pagePadding().
+      // NOT the wide branch's 24. In the split shell this body IS the 280…400 vp list
+      // column (0.0.53: the official 1:2 third, clamped at 280), and 24 vp per side
+      // would take 16 vp out of the row's text budget at 840 vp — the approved
+      // 28-character fqdn floor (203 vp) would fall to 187 and the pinned guarantee
+      // would break. The wide 24 vp belongs to the pages that actually occupy the pane
+      // (设置, the guide, the overview) — see pagePadding().
       .padding(RAIL_PAGE_PADDING_VP)
       .backgroundColor($r('app.color.nb_page_background'))
+      // 0.0.53 — the list's own half of the subpage transition: peersTab() swaps it for
+      // the detail on the narrow branch, and 返回 swaps it back.
+      .transition(paneTransition())
   }
 
   // ---- 设置 -------------------------------------------------------------------
@@ -6742,6 +6846,9 @@ struct Index {
     .width('100%')
     .padding({ bottom: 24 })
     .alignItems(HorizontalAlign.Start)
+    // 0.0.53 — 设置 → 详细状态 is an internal subpage: it enters and leaves with the
+    // same 250 ms settle as every other conditional block.
+    .transition(paneTransition())
   }
 
   @Builder
@@ -6759,6 +6866,9 @@ struct Index {
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
             .margin({ top: 8, bottom: 8 })
+            // 0.0.53 — the title belongs to the landing block, so it leaves and returns
+            // with it (the same 250 ms settle) instead of vanishing in one frame.
+            .transition(paneTransition())
         }
         if (this.showDiagnostics) {
           this.detailStatusView()
@@ -6766,6 +6876,12 @@ struct Index {
           // 路由选择: an internal SETTINGS page (back returns to 设置).
           this.routeSelectionView()
         } else {
+          // 0.0.53 — THE LANDING PAGE IS ONE CONDITIONAL BLOCK, wrapped so it can carry
+          // the subpage transition: entering 详细状态 / 路由选择 now fades the settings
+          // page out and the subpage in (both directions), instead of the two swapping
+          // in one frame. The wrapper is `width('100%')` + Start-aligned, which is what
+          // the children already resolved against, so nothing about the layout moves.
+          Column({ space: 0 }) {
           // ---- 服务器配置 ------------------------------------------------------
           // 0.0.52 — THE OFFICIAL GROUPED LIST. One muted 14 fp group title outside,
           // ONE 16 vp-radius container inside, rows 48…56 vp with 1 vp inset
@@ -6867,6 +6983,10 @@ struct Index {
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .margin({ top: 8 })
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .transition(paneTransition())
         }
       }
       .width('100%')
@@ -7064,6 +7184,8 @@ struct Index {
     .width('100%')
     .padding({ bottom: 24 })
     .alignItems(HorizontalAlign.Start)
+    // 0.0.53 — the second internal settings subpage, same transition as 详细状态.
+    .transition(paneTransition())
   }
 
   // ---- 路由选择页的数据模型（页面方法）----------------------------------------
@@ -7608,6 +7730,14 @@ struct Index {
    * below it — so its outer left/right edge equals the card's at every window, whatever
    * the framework decides the column is. Its INNER text axis is the row's own constants
    * (see the `.padding` at the call site).
+   *
+   * 0.0.53 — THE 40% CEILING NO LONGER BITES, and that is a side effect worth stating:
+   * the list column is the official 1:2 third of the content area now (323 vp at this
+   * 1250 vp window), i.e. always under the framework's 40% ceiling (389 vp), so the
+   * requested and the rendered column agree again at every window of the shell — except
+   * the 840…939 vp ones, where the 280 vp floor is itself above 40% of a 600…700 vp
+   * pane and the framework's own clamp may render less than requested. That is why this
+   * field KEEPS sharing the box rather than returning to a derived number.
    */
   private peerSearchWidth(): Length {
     return '100%';
@@ -8020,17 +8150,32 @@ struct Index {
       .height(RAIL_NAV_ROW_HEIGHT_VP)
       .padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })
       .borderRadius(12)
+      // 0.0.53 — the row has THREE states and the keyboard's is one of them: a
+      // hover tints it to the card surface, a selection keeps that surface AND the 1 vp
+      // card stroke, and FOCUS paints the stroke in the action role (the border is
+      // always 1 vp wide, so focus cannot move the row by a pixel).
       .backgroundColor(this.wideDestination() === PANE_DEST_PEERS ||
-        this.hoveredDestination === PANE_DEST_PEERS
+        this.hoveredDestination === PANE_DEST_PEERS ||
+        this.focusedDestination === PANE_DEST_PEERS
         ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
       .border({
         width: 1,
-        color: this.wideDestination() === PANE_DEST_PEERS
-          ? $r('app.color.nb_card_border') : Color.Transparent
+        color: this.focusedDestination === PANE_DEST_PEERS
+          ? $r('app.color.nb_primary')
+          : this.wideDestination() === PANE_DEST_PEERS
+            ? $r('app.color.nb_card_border') : Color.Transparent
       })
       .hoverEffect(HoverEffect.Highlight)
       .focusable(true)
       .tabIndex(2)
+      .onFocus((): void => {
+        this.focusedDestination = PANE_DEST_PEERS;
+      })
+      .onBlur((): void => {
+        if (this.focusedDestination === PANE_DEST_PEERS) {
+          this.focusedDestination = -1;
+        }
+      })
       .onHover((isHover: boolean): void => {
         // Only clears when THIS row is the one currently tinted: a leave event that
         // arrives after the other row's enter event must not clear that row.
@@ -8069,17 +8214,30 @@ struct Index {
       .height(RAIL_NAV_ROW_HEIGHT_VP)
       .padding({ left: RAIL_NAV_ROW_PADDING_VP, right: 12 })
       .borderRadius(12)
+      // 0.0.53 — the same three states as 对端 above (hover / selected / FOCUS), one
+      // language for both rows.
       .backgroundColor(this.wideDestination() === PANE_DEST_SETTINGS ||
-        this.hoveredDestination === PANE_DEST_SETTINGS
+        this.hoveredDestination === PANE_DEST_SETTINGS ||
+        this.focusedDestination === PANE_DEST_SETTINGS
         ? $r('app.color.nb_card_background') : $r('app.color.nb_page_background'))
       .border({
         width: 1,
-        color: this.wideDestination() === PANE_DEST_SETTINGS
-          ? $r('app.color.nb_card_border') : Color.Transparent
+        color: this.focusedDestination === PANE_DEST_SETTINGS
+          ? $r('app.color.nb_primary')
+          : this.wideDestination() === PANE_DEST_SETTINGS
+            ? $r('app.color.nb_card_border') : Color.Transparent
       })
       .hoverEffect(HoverEffect.Highlight)
       .focusable(true)
       .tabIndex(3)
+      .onFocus((): void => {
+        this.focusedDestination = PANE_DEST_SETTINGS;
+      })
+      .onBlur((): void => {
+        if (this.focusedDestination === PANE_DEST_SETTINGS) {
+          this.focusedDestination = -1;
+        }
+      })
       .onHover((isHover: boolean): void => {
         if (isHover) {
           this.hoveredDestination = PANE_DEST_SETTINGS;
@@ -8182,6 +8340,9 @@ struct Index {
     .onAppear((): void => {
       this.ensurePeerPaneBaseRoute();
     })
+    // 0.0.53 — the rail's DESTINATION switch is this pane's own conditional mount
+    // (contentPane), so it enters/leaves with the shared transition too.
+    .transition(paneTransition())
   }
 
   // The pane's pushed pages. ONE parameter, not two: the official example's shape
@@ -8227,6 +8388,8 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.nb_page_background'))
+    // 0.0.53 — the same destination-switch transition as 对端's pane.
+    .transition(paneTransition())
   }
 
   // 0.0.37 (I2) — THE STATE-DRIVEN DEFAULT PANE. Shown when the user has NOT
@@ -8318,7 +8481,7 @@ struct Index {
               .lineHeight(GUIDE_BODY_LINE_HEIGHT_FP)
               .maxLines(3)
             Button(this.accountLoginBusy ? '正在登录…' : '账户登录')
-              .fontSize(TYPE_SECTION_TITLE_FP)
+              .fontSize(TYPE_CAPTION_FP)
               .maxFontScale(TYPE_SCALE_MAX_ROW)
               .height(44)
               .width('100%')
@@ -8342,7 +8505,7 @@ struct Index {
           }
           if (!this.configured || this.wideGuideKind() === GUIDE_LOGIN) {
             Button('去设置')
-              .fontSize(TYPE_SECTION_TITLE_FP)
+              .fontSize(TYPE_CAPTION_FP)
               .maxFontScale(TYPE_SCALE_MAX_ROW)
               .height(44)
               .width('100%')
@@ -8377,6 +8540,9 @@ struct Index {
     .align(Alignment.Top)
     .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
     .backgroundColor($r('app.color.nb_page_background'))
+    // 0.0.53 — the guide is a CONDITIONAL pane (contentPane's last branch), so the
+    // connection coming up fades it out under the peer list instead of cutting.
+    .transition(paneTransition())
   }
 
   // 0.0.38 (I3) A — THE PANE'S "NO PEER SELECTED" PAGE: a real 连接概览, not the
@@ -8576,6 +8742,9 @@ struct Index {
     .align(Alignment.Top)
     .scrollBar(this.wideLayout() ? BarState.Auto : BarState.Off)
     .backgroundColor($r('app.color.nb_page_background'))
+    // 0.0.53 — the overview is the pane's BASE route, so it enters with the same
+    // transition as the detail beside it.
+    .transition(paneTransition())
   }
 
   // ---- 后台保活（实验，方案 A）-------------------------------------------------

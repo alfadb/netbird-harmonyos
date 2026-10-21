@@ -591,48 +591,95 @@ try {
     PAGE.includes('this.wideDestination() === PANE_DEST_PEERS'));
 
   // -------------------------------------------------------------------------
-  // 13. 0.0.39 (I4) P0.2 — THE TIERED PEER LIST COLUMN and its per-tier
-  //     reservation of the detail pane (the review's §P0.1 arithmetic)
+  // 13. 0.0.53 — THE OFFICIAL 1:2 SPLIT (replaces I4's per-tier cap table)
   // -------------------------------------------------------------------------
   const pane = (w: number) => m.splitPaneWidthVp(w);
-  check('peer list: the column is a TIER TABLE — one cap per rail tier (360/440/480)',
-    m.PEER_LIST_NAV_BAR_CAP_COMPACT_VP === 360 &&
-    m.PEER_LIST_NAV_BAR_CAP_MEDIUM_VP === 440 &&
-    m.PEER_LIST_NAV_BAR_CAP_ROOMY_VP === 480 &&
-    m.peerListNavBarCapVp(840) === 360 && m.peerListNavBarCapVp(1023) === 360 &&
-    m.peerListNavBarCapVp(1024) === 440 && m.peerListNavBarCapVp(1439) === 440 &&
-    m.peerListNavBarCapVp(1440) === 480 && m.peerListNavBarCapVp(4000) === 480);
+  check('peer list: the column is the official 1:2 — clamp(round(pane / 3), 280, 480)',
+    m.PEER_LIST_PANE_DIVISOR === 3 && m.PEER_LIST_NAV_BAR_MIN_VP === 280 &&
+    m.PEER_LIST_NAV_BAR_MAX_VP === 480 &&
+    // the floor wins at the bottom of the shell: 1:2 of 600 is 200
+    m.peerListNavBarWidthVp(600, 840) === 280 &&
+    // the floor is also the exact 1:2 at a 840 vp content area
+    m.peerListNavBarWidthVp(840, 1120) === 280 &&
+    // and above it the ratio itself answers: 970 / 3 = 323.3
+    m.peerListNavBarWidthVp(970, 1250) === 323 &&
+    // 0.0.53: 1120 / 3 = 373.3 → 373, then the 1 vp snap raises the column to the
+    // wide row form's 374 (the boundary is asserted on its own further down)
+    m.peerListNavBarWidthVp(1120, 1440) === 374 &&
+    m.peerListNavBarWidthVp(1200, 1520) === 400 &&
+    // the cap is the ratio's own maximum, not a tier's
+    m.peerListNavBarWidthVp(1440, 4000) === 480);
   check('peer list: the compact tier reserves 320 for the detail, the rest 360',
     m.PEER_LIST_CONTENT_MIN_COMPACT_VP === 320 && m.MIN_CONTENT_WIDTH_VP === 360 &&
     m.peerContentMinWidthVp(840) === 320 && m.peerContentMinWidthVp(1023) === 320 &&
     m.peerContentMinWidthVp(1024) === 360 && m.peerContentMinWidthVp(1440) === 360);
-  check('peer list: 840 vp splits the 600 vp pane 280 list / 320 detail (not 240/360)',
+  check('peer list: 840 vp splits the 600 vp pane 280 list / 319 detail (not 240/360)',
     pane(840) === 600 && m.peerListNavBarWidthFor(840) === 280 &&
-    m.peerListNavBarWidthFor(840) + m.peerContentMinWidthVp(840) === pane(840));
-  check('peer list: it takes what the pane can spare, capped, at every tier',
-    m.peerListNavBarWidthFor(1023) === 360 && m.peerListNavBarWidthFor(1024) === 384 &&
-    m.peerListNavBarWidthFor(1250) === 440 && m.peerListNavBarWidthFor(1440) === 480 &&
-    m.peerListNavBarWidthFor(4000) === 480);
+    m.peerListNavBarWidthFor(840) + m.peerContentMinWidthVp(840) === pane(840) &&
+    // the recorded deviation from 1:2: this pane would be 200 / 400
+    Math.round(pane(840) / 3) === 200);
+  check('peer list: the column follows the content area at the measured windows',
+    m.peerListNavBarWidthFor(840) === 280 && m.peerListNavBarWidthFor(1023) === 280 &&
+    m.peerListNavBarWidthFor(1024) === 280 && m.peerListNavBarWidthFor(1250) === 323 &&
+    // 0.0.53: 1440's raw third is 373 and the 1 vp snap raises it to 374 (the rail
+    // steps 280 → 320 there, so the content area gives up 39 vp, not 40)
+    m.peerListNavBarWidthFor(1440) === 374 && m.peerListNavBarWidthFor(4000) === 400,
+    `840→${m.peerListNavBarWidthFor(840)} 1024→${m.peerListNavBarWidthFor(1024)} ` +
+      `1250→${m.peerListNavBarWidthFor(1250)} 1440→${m.peerListNavBarWidthFor(1440)} ` +
+      `4000→${m.peerListNavBarWidthFor(4000)}`);
+  check('peer list: the content area the ratio measures is the INDENT-CAPPED pane',
+    m.peerSplitPaneWidthVp(1440) === 1120 && m.peerSplitPaneWidthVp(1520) === 1200 &&
+    m.peerSplitPaneWidthVp(2560) === 1200 && m.peerSplitPaneWidthVp(4000) === 1200 &&
+    m.peerSplitPaneWidthVp(1250) === 970);
   check('peer list: THE INVARIANT — column + the tier\'s reservation fits the pane, always',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         const bar: number = m.peerListNavBarWidthFor(w);
-        if (bar < m.NAV_BAR_WIDTH_VP) { return false; }
-        if (bar + m.peerContentMinWidthVp(w) > m.splitPaneWidthVp(w)) { return false; }
+        if (bar < m.PEER_LIST_NAV_BAR_MIN_VP) { return false; }
+        if (bar > m.PEER_LIST_NAV_BAR_MAX_VP) { return false; }
+        if (bar + m.peerContentMinWidthVp(w) > m.peerSplitPaneWidthVp(w)) { return false; }
         if (m.splitPaneWidthVp(w) < m.NAV_AUTO_SPLIT_VP) { return false; }
       }
       return true;
     })());
-  check('peer list: the column never shrinks as the window grows',
+  // 0.0.53 DELIBERATE UPDATE: "the column never shrinks as the window grows" cannot
+  // hold for a 1:2 rule, because the RAIL steps 40 vp at 1440: the content area drops
+  // 1120 ← 1159 and its column drops 374 ← 386 (373 before the 1 vp snap). The
+  // property that IS the rule is asserted instead and it is stronger (exact at every
+  // window), plus "no shrink inside a rail tier" — the one step-down is the rail's own
+  // step, and it is bounded.
+  check('peer list: the column is EXACTLY the 1:2 clamp plus the 1 vp snap at EVERY window',
     (() => {
-      let previous = m.peerListNavBarWidthFor(m.HARMONY_BP_LG_VP - 1);
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
-        const bar = m.peerListNavBarWidthFor(w);
-        if (bar < previous) { return false; }
-        previous = bar;
+        const content: number = m.peerSplitPaneWidthVp(w);
+        const third: number = Math.round(content / m.PEER_LIST_PANE_DIVISOR);
+        let want: number = third < m.PEER_LIST_NAV_BAR_MIN_VP
+          ? m.PEER_LIST_NAV_BAR_MIN_VP : third;
+        if (want > m.PEER_LIST_NAV_BAR_MAX_VP) { want = m.PEER_LIST_NAV_BAR_MAX_VP; }
+        // 0.0.53: the 1 vp snap — a clamped 1:2 column in [360, 374) is raised to 374
+        // so the row's density cannot flip for a few vp of window drag. Stated here
+        // independently of the implementation function.
+        if (want >= m.PEER_LIST_WIDE_FORM_MIN_VP - m.PEER_LIST_FORM_SNAP_BAND_VP &&
+          want < m.PEER_LIST_WIDE_FORM_MIN_VP) {
+          want = m.PEER_LIST_WIDE_FORM_MIN_VP;
+        }
+        const room: number = content - m.peerContentMinWidthVp(w);
+        if (want > room) { want = room; }
+        if (m.peerListNavBarWidthFor(w) !== want) { return false; }
       }
       return true;
     })());
+  check('peer list: the column never shrinks INSIDE a rail tier (the one step-down is the 1440 rail step)',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP + 1; w <= 4000; w += 1) {
+        if (m.railTierOf(w) !== m.railTierOf(w - 1)) { continue; }
+        if (m.peerListNavBarWidthFor(w) < m.peerListNavBarWidthFor(w - 1)) { return false; }
+      }
+      const drop: number = m.peerListNavBarWidthFor(1439) - m.peerListNavBarWidthFor(1440);
+      return drop >= 0 && drop <= Math.ceil((m.RAIL_WIDTH_ROOMY_VP - m.RAIL_WIDTH_MEDIUM_VP) /
+        m.PEER_LIST_PANE_DIVISOR) + 1;
+    })(),
+    `1440 step: ${m.peerListNavBarWidthFor(1439)} → ${m.peerListNavBarWidthFor(1440)}`);
   check('peer list: a nonsense pane/window width answers the framework default, never NaN',
     m.peerListNavBarWidthVp(Number.NaN, Number.NaN) === 240 &&
     m.peerListNavBarWidthVp(0, 0) === 240 && m.peerListNavBarWidthFor(Number.NaN) === 240 &&
@@ -682,10 +729,55 @@ try {
       }
       return true;
     })());
-  check('peer row: the compact tier CONDENSES line 1 (chip + status ride line 2)',
-    m.peerRowCondensed(840) && m.peerRowCondensed(1023) && !m.peerRowCondensed(1024) &&
-    !m.peerRowCondensed(1440) && !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
-    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1024) === 98);
+  // 0.0.53 DELIBERATE UPDATE: the row's FORM follows the COLUMN now (the 1:2 split
+  // gives 280…374 vp across 840…1440 vp, where the wide form's 98 vp meta column +
+  // 21 vp of copy marks cannot keep the name's 196 vp). The threshold is the same
+  // name-floor arithmetic, written out here so a chrome change cannot silently move it.
+  check('peer row: the row CONDENSES from the column\'s own budget, not the rail tier',
+    m.PEER_LIST_WIDE_FORM_MIN_VP === m.PEER_ROW_NAME_MIN_WIDTH_VP + m.PEER_ROW_META_WIDE_VP +
+      m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP + 2 * m.PEER_ROW_LIST_PADDING_VP +
+      m.PEER_ROW_SELECT_BAR_VP + 2 * m.RAIL_PAGE_PADDING_VP &&
+    m.PEER_LIST_WIDE_FORM_MIN_VP === 374 &&
+    m.peerRowCondensed(840) && m.peerRowCondensed(1023) && m.peerRowCondensed(1024) &&
+    m.peerRowCondensed(1250) &&
+    // 1439 vp is the medium rail's last window: its column is 386 and the WIDE form is
+    // back. 0.0.53: 1440 is no longer a one-window condensation — its 373 vp column is
+    // snapped to 374 (see the snap check below), so it is wide like its neighbours.
+    !m.peerRowCondensed(1439) && !m.peerRowCondensed(1440) && !m.peerRowCondensed(1441) &&
+    !m.peerRowCondensed(4000) &&
+    !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
+    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1440) === 98 &&
+    m.peerRowMetaWidthVp(1441) === 98);
+  // 0.0.53 — THE 1 vp SNAP'S OWN DEFECT AND BOUNDARY. Dragging a window across 1440
+  // flipped the list's density for exactly one window width: the rail steps 280 → 320
+  // (the content area gives up 39 vp) so the 1:2 column went 386 → 373 → 374, and 373
+  // is one vp under the wide form's 374. The snap closes [360, 374) by raising the
+  // column to 374 — DENSITY only; the 1:2 rule and its clamps are untouched.
+  check('peer list: the 1 vp snap — 1438…1442 are ALL wide, and no column is 373',
+    // the boundary itself, stated as a table (359 stays, the 360…373 band is raised)
+    m.PEER_LIST_FORM_SNAP_BAND_VP === m.PEER_LIST_WIDE_FORM_MIN_VP - 360 &&
+    m.peerListSnapToWideFormVp(359) === 359 &&
+    m.peerListSnapToWideFormVp(360) === 374 &&
+    m.peerListSnapToWideFormVp(361) === 374 &&
+    m.peerListSnapToWideFormVp(373) === 374 &&
+    m.peerListSnapToWideFormVp(374) === 374 &&
+    m.peerListSnapToWideFormVp(375) === 375 &&
+    Number.isNaN(m.peerListSnapToWideFormVp(Number.NaN)) &&
+    // the window that exposed it is now wide, at the wide form's exact threshold
+    m.peerListNavBarWidthFor(1440) === 374 && !m.peerRowCondensed(1440) &&
+    (() => {
+      for (let w = 1438; w <= 1442; w += 1) {
+        if (m.peerRowCondensed(w)) { return false; }
+        if (m.peerListNavBarWidthFor(w) === 373) { return false; }
+        if (m.peerRowMetaWidthVp(w) !== m.PEER_ROW_META_WIDE_VP) { return false; }
+      }
+      // and the form still changes exactly AT the threshold: 360…373 never condense,
+      // 359 does (the band is a snap, not a wider wide-form region)
+      return !m.peerRowCondensed(1400) && !m.peerRowCondensed(1359) &&
+        m.peerRowCondensed(1358) && m.peerListNavBarWidthFor(1358) === 359;
+    })(),
+    `1438…1442 columns: ${[1438, 1439, 1440, 1441, 1442]
+      .map((w) => m.peerListNavBarWidthFor(w)).join(' / ')}`);
   check('peer row: THE 28-CHARACTER FQDN FITS AT EVERY WINDOW OF THE SHELL',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
@@ -694,6 +786,14 @@ try {
       return true;
     })(),
     `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
+  check('peer row: THE IP NEVER WRAPS at every window of the shell (its own column)',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
+        if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
+      }
+      return true;
+    })(),
+    `min at 840 = ${m.peerRowIpWidthFor(840)} floor = ${m.PEER_ROW_IP_MIN_WIDTH_VP}`);
   // 0.0.45 (I10) — THE NARROW BRANCH'S BUDGET IS THE PAGE, NOT THE RAIL COLUMN. I8/I9
   // only READ these widths in the selfcheck (the rows' text was `.layoutWeight(1)`, so
   // the runtime ellipsis width was whatever the row gave it); I10 makes the text
@@ -739,22 +839,31 @@ try {
   // the slot together (peerRowCopyTakeVp — the text is content-sized, so the 5 vp
   // that puts the mark after the glyphs is spent from the same budget). It is still
   // 0 at 840, where the tier has no mark at all, so the compact tier is unchanged.
-  check('peer row: the name column at every tier bottom and the measured I3 window',
+  // 0.0.53 DELIBERATE UPDATE: the columns are the 1:2 ones now (280 / 280 / 323 / 374)
+  // and the FORM is the column's own answer, so each window is decomposed with ITS
+  // form's chrome — the property is unchanged (name = text − meta − copy marks).
+  // 1440's 374 is the snapped column (373 before), which is why it is wide like 1441.
+  check('peer row: the name column at every measured window, each in its own form',
     m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
       m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(840) &&
-    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1024) &&
-    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1250) &&
-    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1440),
+    m.peerRowNameWidthFor(1024) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(1024) &&
+    m.peerRowNameWidthFor(1250) === 323 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(1250) &&
+    m.peerRowNameWidthFor(1440) === 374 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1440) &&
+    m.peerRowNameWidthFor(1441) === 374 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1441),
     `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
-    `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
-  check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
+    `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)} ` +
+    `1441→${m.peerRowNameWidthFor(1441)}`);
+  check('peer row: line 2 still holds the IP, the chip, the status text and its own mark',
     (() => {
-      for (let w = m.HARMONY_BP_LG_VP; w <= 1023; w += 1) {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 1440; w += 1) {
+        if (!m.peerRowCondensed(w)) { continue; }
         const text: number = m.peerRowTextWidthVp(m.peerListNavBarWidthFor(w));
-        if (text < m.PEER_ROW_IP_MIN_WIDTH_VP + m.PEER_ROW_L2_META_COMPACT_VP) { return false; }
+        if (text < m.PEER_ROW_IP_MIN_WIDTH_VP + m.PEER_ROW_L2_META_COMPACT_VP +
+          m.peerRowCopyTakeVp(w)) { return false; }
       }
       return true;
     })());
@@ -1798,22 +1907,33 @@ try {
     `text(840)=${m.peerRowTextWidthVp(m.peerListNavBarWidthFor(840))}`);
 
   // ---- the I8 copy slot's geometry (the policy itself is run-copy-affordance) --
-  check('I8 §3: the copy slot is tier-gated, and the IP keeps its one-line floor',
+  // 0.0.53 DELIBERATE UPDATE: the gate is the COLUMN's own budget now (the mark is
+  // reserved from a 294 vp column up), not the rail tier. At 1024 the 1:2 column is
+  // 280, where the mark's 21 vp would cut the name to 182 — so the 1250/1440 PC
+  // columns keep their marks and 840…1119 do not have them.
+  check('I8 §3: the copy slot is COLUMN-gated, and the IP keeps its one-line floor',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         if (m.peerRowNameWidthFor(w) < m.PEER_ROW_NAME_MIN_WIDTH_VP) { return false; }
         if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
       }
       return m.peerRowCopyVisible(840) === false && m.peerRowCopyVisible(1023) === false &&
-        m.peerRowCopyVisible(1024) === true && m.peerRowCopyVisible(1440) === true &&
+        m.peerRowCopyVisible(1024) === false && m.peerRowCopyVisible(1250) === true &&
+        m.peerRowCopyVisible(1440) === true && m.peerRowCopyVisible(4000) === true &&
+        m.PEER_LIST_COPY_SLOT_MIN_VP === m.PEER_ROW_NAME_MIN_WIDTH_VP +
+          m.PEER_ROW_META_COMPACT_VP + m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP +
+          2 * m.PEER_ROW_LIST_PADDING_VP + m.PEER_ROW_SELECT_BAR_VP +
+          2 * m.RAIL_PAGE_PADDING_VP &&
+        m.PEER_LIST_COPY_SLOT_MIN_VP === 294 &&
         // the phone / tablet branch has no copy slot in its rows at all
         m.peerRowCopyVisible(600) === false && m.peerRowCopyVisible(320) === false &&
-        m.peerRowCopySlotVp(1024) === m.PEER_ROW_COPY_SLOT_VP &&
+        m.peerRowCopySlotVp(1250) === m.PEER_ROW_COPY_SLOT_VP &&
         m.PEER_ROW_COPY_SLOT_VP === 16 && m.PEER_ROW_COPY_GLYPH_VP === 16 &&
         m.PEER_ROW_COPY_TOUCH_VP === 40 && m.PEER_ROW_COPY_TOUCH_VP >= 40 &&
         m.PEER_ROW_COPY_TOUCH_VP > m.PEER_ROW_COPY_GLYPH_VP;
     })(),
-    `IP floor min: 840→${m.peerRowIpWidthFor(840)} 1024→${m.peerRowIpWidthFor(1024)}`);
+    `IP floor min: 840→${m.peerRowIpWidthFor(840)} 1024→${m.peerRowIpWidthFor(1024)} ` +
+      `1250→${m.peerRowIpWidthFor(1250)}`);
   // The 0.0.43 device frame caught the FIRST version of this: the slot was created
   // only for the hovered/selected row, so a hidden-then-created node SHORTENED the
   // row (measured 74 vp against its neighbours' 64 — 96 px vs 83 px pitch at
@@ -1845,6 +1965,82 @@ try {
     // padding now (full-bleed fill, padded text).
     PAGE.includes('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP, ' +
       'right: PEER_ROW_CONTENT_PADDING_VP,\n        top: 12, bottom: 12\n      })'));
+  // -------------------------------------------------------------------------
+  // 21. 0.0.53 — KEYBOARD FOCUS, THE SUBPAGE TRANSITION and the P0 EMPTY-STATE SCALE
+  // -------------------------------------------------------------------------
+  // §B: a focusable row must PAINT its focus. Three surfaces are in scope (the 设置
+  // row, the peer row, both rail destination rows) and each needs the same three
+  // things: an onFocus that records it, an onBlur that clears it only for itself, and
+  // an attribute expression that reads the state. The check is structural because the
+  // paint itself is ArkUI's — what the host can pin is that the wiring exists and that
+  // no surface was left `focusable` with nothing to show for it.
+  check('B: every focusable row records focus and paints a visible feedback',
+    (PAGE.match(/\.onFocus\(\(\): void => \{/g) ?? []).length === 4 &&
+    (PAGE.match(/\.onBlur\(\(\): void => \{/g) ?? []).length === 4 &&
+    // the 设置 row: a @State of its own + the selected-row tint + the primary ring
+    PAGE.includes('@State focused: boolean = false;') &&
+    PAGE.includes('? $r(\'app.color.nb_row_selected_background\') : Color.Transparent)') &&
+    PAGE.includes('color: this.focused ? $r(\'app.color.nb_primary\') : Color.Transparent') &&
+    PAGE.includes('width: FOCUS_RING_WIDTH_VP,') &&
+    // the peer row: keyed by public key, tinted by the same "you are here" surface,
+    // and NOT allowed to paint the 3 vp selection marker (I6 §2 above)
+    PAGE.includes('@State focusedPeerKey: string = \'\';') &&
+    PAGE.includes('private peerRowFocused(peer: UiPeerEntry): boolean {') &&
+    PAGE.includes('this.focusedPeerKey = peer.pub_key;') &&
+    PAGE.includes('      : this.peerRowFocused(peer)') &&
+    // the rail rows: their destination number, and the primary stroke on focus
+    PAGE.includes('@State focusedDestination: number = -1;') &&
+    (PAGE.match(/this\.focusedDestination === PANE_DEST_PEERS/g) ?? []).length === 3 &&
+    (PAGE.match(/this\.focusedDestination === PANE_DEST_SETTINGS/g) ?? []).length === 3 &&
+    // the rows keep the activation they had (Enter / Space), i.e. focus is additive
+    PAGE.includes('private isActivationKey(event: KeyEvent): boolean') &&
+    (PAGE.match(/if \(this\.isActivationKey\(event\)\) \{/g) ?? []).length >= 3);
+
+  // §C: ONE transition, 250 ms, the friction curve, an 8 vp rise — and it lives on the
+  // CONDITIONAL blocks only. The count is pinned so "it animates everywhere" and "it
+  // animates nowhere" are both failures.
+  check('C: the subpage transition is 250 ms / friction / 8 vp, defined ONCE',
+    m.PANE_TRANSITION_MS === 250 && m.PANE_TRANSITION_TRANSLATE_VP === 8 &&
+    PAGE.includes('duration: PANE_TRANSITION_MS, curve: Curve.Friction') &&
+    PAGE.includes('TransitionEffect.OPACITY.animation(param)') &&
+    PAGE.includes('TransitionEffect.translate({ y: PANE_TRANSITION_TRANSLATE_VP })') &&
+    (PAGE.match(/function paneTransition\(\): TransitionEffect \{/g) ?? []).length === 1);
+  check('C: it is applied to the conditional subpages and empty states, nowhere else',
+    // peer detail + peer list + 2 empty states + 设置 landing + its title + the two
+    // settings subpages + the overview/guide panes + the 2 destination panes = 12
+    (PAGE.match(/\.transition\(paneTransition\(\)\)/g) ?? []).length === 12 &&
+    // a transition on a mounted-for-the-whole-session node would animate data ticks:
+    // in CODE (not in the two doc comments that name the attribute) the only transition
+    // is the shared one
+    (() => {
+      const code: string = PAGE.replace(/\/\/[^\n]*/g, '');
+      const calls: string[] = code.match(/\.transition\([^\n]*\)/g) ?? [];
+      return calls.length === 12 &&
+        calls.every((call: string): boolean =>
+          call.trim() === '.transition(paneTransition())') &&
+        !code.includes('.transition(TransitionEffect');
+    })());
+
+  // §D: the empty/error block's P0 scale, stated as the three roles it renders.
+  check('D: PaneEmptyState carries the P0 scale — 20 / 16 / 14, 24 vp, 8-multiple gap',
+    m.TYPE_PAGE_TITLE_FP === 20 && m.TYPE_BODY_FP === 16 && m.TYPE_CAPTION_FP === 14 &&
+    (() => {
+      const block = PAGE.slice(PAGE.indexOf('struct PaneEmptyState {'),
+        PAGE.indexOf('// One in-flight start and stop request at a time'));
+      return block.length > 0 &&
+        block.includes('Column({ space: 16 }) {') &&
+        // the title keeps the page-title role, the body line is the 16 fp body, and
+        // the single action is the 14 fp caption role
+        block.includes('Text(this.title)\n        .fontSize(TYPE_PAGE_TITLE_FP)') &&
+        block.includes('Text(this.message)\n        .fontSize(TYPE_BODY_FP)') &&
+        block.includes('Button(this.actionLabel)\n          .fontSize(TYPE_CAPTION_FP)') &&
+        block.includes('.padding(24)') &&
+        // one action at most, and the verdict dot + the title + one sentence stay
+        (block.match(/Button\(/g) ?? []).length === 1 &&
+        block.includes('Circle({ width: 12, height: 12 })') &&
+        // the scale's gap is a multiple of 8 (16), never the old 12
+        !block.includes('Column({ space: 12 })');
+    })());
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);

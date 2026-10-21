@@ -283,9 +283,14 @@ try {
     }
   }
   check('D: the narrowest wide tier is the 320 vp compact reservation',
+    // 0.0.53 DELIBERATE UPDATE: the list column is the 1:2 one now (280 at 1024,
+    // 374 at 1440 after the 1 vp snap, 400 from the indent cap on), so the detail
+    // pane's content is what the INDENT-CAPPED content area leaves:
+    // 744-280, 1120-374, 1200-400.
     narrowest === m.DETAIL_ROW_PANE_MIN_WIDTH_VP && narrowestAt === m.HARMONY_BP_LG_VP &&
     m.detailPaneContentWidthVp(m.HARMONY_BP_LG_VP) === 320 &&
-    m.detailPaneContentWidthVp(1024) === 360 && m.detailPaneContentWidthVp(1440) === 640);
+    m.detailPaneContentWidthVp(1024) === 464 && m.detailPaneContentWidthVp(1440) === 746 &&
+    m.detailPaneContentWidthVp(4000) === 800);
   check('D: the icons cost the value column EXACTLY the glyph slot and its gap',
     // the I8/I9 budget without a leading glyph, recomputed here from the pane's own
     // padding and the label column. 0.0.52 DELIBERATE UPDATE: the body is 16 fp now,

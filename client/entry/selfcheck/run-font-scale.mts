@@ -282,11 +282,15 @@ try {
     ['the home card\'s 去设置 (40 vp)',
       "            Button('去设置')\n              .fontSize(TYPE_SECTION_TITLE_FP)\n" +
       '              .maxFontScale(TYPE_SCALE_MAX_ROW)\n              .height(40)'],
+    // 0.0.53 DELIBERATE UPDATE: an ACTION label is the 14 fp caption role now (the
+    // P0 empty/error block's 标题 20 / 正文 16 / 动作 14 scale), not the 16 fp section
+    // size — the property under test (the fixed-height row carries the scale ceiling)
+    // is unchanged.
     ['the guide pane\'s 去设置 (44 vp)',
-      "            Button('去设置')\n              .fontSize(TYPE_SECTION_TITLE_FP)\n" +
+      "            Button('去设置')\n              .fontSize(TYPE_CAPTION_FP)\n" +
       '              .maxFontScale(TYPE_SCALE_MAX_ROW)\n              .height(44)'],
     ['the empty-state action (40 vp)',
-      '        Button(this.actionLabel)\n          .fontSize(TYPE_SECTION_TITLE_FP)\n' +
+      '        Button(this.actionLabel)\n          .fontSize(TYPE_CAPTION_FP)\n' +
       '          .maxFontScale(TYPE_SCALE_MAX_ROW)\n          .height(40)']
   ];
   for (const row of chains) {
