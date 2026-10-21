@@ -187,8 +187,10 @@ try {
 
   const detailRow = PAGE.slice(PAGE.indexOf('struct DetailRow {'),
     PAGE.indexOf('struct DetailSectionHeader {'));
+  // 0.0.52: the settings row sits between RailInfoRow and the empty state now, so the
+  // rail slice ends at ITS struct — the property under test is the rail row's own.
   const railRow = PAGE.slice(PAGE.indexOf('struct RailInfoRow {'),
-    PAGE.indexOf("// 0.0.37 (I2) — THE PANE'S EMPTY / ERROR STATE"));
+    PAGE.indexOf('struct SettingsRow {'));
   check('B: the DETAIL and the RAIL show it ALWAYS (no hover term in either component)',
     detailRow.includes('if (this.copyValue.length > 0) {') &&
     railRow.includes('if (this.copyValue.length > 0) {') &&
@@ -236,7 +238,12 @@ try {
     (copyGlyph.match(/\.borderRadius\(2\)/g) ?? []).length === 2 &&
     (copyGlyph.match(/\.border\(\{ width: 1\.5,/g) ?? []).length === 2 &&
     icon.includes('FieldIcon({ kind: DETAIL_ICON_COPY })') &&
-    !PAGE_CODE.includes('sys.symbol') && !PAGE_CODE.includes('SymbolGlyph'));
+    // 0.0.52 DELIBERATE UPDATE: the page has exactly ONE system symbol — the subpage
+    // title bar's back chevron (run-harmony-layout verifies it against the SDK's
+    // sysResource table). The COPY glyph is still drawn, not a symbol.
+    !icon.includes('SymbolGlyph') && !icon.includes('sys.symbol') &&
+    (PAGE_CODE.match(/SymbolGlyph\(/g) ?? []).length === 1 &&
+    PAGE_CODE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))"));
   check('B: the touch target is 40x40 though the glyph is 16, and the slot never reflows',
     icon.includes('width: PEER_ROW_COPY_TOUCH_VP') &&
     icon.includes('height: PEER_ROW_COPY_TOUCH_VP') &&

@@ -41,13 +41,19 @@
 // status — the IP moved to its own line, and I4's 离线对端 last-seen text is the
 // one field that JOINED the key). The DELIBERATE updates this file needed are
 // marked in place.
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ets = join(here, '..', 'src', 'main', 'ets');
+// 0.0.52: the local API-26 SDK's own symbol table — the SAME default the build
+// script uses (`${DEVECO_SDK_HOME:-/home/worker/harmonyos/command-line-tools/current}`),
+// so a $r('sys.symbol.*') reference can be checked against what the SDK defines.
+const SDK_HOME = process.env.DEVECO_SDK_HOME ?? '/home/worker/harmonyos/command-line-tools/current';
+const SYS_RESOURCE = join(SDK_HOME, 'sdk', 'default', 'openharmony', 'ets', 'build-tools',
+  'ets-loader', 'sysResource.js');
 const dir = mkdtempSync(join(tmpdir(), 'nb-harmony-layout-'));
 const PAGE = readFileSync(join(ets, 'pages', 'Index.ets'), 'utf8');
 let passed = 0;
@@ -214,12 +220,18 @@ try {
   // -------------------------------------------------------------------------
   // 6. the visual scale and the label/value width policy (0.0.37, I2 point 3)
   // -------------------------------------------------------------------------
-  check('type: app 22 > page 20 > section 16 > body 15 >= caption 14 (PC floor)',
-    m.TYPE_APP_TITLE_FP === 22 && m.TYPE_PAGE_TITLE_FP === 20 &&
-    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 15 && m.TYPE_CAPTION_FP === 14);
-  check('type: body is inside the 14–16 body band and the caption meets both floors',
-    m.TYPE_BODY_FP >= 14 && m.TYPE_BODY_FP <= 16 && m.TYPE_CAPTION_FP >= 14 &&
-    m.TYPE_PAGE_TITLE_FP >= 20 && m.TYPE_PAGE_TITLE_FP <= 22);
+  // 0.0.52 DELIBERATE UPDATE: the official scale the owner asked for — large page
+  // title 32, page title 20, section/row label 16, BODY 16 (was 15), caption 14.
+  check('type: large 32 > page 20 = section 16 = body 16 > caption 14 (PC floor)',
+    m.TYPE_LARGE_TITLE_FP === 32 && m.TYPE_APP_TITLE_FP === 22 &&
+    m.TYPE_PAGE_TITLE_FP === 20 &&
+    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 16 && m.TYPE_CAPTION_FP === 14);
+  check('type: the title hierarchy is large title > page title > body >= caption, and ' +
+    'every size is on the 14 vp PC floor except the 22 fp wordmark',
+    m.TYPE_LARGE_TITLE_FP > m.TYPE_PAGE_TITLE_FP &&
+    m.TYPE_PAGE_TITLE_FP >= m.TYPE_SECTION_TITLE_FP &&
+    m.TYPE_BODY_FP >= m.TYPE_CAPTION_FP && m.TYPE_CAPTION_FP >= 14 &&
+    m.TYPE_LARGE_TITLE_FP === 32 && m.TYPE_PAGE_TITLE_FP === 20);
   check('spacing: the rail paddings are on the 8 vp grid (16 / 16)',
     m.RAIL_PAGE_PADDING_VP === 16 && m.RAIL_CARD_PADDING_VP === 16 &&
     m.RAIL_PAGE_PADDING_VP % 8 === 0 && m.RAIL_CARD_PADDING_VP % 8 === 0);
@@ -234,6 +246,121 @@ try {
   check('label/value: the value column never shrinks as the window grows',
     m.railInfoValueWidthVp(840) <= m.railInfoValueWidthVp(1024) &&
     m.railInfoValueWidthVp(1024) <= m.railInfoValueWidthVp(1440));
+
+  // -------------------------------------------------------------------------
+  // 6b. 0.0.52 — THE OFFICIAL PAGE CHROME (owner brief: 8 vp grid, standard title
+  //     hierarchy, grouped settings list, ≥ 40/48 vp hit areas, 16/24 page margin)
+  // -------------------------------------------------------------------------
+  check('chrome: the page margin is 16 vp narrow / 24 vp wide, on the SAME split ' +
+    'classifier that mounts the wide shell',
+    m.PAGE_PADDING_NARROW_VP === 16 && m.PAGE_PADDING_WIDE_VP === 24 &&
+    m.PAGE_PADDING_NARROW_VP % 8 === 0 && m.PAGE_PADDING_WIDE_VP % 8 === 0 &&
+    m.pagePaddingVp(839) === 16 && m.pagePaddingVp(840) === 24 &&
+    m.pagePaddingVp(4000) === 24 &&
+    m.splitPaneWidthVp(840) > 0 && m.paneLayoutOf(839) === m.PANE_SINGLE &&
+    m.paneLayoutOf(840) === m.PANE_SPLIT);
+  check('chrome: the 对端 / 设置 tab pages carry the ONE 32 fp Bold large title and ' +
+    'the PAGES that occupy the pane take the pagePadding() margin (16 / 24)',
+    PAGE.includes("Text('设置')\n            .fontSize(TYPE_LARGE_TITLE_FP)\n" +
+      '            .fontWeight(FontWeight.Bold)') &&
+    PAGE.includes('private pagePadding(): number {') &&
+    PAGE.includes('return pagePaddingVp(this.widthVp);') &&
+    // 0.0.52: 3 sites — the settings page, the guide pane and the overview pane. The
+    // peer LIST body keeps 16 on both branches on purpose: in the split shell it IS
+    // the 280…480 vp list column, where 24 vp per side would cut the pinned
+    // 28-character fqdn floor (203 → 187 vp). See its call site's comment.
+    (PAGE.match(/\.padding\(this\.pagePadding\(\)\)/g) ?? []).length === 3 &&
+    PAGE.includes('.padding(RAIL_PAGE_PADDING_VP)\n      .backgroundColor(' +
+      "$r('app.color.nb_page_background'))"));
+  check('chrome: the 对端 header is ONE row — large title left, count CHIP right ' +
+    '(14 fp, radius 999, 8/4 padding, info tint, one line)',
+    m.TITLE_CHIP_RADIUS_VP === 999 && m.TITLE_CHIP_PADDING_H_VP === 8 &&
+    m.TITLE_CHIP_PADDING_V_VP === 4 && m.PEER_SEARCH_HEIGHT_VP === 40 &&
+    m.PEER_SEARCH_RADIUS_VP === 20 &&
+    (() => {
+      const header = PAGE.slice(PAGE.indexOf("Text('对端')"),
+        PAGE.indexOf("Search({ value: this.peerQuery"));
+      return header.includes('TYPE_LARGE_TITLE_FP') && header.includes('已连接') &&
+        header.includes('.maxLines(1)') && header.includes('textOverflow') &&
+        header.includes('.borderRadius(TITLE_CHIP_RADIUS_VP)') &&
+        header.includes("$r('app.color.nb_status_info_background')") &&
+        header.includes('.padding({') &&
+        header.includes('TITLE_CHIP_PADDING_H_VP') &&
+        header.includes('TITLE_CHIP_PADDING_V_VP');
+    })());
+  check('chrome: the subpage title bar is ONE builder — 56 vp, 24 fp system-symbol ' +
+    'back glyph in a 40 vp target, 20 fp title, reserved action slot',
+    m.PAGE_TITLE_BAR_HEIGHT_VP === 56 && m.PAGE_BACK_GLYPH_FP === 24 &&
+    m.PAGE_BACK_TARGET_VP >= 40 && m.PAGE_TITLE_BAR_HEIGHT_VP % 8 === 0 &&
+    (PAGE.match(/this\.pageTitleBar\('/g) ?? []).length === 3 &&
+    PAGE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))") &&
+    PAGE.includes("      .width(PAGE_BACK_TARGET_VP)\n      .height(PAGE_BACK_TARGET_VP)") &&
+    PAGE.includes('.height(PAGE_TITLE_BAR_HEIGHT_VP)') &&
+    PAGE.includes('// THE ACTION SLOT'));
+  // The symbol itself has to EXIST in this SDK's sysResource table — the page cannot
+  // reference a resource that the platform does not define.
+  check('chrome: the back glyph is a resource this SDK really defines ' +
+    '(sysResource.symbol.chevron_left)',
+    existsSync(SYS_RESOURCE) &&
+    /symbol:\s*\{[\s\S]*?chevron_left:/.test(readFileSync(SYS_RESOURCE, 'utf8')));
+  check('settings: ONE group container per group (16 vp radius, card fill, 1 vp ' +
+    'stroke), a 14 fp muted group title OUTSIDE it, and inset 1 vp row dividers',
+    m.SETTINGS_GROUP_RADIUS_VP === 16 && m.SETTINGS_GROUP_TITLE_FP === 14 &&
+    m.SETTINGS_GROUP_TITLE_TOP_VP % 8 === 0 &&
+    m.SETTINGS_GROUP_TITLE_BOTTOM_VP % 8 === 0 &&
+    m.SETTINGS_DIVIDER_INSET_VP === m.SETTINGS_ROW_PADDING_VP &&
+    PAGE.includes("sectionTitle(title: string) {") &&
+    PAGE.includes('.fontSize(SETTINGS_GROUP_TITLE_FP)') &&
+    PAGE.includes("$r('app.color.nb_text_muted')") &&
+    PAGE.includes('settingsDivider() {') &&
+    (PAGE.match(/this\.settingsDivider\(\)/g) ?? []).length >= 4 &&
+    (PAGE.match(/\.borderRadius\(SETTINGS_GROUP_RADIUS_VP\)/g) ?? []).length >= 4);
+  check('settings: a row is a 48 vp minimum band with 16 vp side padding, a 16 fp ' +
+    'label, a 14 fp value in the secondary ink and a 14 fp \'›\'',
+    m.SETTINGS_ROW_MIN_HEIGHT_VP >= 48 && m.SETTINGS_ROW_PADDING_VP === 16 &&
+    PAGE.includes('struct SettingsRow {') &&
+    PAGE.includes('.constraintSize({ minHeight: SETTINGS_ROW_MIN_HEIGHT_VP })') &&
+    PAGE.includes('left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP') &&
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('struct SettingsRow {'),
+        PAGE.indexOf('struct PaneEmptyState {'));
+      return row.includes('.fontSize(TYPE_SECTION_TITLE_FP)') &&
+        row.includes('.fontSize(TYPE_CAPTION_FP)') &&
+        row.includes("$r('app.color.nb_text_muted')") &&
+        row.includes("Text('›')");
+    })());
+  check('settings: every preserved function still has its row in the grouped list',
+    (() => {
+      const tab = PAGE.slice(PAGE.indexOf('settingsTab() {'),
+        PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
+      return tab.includes("this.sectionTitle('服务器配置')") &&
+        tab.includes('this.serverConfigCard()') && tab.includes('this.setupFormCard()') &&
+        tab.includes("this.sectionTitle('后台保活（实验）')") &&
+        tab.includes('this.keepAliveCard()') &&
+        tab.includes("this.sectionTitle('诊断日志')") &&
+        tab.includes('this.diagnosticsLogCard()') &&
+        tab.includes("this.sectionTitle('关于')") &&
+        tab.includes("label: '版本'") && tab.includes("label: '版本号'") &&
+        tab.includes("this.sectionTitle('状态与路由')") &&
+        tab.includes("label: '详细状态'") && tab.includes("label: '路由选择'") &&
+        tab.includes("this.sectionTitle('应用')") &&
+        tab.includes("label: '退出应用（断开 VPN）'") &&
+        tab.includes('this.confirmExplicitQuit()');
+    })());
+  check('settings: the batch actions are 14 fp text actions on a caption line, not ' +
+    'full-width buttons',
+    PAGE.includes("Text('全部启用')\n          .fontSize(TYPE_CAPTION_FP)") &&
+    PAGE.includes("Text('全部停用')\n          .fontSize(TYPE_CAPTION_FP)") &&
+    !PAGE.includes("Button('全部启用')") && !PAGE.includes("Button('全部停用')") &&
+    PAGE.includes("$r('app.color.nb_primary')"));
+  check('对端: the search field is the ArkUI Search component (40 vp pill, card ' +
+    'fill, the same width source and the same onChange write)',
+    PAGE.includes("Search({ value: this.peerQuery, placeholder: '搜索对端名称或 IP' })") &&
+    !PAGE.includes("TextInput({ text: this.peerQuery") &&
+    PAGE.includes('.height(PEER_SEARCH_HEIGHT_VP)') &&
+    PAGE.includes('.borderRadius(PEER_SEARCH_RADIUS_VP)') &&
+    PAGE.includes('.width(this.peerSearchWidth())') &&
+    PAGE.includes('this.peerQuery = value;'));
 
   // -------------------------------------------------------------------------
   // 7. the narrow branch is still the narrow branch (textual, on Index.ets)
@@ -966,23 +1093,36 @@ try {
         !card.includes("Button('更改配置')\n        .fontSize(TYPE_BODY_FP)\n" +
           ".maxFontScale(TYPE_SCALE_MAX_ROW)\n        .height(40)\n        .width('100%')");
     })());
-  check('D: 注销 lives INSIDE the server card, behind a 1 vp divider (no orphan red row)',
+  check('D: 注销 lives INSIDE the server group, behind the one inset 1 vp divider ' +
+    '(no orphan red row)',
     (() => {
       const card = PAGE.slice(PAGE.indexOf('serverConfigCard() {'),
         PAGE.indexOf('// 诊断日志 (settings tab'));
       const tab = PAGE.slice(PAGE.indexOf('settingsTab() {'),
         PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
-      return card.includes('this.logoutAction()') && card.includes('.height(1)') &&
+      // 0.0.52 DELIBERATE UPDATE: the divider is the shared settingsDivider() builder
+      // now (the same inset hairline every settings group uses), so the 1 vp is
+      // pinned there and the card is pinned to CALL it before the destructive row.
+      const divider = PAGE.slice(PAGE.indexOf('settingsDivider() {'),
+        PAGE.indexOf('// 0.0.35 状态点重绘 (device report 2026-10-14)'));
+      return card.includes('this.logoutAction()') &&
+        card.includes('this.settingsDivider()') &&
+        card.indexOf('this.settingsDivider()') < card.indexOf('this.logoutAction()') &&
+        divider.includes('.height(1)') &&
+        divider.includes('SETTINGS_DIVIDER_INSET_VP') &&
         !tab.includes('this.logoutAction()');
     })());
-  check('D: the 关于 rows put the VALUE at the row\'s end (valueEnd: true)',
+  check('D: the 关于 rows put the VALUE at the row\'s end (the settings row\'s value ' +
+    'sits right-aligned)',
     PAGE.includes('@Prop valueEnd: boolean = false;') &&
     PAGE.includes('textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)') &&
-    // 0.0.44 (I9): the peer detail pane's four section call sites now put their value
-    // at the row's end too (the official client's row shape), so the flag has six
-    // users: the 关于 card's two read-only rows and the pane's four sections.
-    (PAGE.match(/valueEnd: true/g) ?? []).length === 6 &&
-    PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',"));
+    // 0.0.52 DELIBERATE UPDATE: the 关于 rows are SettingsRow children now, so the
+    // DetailRow `valueEnd: true` count drops 6 → 4 (the peer detail pane's four
+    // sections). The 关于 values are still at the row's end — SettingsRow's value
+    // Text is End-aligned and capped, pinned by the settings-row check above.
+    (PAGE.match(/valueEnd: true/g) ?? []).length === 4 &&
+    PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',") &&
+    PAGE.includes('.textAlign(TextAlign.End)'));
   // 0.0.46 (I11) DELIBERATE UPDATE: this check used to require at least ONE numeric
   // font literal in the settings surface (the three '›' chevrons' bare `18`) and then
   // held it above the 14 vp PC floor. Those literals are TYPE_CHEVRON_FP now, so the
@@ -1217,20 +1357,28 @@ try {
     // deselected
     PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))'));
 
-  // §5 — THE DISCONNECTED WORKSPACE. The title block is the SAME bytes as the
-  // connected list's, so "the page starts in the same place" is checkable.
-  check('I5 §5: the guide pane opens with the SAME 对端 header the list uses',
+  // §5 — THE DISCONNECTED WORKSPACE. The title block carries the SAME 对端 title
+  // typography as the connected list's, so "the page starts in the same place" is
+  // checkable.
+  // 0.0.52 DELIBERATE UPDATE: the header is the 32 fp large title on a Row (the list
+  // adds its count chip on the right); the guide keeps the same title + the one
+  // caption line. So the equality is over the TITLE TYPOGRAPHY, and only the list
+  // carries the chip.
+  check('I5 §5: the guide pane opens with the SAME 对端 large title the list uses',
     (() => {
-      const header = ["Text('对端')", '.fontSize(TYPE_PAGE_TITLE_FP)',
-        '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))",
-        ".width('100%')"].join('\n            ');
-      // exactly TWO occurrences: the peer list's header and the guide's.
-      const hits = PAGE.split(header).length - 1;
+      const title = ["Text('对端')", '.fontSize(TYPE_LARGE_TITLE_FP)',
+        '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))"];
       const guide = PAGE.slice(PAGE.indexOf('wideGuidePane() {'),
         PAGE.indexOf('connectionOverviewPane() {'));
-      return hits === 2 && guide.includes("Text('对端')") &&
+      const list = PAGE.slice(PAGE.indexOf('peerListBody() {'),
+        PAGE.indexOf('// ---- 设置'));
+      return title.every((line) => guide.includes(line) && list.includes(line)) &&
+        guide.includes("Text('对端')") &&
+        // the chip is the LIST's (a count of a list); the guide has no list to count
+        list.includes('TITLE_CHIP_RADIUS_VP') &&
+        !guide.includes('TITLE_CHIP_RADIUS_VP') &&
         guide.indexOf("Text('对端')") < guide.indexOf('GUIDE_EMPTY_MAX_WIDTH_VP') &&
-        guide.includes('.margin({ top: 8 })');
+        guide.includes('.margin({ top: 8 })') && list.includes('.margin({ top: 8 })');
     })());
   check('I5 §5: the empty-state block is BORDERLESS, width-capped and 72 vp under the title',
     m.GUIDE_EMPTY_MAX_WIDTH_VP === 480 && m.GUIDE_BLOCK_TOP_GAP_VP === 72 &&
@@ -1513,17 +1661,26 @@ try {
   //   * the field's INNER text axis is the row text's own start — the reserved selection
   //     marker plus the shared content padding, DERIVED by peerRowTextStartVp(), which is
   //     also exactly what peerRowTextWidthVp spends on the row's left.
+  // 0.0.52 DELIBERATE UPDATE: the field is the ArkUI Search component (40 vp pill)
+  // instead of a TextInput. Search owns its leading icon and its own inner text inset,
+  // so the old hand-written `.padding(PEER_SEARCH_TEXT_INSET_VP …)` is GONE — the
+  // guarantee this check protects is unchanged and still pinned as two sources:
+  // the BOX (`width('100%')` of the same page-padded Column as the card) and the
+  // module's row-axis constant staying derived (it still describes where the row text
+  // starts, and the Search bar's own inset is documented against it).
   check('I13: the search field takes the list card\'s own box (100% of the page-padded ' +
-    'column, never a width from the column table) and pads its text onto the row axis',
+    'column, never a width from the column table) on the Search component',
     m.PEER_SEARCH_TEXT_INSET_VP === m.peerRowTextStartVp() &&
     m.PEER_SEARCH_TEXT_INSET_VP === m.PEER_ROW_SELECT_BAR_VP + m.PEER_ROW_CONTENT_PADDING_VP &&
     // the inset is the row's two constants DERIVED, not the literal 15 vp
     LAYOUT.includes(
       'export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();') &&
-    // the field's own two edges are those constants; its width is the shared-box helper
+    // the field's width is the shared-box helper, and Search's own 40 vp pill radius
+    // is the round's constant (not a literal at the call site)
     PAGE.includes('.width(this.peerSearchWidth())') &&
-    PAGE.includes('.padding({\n              left: PEER_SEARCH_TEXT_INSET_VP, ' +
-      'right: PEER_ROW_CONTENT_PADDING_VP\n            })') &&
+    PAGE.includes('.height(PEER_SEARCH_HEIGHT_VP)') &&
+    PAGE.includes('.borderRadius(PEER_SEARCH_RADIUS_VP)') &&
+    m.PEER_SEARCH_HEIGHT_VP === 40 && m.PEER_SEARCH_RADIUS_VP === 20 &&
     /private peerSearchWidth\(\): Length \{\n    return '100%';\n  \}/.test(PAGE) &&
     (() => {
       const body = PAGE.slice(PAGE.indexOf('peerListBody() {'),

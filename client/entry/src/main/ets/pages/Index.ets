@@ -191,10 +191,10 @@ import {
   PEER_DETAIL_CONNECTION, PEER_DETAIL_IDENTITY, PEER_DETAIL_ICE, PEER_DETAIL_PATH,
   peerDetailCopyValue, peerDetailIconKind, peerDetailSectionOf, peerFqdnDuplicatesTitle,
   PEER_LIST_CARD_RADIUS_VP, PEER_ROW_CONTENT_PADDING_VP, PEER_ROW_COPY_GLYPH_VP,
-  PEER_ROW_COPY_SLOT_VP, PEER_SEARCH_TEXT_INSET_VP,
+  PEER_ROW_COPY_SLOT_VP,
   PEER_ROW_COPY_TOUCH_VP, peerRowCopyVisible, PEER_ROW_DOT_VP,
   PEER_ROW_HIGHLIGHT_INSET_VP, PEER_ROW_HIGHLIGHT_RADIUS_VP, PEER_ROW_MIN_HEIGHT_VP,
-  PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
+  PEER_ROW_NAME_FP, PEER_ROW_SELECT_BAR_VP, peerContentMinWidthVp,
   peerListNavBarWidthFor, peerRowCondensed, peerRowIpWidthFor,
   peerRowNameWidthFor, RAIL_CARD_PADDING_VP,
   RAIL_DESTINATIONS_PAD_TOP_VP, RAIL_DESTINATIONS_PADDING_VP, RAIL_ENTRY_MIN_HEIGHT_VP,
@@ -202,12 +202,19 @@ import {
   RAIL_NAV_BAR_WIDTH_VP, RAIL_NAV_BOTTOM_PADDING_VP, RAIL_NAV_LABEL_GAP_VP, RAIL_NAV_ROW_GAP_VP,
   RAIL_NAV_ROW_HEIGHT_VP, RAIL_NAV_ROW_PADDING_VP, RAIL_PAGE_PADDING_VP, RAIL_SEAM_WIDTH_VP,
   RAIL_WORDMARK_MARGIN_VP,
+  PAGE_BACK_GLYPH_FP, PAGE_BACK_TARGET_VP, PAGE_TITLE_BAR_HEIGHT_VP, pagePaddingVp,
+  PEER_SEARCH_HEIGHT_VP, PEER_SEARCH_RADIUS_VP,
+  SETTINGS_DIVIDER_INSET_VP, SETTINGS_GROUP_RADIUS_VP, SETTINGS_GROUP_TITLE_BOTTOM_VP,
+  SETTINGS_GROUP_TITLE_FP, SETTINGS_GROUP_TITLE_TOP_VP, SETTINGS_ROW_MIN_HEIGHT_VP,
+  SETTINGS_ROW_PADDING_VP, TITLE_CHIP_PADDING_H_VP, TITLE_CHIP_PADDING_V_VP,
+  TITLE_CHIP_RADIUS_VP,
   railConnectionMaxHeightVp, railInfoValueTextWidthFor, railTrafficVisible,
   railWidthFor, SECTION_CHEVRON_GLYPH_VP, SECTION_CHEVRON_PATH_COLLAPSED,
   SECTION_CHEVRON_PATH_EXPANDED, SECTION_CHEVRON_SLOT_VP, SECTION_CHEVRON_STROKE_VP,
   SECTION_HEADER_GAP_VP,
   settingsContentMaxWidthVp, splitPaneWidthVp,
-  TYPE_APP_TITLE_FP, TYPE_BODY_FP, TYPE_CAPTION_FP, TYPE_CHEVRON_FP, TYPE_PAGE_TITLE_FP,
+  TYPE_APP_TITLE_FP, TYPE_BODY_FP, TYPE_CAPTION_FP, TYPE_CHEVRON_FP,
+  TYPE_LARGE_TITLE_FP, TYPE_PAGE_TITLE_FP,
   TYPE_SCALE_MAX_DISC, TYPE_SCALE_MAX_ROW, TYPE_SECTION_TITLE_FP, TYPE_STAT_VALUE_FP,
   WidePaneFacts, wideGuideKind,
   widePaneDestination
@@ -1437,6 +1444,80 @@ struct RailInfoRow {
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     .padding({ top: 6, bottom: 6 })
+  }
+}
+
+// 0.0.52 — ONE ROW OF A SETTINGS GROUP.
+//
+// The official settings grammar, which the settings page's old "one 16 vp card per
+// item" shape did not read as (nine boxes floating on the page, each item its own
+// section): a group TITLE outside the box, then ONE container whose rows are
+//   48 vp minimum band  ·  16 vp side padding  ·  1 vp dividers between them,
+// the label at the body size 16 fp primary on the left, the value at 14 fp in the
+// secondary ink on the right, and '›' at 14 fp on the rows that navigate.
+//
+// A @Component with @Prop (the DetailRow / DetailSectionHeader pattern), NOT a
+// @Builder: a @Builder's by-value expression arguments freeze at mount in ArkUI, and
+// this page's rows carry LIVE values (the version, the route summary). The tap
+// handler is a member (onTap), exactly like DetailSectionHeader's onToggle.
+//
+// `tappable` gates the pointer affordances and the click; `chevron` decides the mark.
+// They are separate because 注销 is tappable and destructive with NO chevron (it is
+// not a place), and 版本 is neither.
+@Component
+struct SettingsRow {
+  @Prop label: string = '';
+  @Prop value: string = '';
+  @Prop valueLines: number = 1;
+  @Prop tappable: boolean = false;
+  @Prop chevron: boolean = false;
+  @Prop danger: boolean = false;
+  onTap: () => void = (): void => {
+  };
+
+  build() {
+    Row({ space: 8 }) {
+      Text(this.label)
+        .fontSize(TYPE_SECTION_TITLE_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
+        .fontColor(this.danger
+          ? $r('app.color.nb_status_error') : $r('app.color.nb_text_primary'))
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.value.length > 0) {
+        Text(this.value)
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
+          .fontColor($r('app.color.nb_text_muted'))
+          .constraintSize({ maxWidth: '60%' })
+          .maxLines(this.valueLines)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textAlign(TextAlign.End)
+      }
+      if (this.chevron) {
+        Text('›')
+          .fontSize(TYPE_CAPTION_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
+          .fontColor($r('app.color.nb_text_muted'))
+      }
+    }
+    .width('100%')
+    .constraintSize({ minHeight: SETTINGS_ROW_MIN_HEIGHT_VP })
+    .padding({
+      left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP, top: 8, bottom: 8
+    })
+    .alignItems(VerticalAlign.Center)
+    .hoverEffect(this.tappable ? HoverEffect.Highlight : HoverEffect.None)
+    .focusable(this.tappable)
+    // NOT `.enabled(false)` for a read-only row: the platform's disabled treatment
+    // would dim a 关于 row's value, and a read-only row is not a disabled control. The
+    // click handler is gated on the same `tappable` flag instead.
+    .onClick((): void => {
+      if (this.tappable) {
+        this.onTap();
+      }
+    })
   }
 }
 
@@ -4958,14 +5039,80 @@ struct Index {
 
   // ---- shared small widgets -------------------------------------------------
 
+  // 0.0.52 — THE SETTINGS GROUP TITLE. Official settings shape: the group's name is
+  // a 14 fp caption in the MUTED ink, OUTSIDE the group container, 24 vp below the
+  // previous group and 8 vp above its own box (8 vp grid). It used to be a 16 fp
+  // secondary line, which read as a card heading rather than as a section label.
   @Builder
   sectionTitle(title: string) {
     Text(title)
-      .fontSize(TYPE_SECTION_TITLE_FP)
+      .fontSize(SETTINGS_GROUP_TITLE_FP)
       .fontWeight(FontWeight.Medium)
-      .fontColor($r('app.color.nb_text_secondary'))
+      .fontColor($r('app.color.nb_text_muted'))
       .width('100%')
-      .margin({ top: 16, bottom: 8 })
+      .margin({ top: SETTINGS_GROUP_TITLE_TOP_VP, bottom: SETTINGS_GROUP_TITLE_BOTTOM_VP })
+  }
+
+  // 0.0.52 — THE ONE SUBPAGE TITLE BAR. 56 vp tall: a 24 fp back glyph inside a
+  // 40 vp hit target on the left, the 20 fp page title on the same centre line, and
+  // an empty 40 vp action slot on the right so the title never floats.
+  //
+  // The glyph is the SYSTEM symbol `sys.symbol.chevron_left`, not the '‹' text glyph
+  // it replaces: the symbol is a vector in the platform's own symbol set (present in
+  // this SDK's sysResource table, so the host check pins it), it scales with
+  // fontSize and it is what HarmonyOS's own title bars use.
+  //
+  // The title is the builder's ONLY by-value parameter and it is a static page name,
+  // so the ArkUI "by-value @Builder arguments are frozen at mount" trap costs
+  // nothing here; the tap target reads page state through `this`, never through an
+  // argument. closeVisibleSubflow() is the ONE close path all three subpages use
+  // (see run-navigation-back.mts).
+  @Builder
+  pageTitleBar(title: string) {
+    Row({ space: 4 }) {
+      Row() {
+        SymbolGlyph($r('sys.symbol.chevron_left'))
+          .fontSize(PAGE_BACK_GLYPH_FP)
+          .fontColor([$r('app.color.nb_text_primary')])
+      }
+      .width(PAGE_BACK_TARGET_VP)
+      .height(PAGE_BACK_TARGET_VP)
+      .justifyContent(FlexAlign.Center)
+      .borderRadius(PAGE_BACK_TARGET_VP / 2)
+      .hoverEffect(HoverEffect.Highlight)
+      .focusable(true)
+      .onClick(() => {
+        this.closeVisibleSubflow();
+      })
+      Text(title)
+        .fontSize(TYPE_PAGE_TITLE_FP)
+        .maxFontScale(TYPE_SCALE_MAX_ROW)
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.nb_text_primary'))
+      // THE ACTION SLOT: reserved, empty, the same 40 vp the back target takes, so a
+      // future page action sits opposite the back arrow and the title stays put.
+      Row()
+        .width(PAGE_BACK_TARGET_VP)
+        .height(PAGE_BACK_TARGET_VP)
+    }
+    .width('100%')
+    .height(PAGE_TITLE_BAR_HEIGHT_VP)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  // 0.0.52 — the 1 vp divider between two rows of ONE settings group. Inset by the
+  // rows' own side padding, so the line never runs into the group's rounded corner
+  // (the peer list's dividers are inset the same way).
+  @Builder
+  settingsDivider() {
+    Row() {
+      Row()
+        .width('100%')
+        .height(1)
+        .backgroundColor($r('app.color.nb_card_border'))
+    }
+    .width('100%')
+    .padding({ left: SETTINGS_DIVIDER_INSET_VP, right: SETTINGS_DIVIDER_INSET_VP })
   }
 
   // 主题 (2026-10-09): the dot takes a resolved colour (Resource or literal) —
@@ -5383,7 +5530,11 @@ struct Index {
           Row() {
             Row({ space: COPY_ICON_GAP_VP }) {
               Text(peer.name)
-                .fontSize(TYPE_BODY_FP)
+                // 0.0.52: the dense list row's name keeps its own 15 fp — see
+                // PEER_ROW_NAME_FP in NetBirdHarmonyLayout for the arithmetic (the
+                // approved 600 vp split leaves the name column 203 vp, which holds a
+                // 28-char fqdn at 15 fp and not at 16).
+                .fontSize(PEER_ROW_NAME_FP)
                 .maxFontScale(TYPE_SCALE_MAX_ROW)
                 .fontColor($r('app.color.nb_text_primary'))
                 // Content-sized and ellipsised AT ITS BUDGET: >= 196 vp at every
@@ -5669,32 +5820,9 @@ struct Index {
   peerDetailBody() {
       // 对端详情：展示可得的全部字段。
       Column({ space: 8 }) {
-        Row({ space: 12 }) {
-          // 0.0.51: the back control is a bare arrow glyph, not a filled 返回
-          // button. This nested Row is only the tap target (40 vp tall, 10 vp
-          // side padding, no fill): what the screen shows is the arrow.
-          Row() {
-            Text('‹')
-              .fontSize(TYPE_PAGE_TITLE_FP)
-              .maxFontScale(TYPE_SCALE_MAX_ROW)
-              .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.nb_text_primary'))
-          }
-          .height(40)
-          .padding({ left: 10, right: 10 })
-          .justifyContent(FlexAlign.Center)
-          .hoverEffect(HoverEffect.Highlight)
-          .focusable(true)
-          .onClick(() => {
-            this.closeVisibleSubflow();
-          })
-          Text('对端详情')
-            .fontSize(TYPE_PAGE_TITLE_FP)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.nb_text_primary'))
-        }
-        .width('100%')
-        .margin({ top: 8 })
+        // 0.0.52: the ONE standard subpage title bar (56 vp, 24 fp back glyph in a
+        // 40 vp target, 20 fp title, reserved action slot) — see pageTitleBar.
+        this.pageTitleBar('对端详情')
         // 2026-10-08: the detail card now holds ~16 rows and no longer fits a
         // phone screen, so it lives in its own Scroll (the 返回/标题 row above
         // stays OUTSIDE the Scroll and therefore always reachable). layoutWeight
@@ -5917,26 +6045,34 @@ struct Index {
   @Builder
   peerListBody() {
       Column({ space: 16 }) {
-        // 0.0.37 (I2): the header is STACKED (title above the count) instead of
-        // `Row { title.layoutWeight(1); count }`. In the I1 rail the count's
-        // share of the row was what squeezed "0/0 已连接" into 已连/接; here the
-        // count owns the full pane width and is capped to one line, so it can
-        // never break a word.
-        Column({ space: 2 }) {
+        // 0.0.52 — THE OFFICIAL TAB-PAGE HEADER: ONE 32 fp Bold large title on the
+        // left and the connected-count CHIP on the right, both on one line. The chip
+        // is a 14 fp pill in the info tint (radius 999, 8/4 padding) that is centred
+        // against the title and never grows the row; the count keeps maxLines(1) +
+        // ellipsis, so "12/12 已连接" can never break between 已 and 连 (the I1 defect).
+        Row({ space: 8 }) {
           Text('对端')
-            .fontSize(TYPE_PAGE_TITLE_FP)
+            .fontSize(TYPE_LARGE_TITLE_FP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
-            .width('100%')
-          Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
-            .fontSize(TYPE_CAPTION_FP)
-            .fontColor($r('app.color.nb_text_secondary'))
-            .width('100%')
+            .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
+            .fontSize(TYPE_CAPTION_FP)
+            .maxFontScale(TYPE_SCALE_MAX_ROW)
+            .fontColor($r('app.color.nb_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .padding({
+              left: TITLE_CHIP_PADDING_H_VP, right: TITLE_CHIP_PADDING_H_VP,
+              top: TITLE_CHIP_PADDING_V_VP, bottom: TITLE_CHIP_PADDING_V_VP
+            })
+            .borderRadius(TITLE_CHIP_RADIUS_VP)
+            .backgroundColor($r('app.color.nb_status_info_background'))
         }
         .width('100%')
-        .alignItems(HorizontalAlign.Start)
+        .alignItems(VerticalAlign.Center)
         .margin({ top: 8 })
         // 0.0.38 (I3) F: the search field exists only when there is something to
         // search. Over an empty list it took a whole row of the narrow column to
@@ -5948,31 +6084,26 @@ struct Index {
         // design's column table (see peerSearchWidth for the 0.0.47 frame that
         // measured the difference and the framework rule behind it).
         if (this.peersList().length > 0) {
-          TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
-            .fontSize(TYPE_BODY_FP)
+          // 0.0.52 — THE SEARCH BAR IS ARKUI'S Search COMPONENT, not a TextInput.
+          // The official search field: 40 vp tall, 20 vp pill radius, card fill, the
+          // platform's own leading magnifier and clear button, 14 fp placeholder —
+          // and it keeps the SAME width source (100% of this page-padded Column) as
+          // the list card and the SAME onChange semantics: every edit writes
+          // this.peerQuery, which is exactly what filterPeers reads.
+          // Search exposes no fontSize attribute (its text is `textFont` /
+          // `placeholderFont`), so the two font roles are set there instead — the
+          // body size for the typed text, the caption size for the placeholder. The
+          // row ceiling is the component's own `.maxFontScale` (SDK search.d.ts:998).
+          Search({ value: this.peerQuery, placeholder: '搜索对端名称或 IP' })
             .maxFontScale(TYPE_SCALE_MAX_ROW)
-            .height(42)
+            .placeholderFont({ size: TYPE_CAPTION_FP })
+            .placeholderColor($r('app.color.nb_text_muted'))
+            .textFont({ size: TYPE_BODY_FP })
+            .height(PEER_SEARCH_HEIGHT_VP)
             .width(this.peerSearchWidth())
-            // 0.0.39 (I4) P2 (review §5.3): radius 12 — one octave below the cards'
-            // 16, so the field reads as a control rather than as another card. The
-            // leading magnifier glyph the review also asked for is deliberately NOT
-            // added: TextInput has no leading-icon slot, so it needs a Stack overlay
-            // over the field's own hit area, and `sys.symbol.magnifyingglass` is not
-            // enumerated anywhere in this SDK for a host check to pin.
-            .borderRadius(12)
-            .backgroundColor($r('app.color.nb_input_background'))
+            .borderRadius(PEER_SEARCH_RADIUS_VP)
+            .backgroundColor($r('app.color.nb_card_background'))
             .border({ width: 1, color: $r('app.color.nb_card_border') })
-            // 0.0.47 (I12) §2 — THE THIRD AXIS, kept; 0.0.48 (I13) is what makes it
-            // land. The padding puts the field's text on the SAME axis the peer names
-            // and addresses sit on (PEER_SEARCH_TEXT_INSET_VP = the row's reserved 3 vp
-            // marker + the shared 12 vp content padding) and ends it at the shared
-            // content padding, i.e. the row text region's own two edges. No new magic
-            // number: both terms are the constants the row already spends. It is
-            // measured from the field's own left border, so it can only be the row axis
-            // while that border IS the card's (peerSearchWidth below).
-            .padding({
-              left: PEER_SEARCH_TEXT_INSET_VP, right: PEER_ROW_CONTENT_PADDING_VP
-            })
             .onChange((value: string): void => {
               this.peerQuery = value;
             })
@@ -6077,6 +6208,12 @@ struct Index {
       }
       .width('100%')
       .height('100%')
+      // 0.0.52: the 对端 page keeps the 16 vp margin on BOTH branches, deliberately
+      // NOT the wide branch's 24. In the split shell this body IS the 280…480 vp list
+      // column, and 24 vp per side would take 16 vp out of the row's text budget at
+      // 840 vp — the approved 28-character fqdn floor (203 vp) would fall to 187 and
+      // the pinned guarantee would break. The wide 24 vp belongs to the pages that
+      // actually occupy the pane (设置, the guide, the overview) — see pagePadding().
       .padding(RAIL_PAGE_PADDING_VP)
       .backgroundColor($r('app.color.nb_page_background'))
   }
@@ -6086,11 +6223,16 @@ struct Index {
   @Builder
   setupFormCard() {
     Column({ space: 12 }) {
-      Text(this.configured ? '更改服务器配置' : '服务器配置')
-        .fontSize(TYPE_SECTION_TITLE_FP)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.nb_text_primary'))
-        .width('100%')
+      // 0.0.52: on an UNCONFIGURED install the group title above already says
+      // 服务器配置, so the form does not repeat it (one label, not two stacked). While
+      // editing an existing configuration the heading still names the mode.
+      if (this.configured) {
+        Text('更改服务器配置')
+          .fontSize(TYPE_SECTION_TITLE_FP)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.nb_text_primary'))
+          .width('100%')
+      }
       TextInput({ text: this.urlInput, placeholder: '服务器地址（https://…）' })
         .fontSize(TYPE_BODY_FP)
         .maxFontScale(TYPE_SCALE_MAX_ROW)
@@ -6227,89 +6369,83 @@ struct Index {
 
   @Builder
   serverConfigCard() {
-    Column({ space: 10 }) {
-      Text('当前配置')
-        .fontSize(TYPE_SECTION_TITLE_FP)
-        .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.nb_text_primary'))
-        .width('100%')
-      Text('服务器地址')
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width('100%')
-      Text(this.configuredUrl)
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_secondary'))
-        .width('100%')
-        .maxLines(3)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text('登录方式')
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width('100%')
-      Text(this.authMode === ACCOUNT_MODE_ACCOUNT ? '账户登录' : 'Setup Key')
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_secondary'))
-        .width('100%')
+    // 0.0.52 — the group container: the 服务器配置 group's own box. Rows are the
+    // settings grammar (label 16 fp left, value 14 fp secondary right, 48 vp+ band,
+    // 16 vp side padding, 1 vp inset dividers); the edit entry and the destructive
+    // 注销 sit inside the same box, behind dividers, because they belong to THIS
+    // group (the server configuration the device is registered against).
+    Column({ space: 0 }) {
+      SettingsRow({
+        label: '服务器地址',
+        value: this.configuredUrl,
+        valueLines: 2
+      })
+      this.settingsDivider()
+      SettingsRow({
+        label: '登录方式',
+        value: this.authMode === ACCOUNT_MODE_ACCOUNT ? '账户登录' : 'Setup Key'
+      })
       if (this.authMode === ACCOUNT_MODE_ACCOUNT) {
         Text('账户凭据过期时，可重新登录。')
           .fontSize(TYPE_CAPTION_FP)
-          .fontColor($r('app.color.nb_text_tertiary'))
+          .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
+          .padding({ left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP,
+            bottom: 8 })
       }
-      Button('更改配置')
-        .fontSize(TYPE_BODY_FP)
-        .maxFontScale(TYPE_SCALE_MAX_ROW)
-        .height(40)
-        // 0.0.38 (I3) D: a normal-width button, not a card-wide bar. 更改配置 is a
-        // secondary edit entry; stretched across the card it read as the page's
-        // primary action.
-        // 0.0.39 (I4) P0.3: 240 vp (the review's §3.3 number), left-aligned by the
-        // card's own alignItems(Start).
-        .width(BUTTON_INLINE_WIDTH_VP)
-        .backgroundColor($r('app.color.nb_primary'))
-        .fontColor($r('app.color.nb_on_primary'))
-        .enabled(!this.accountModeSwitchBlocked())
-        .onClick(() => this.beginConfigurationEdit())
+      // 0.0.38 (I3) D / 0.0.39 (I4) P0.3: a 240 vp left-aligned edit entry, never a
+      // card-wide bar (it is the secondary action of this block).
+      Row() {
+        Button('更改配置')
+          .fontSize(TYPE_BODY_FP)
+          .maxFontScale(TYPE_SCALE_MAX_ROW)
+          .height(40)
+          .width(BUTTON_INLINE_WIDTH_VP)
+          .backgroundColor($r('app.color.nb_primary'))
+          .fontColor($r('app.color.nb_on_primary'))
+          .enabled(!this.accountModeSwitchBlocked())
+          .onClick(() => this.beginConfigurationEdit())
+      }
+      .width('100%')
+      .padding({ left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP, bottom: 12 })
       if (this.accountModeSwitchBlocked()) {
         Text('断开 VPN 后可更改配置')
           .fontSize(TYPE_CAPTION_FP)
           .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
+          .padding({ left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP,
+            bottom: 8 })
       }
       // 0.0.39 (I4) P0.3 (review §3.3 / §4.4): 注销并从管理端移除本设备 used to be an
-      // ORPHAN red row between two cards, 8 vp of padding away from both — a
-      // destructive action with no container, which reads as an accident rather
-      // than as a danger zone. It lives INSIDE this card now, behind a 1 vp top
-      // divider: the destructive act is still the last, red thing in the block it
-      // belongs to (the server configuration it removes the device from).
-      Row() {
-        Row()
-          .width('100%')
-          .height(1)
-          .backgroundColor($r('app.color.nb_card_border'))
-      }
-      .width('100%')
-      .margin({ top: 6, bottom: 2 })
+      // ORPHAN red row between two cards — a destructive action with no container.
+      // It lives INSIDE this group now, behind a 1 vp divider: the destructive act
+      // is still the last, red thing in the block it belongs to.
+      this.settingsDivider()
       this.logoutAction()
     }
     .width('100%')
-    .padding(16)
+    .borderRadius(SETTINGS_GROUP_RADIUS_VP)
     // 0.0.37 (I2): radius 8 → 16 and the shared role stroke: one card look for
     // every card on every page (these two were the only 8 vp-radius outliers).
-    .borderRadius(16)
     .border({ width: 1, color: $r('app.color.nb_card_border') })
     .backgroundColor($r('app.color.nb_card_background'))
+    .clip(true)
     .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
   logoutAction() {
+    // 0.0.52: the destructive row is a full settings row (16 fp danger ink, 48 vp band,
+    // 16 vp side padding) rather than a small padded red caption.
     Text(this.logoutRemoteActive() ? '注销并从管理端移除本设备' : '清除本机配置')
-      .fontSize(TYPE_CAPTION_FP)
+      .fontSize(TYPE_SECTION_TITLE_FP)
+      .maxFontScale(TYPE_SCALE_MAX_ROW)
       .fontColor($r('app.color.nb_status_error'))
       .width('100%')
-      .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+      .constraintSize({ minHeight: SETTINGS_ROW_MIN_HEIGHT_VP })
+      .padding({
+        left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP, top: 8, bottom: 8
+      })
       .onClick(() => {
         hilog.info(DOMAIN, TAG, 'UI_SETUP_LOGOUT_CLICKED');
         this.requestLogout();
@@ -6421,30 +6557,8 @@ struct Index {
   @Builder
   detailStatusView() {
     Column({ space: 4 }) {
-      Row({ space: 12 }) {
-        // 0.0.51: same arrow back control as 对端详情 (36 vp tap target, no fill).
-        Row() {
-          Text('‹')
-            .fontSize(TYPE_PAGE_TITLE_FP)
-            .maxFontScale(TYPE_SCALE_MAX_ROW)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.nb_text_primary'))
-        }
-        .height(40)
-        .padding({ left: 10, right: 10 })
-        .justifyContent(FlexAlign.Center)
-        .hoverEffect(HoverEffect.Highlight)
-        .focusable(true)
-        .onClick(() => {
-          this.closeVisibleSubflow();
-        })
-        Text('详细状态')
-          .fontSize(TYPE_PAGE_TITLE_FP)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.nb_text_primary'))
-      }
-      .width('100%')
-      .margin({ top: 8, bottom: 8 })
+      // 0.0.52: the one standard subpage title bar (see pageTitleBar).
+      this.pageTitleBar('详细状态')
 
       if (this.published === null) {
         Column({ space: 4 }) {
@@ -6634,16 +6748,17 @@ struct Index {
   settingsTab() {
     Scroll() {
       Column({ space: 0 }) {
-        // 0.0.51: a subpage (详细状态 / 路由选择) carries its own title in the
-        // back row below, so the parent 「设置」 title is not rendered above it —
-        // one title on screen, not two.
+        // 0.0.51: a subpage (详细状态 / 路由选择) carries its own title bar, so the
+        // parent 「设置」 title is not rendered above it — one title on screen.
+        // 0.0.52: the LANDING page's title is the official 32 fp Bold large title,
+        // so a tab page opens with ONE large title and nothing stacked over it.
         if (!this.showDiagnostics && !this.routeSelectionOpen) {
           Text('设置')
-            .fontSize(TYPE_PAGE_TITLE_FP)
+            .fontSize(TYPE_LARGE_TITLE_FP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
-            .margin({ top: 8, bottom: 4 })
+            .margin({ top: 8, bottom: 8 })
         }
         if (this.showDiagnostics) {
           this.detailStatusView()
@@ -6651,93 +6766,79 @@ struct Index {
           // 路由选择: an internal SETTINGS page (back returns to 设置).
           this.routeSelectionView()
         } else {
+          // ---- 服务器配置 ------------------------------------------------------
+          // 0.0.52 — THE OFFICIAL GROUPED LIST. One muted 14 fp group title outside,
+          // ONE 16 vp-radius container inside, rows 48…56 vp with 1 vp inset
+          // dividers. The old shape was one 16 vp card PER ITEM (nine boxes), which
+          // read as nine sections rather than one page's settings.
           this.sectionTitle('服务器配置')
           if (this.showSetupForm || !this.configured) {
             this.setupFormCard()
           } else {
-            // 0.0.39 (I4) P0.3: 注销并从管理端移除本设备 is no longer a second, orphan
-            // row here — it lives inside serverConfigCard, behind a divider.
+            // 0.0.39 (I4) P0.3: 注销并从管理端移除本设备 lives inside
+            // serverConfigCard, behind a divider.
             this.serverConfigCard()
           }
           // 2026-10-10 后台保活（实验，方案 A）: always visible — a user who wants
           // this off must be able to say so without credentials in place.
           this.sectionTitle('后台保活（实验）')
           this.keepAliveCard()
+          // ---- 关于 -----------------------------------------------------------
           this.sectionTitle('关于')
-          Column() {
-            // 0.0.39 (I4) P0.3 (review §3.3): the settings idiom for a read-only row
-            // is label left, VALUE RIGHT — a version number floating at the label
-            // column's own edge reads as a caption, not as the value of its row.
-            DetailRow({
+          Column({ space: 0 }) {
+            SettingsRow({
               label: '版本',
-              value: this.versionName.length > 0 ? this.versionName : '未知',
-              valueEnd: true
+              value: this.versionName.length > 0 ? this.versionName : '未知'
             })
-            DetailRow({
+            this.settingsDivider()
+            SettingsRow({
               label: '版本号',
-              value: this.versionCode >= 0 ? this.versionCode.toString() : '未知',
-              valueEnd: true
+              value: this.versionCode >= 0 ? this.versionCode.toString() : '未知'
             })
           }
           .width('100%')
-          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-          .borderRadius(16)
-          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
-          // in dark mode instead of a slightly-different dark rectangle (the I1
-          // screenshot's complaint). One role, both themes, no second surface.
+          .borderRadius(SETTINGS_GROUP_RADIUS_VP)
+          // 0.0.37 (I2): every group gets the 1 vp role stroke, so a box is a box
+          // in dark mode instead of a slightly-different dark rectangle.
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
+          .clip(true)
           .alignItems(HorizontalAlign.Start)
+          // ---- 诊断日志 -------------------------------------------------------
           this.sectionTitle('诊断日志')
           this.diagnosticsLogCard()
-          this.sectionTitle('详细状态')
-          Row({ space: 8 }) {
-            Text('详细状态')
-              .fontSize(TYPE_SECTION_TITLE_FP)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-            Text('›')
-              .fontSize(TYPE_CHEVRON_FP)
-              .fontColor($r('app.color.nb_text_muted'))
+          // ---- 状态与路由 -----------------------------------------------------
+          // 0.0.52: the two navigation rows now share ONE group (they were two
+          // full-width cards with their own section titles, one per row).
+          this.sectionTitle('状态与路由')
+          Column({ space: 0 }) {
+            SettingsRow({
+              label: '详细状态',
+              tappable: true,
+              chevron: true,
+              onTap: (): void => {
+                this.detailStatusOriginTab = 2;
+                this.showDiagnostics = true;
+              }
+            })
+            this.settingsDivider()
+            SettingsRow({
+              label: '路由选择',
+              value: this.routeSummaryText(),
+              tappable: true,
+              chevron: true,
+              onTap: (): void => {
+                this.openRouteSelection();
+              }
+            })
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
-          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
-          // in dark mode instead of a slightly-different dark rectangle (the I1
-          // screenshot's complaint). One role, both themes, no second surface.
+          .borderRadius(SETTINGS_GROUP_RADIUS_VP)
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
-          .onClick(() => {
-            this.detailStatusOriginTab = 2;
-            this.showDiagnostics = true;
-          })
-          this.sectionTitle('路由选择')
-          Row({ space: 8 }) {
-            Text('路由选择')
-              .fontSize(TYPE_SECTION_TITLE_FP)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-            Text(this.routeSummaryText())
-              .fontSize(TYPE_CAPTION_FP)
-              .fontColor($r('app.color.nb_text_muted'))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Text('›')
-              .fontSize(TYPE_CHEVRON_FP)
-              .fontColor($r('app.color.nb_text_muted'))
-          }
-          .width('100%')
-          .padding(16)
-          .borderRadius(16)
-          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
-          // in dark mode instead of a slightly-different dark rectangle (the I1
-          // screenshot's complaint). One role, both themes, no second surface.
-          .border({ width: 1, color: $r('app.color.nb_card_border') })
-          .backgroundColor($r('app.color.nb_card_background'))
-          .onClick(() => {
-            this.openRouteSelection();
-          })
+          .clip(true)
+          .alignItems(HorizontalAlign.Start)
+          // ---- 应用 -----------------------------------------------------------
           // 2026-10-13 PC 托盘（0.0.29）；2026-10-13 统一退出（0.0.31）: the explicit
           // exit, the same flow the tray's 退出 row and the system-generated tray
           // 退出 run. It is deliberately NOT "close the window" — this app's window
@@ -6745,35 +6846,33 @@ struct Index {
           // EntryAbility.registerCloseToBackground), so the only way to really
           // leave AND disconnect must be visible in the app itself.
           this.sectionTitle('应用')
-          Row({ space: 8 }) {
-            Text('退出应用（断开 VPN）')
-              .fontSize(TYPE_SECTION_TITLE_FP)
-              .fontColor($r('app.color.nb_text_primary'))
-              .layoutWeight(1)
-            Text('›')
-              .fontSize(TYPE_CHEVRON_FP)
-              .fontColor($r('app.color.nb_text_muted'))
+          Column({ space: 0 }) {
+            SettingsRow({
+              label: '退出应用（断开 VPN）',
+              tappable: true,
+              chevron: true,
+              onTap: (): void => {
+                this.confirmExplicitQuit();
+              }
+            })
           }
           .width('100%')
-          .padding(16)
-          .borderRadius(16)
-          // 0.0.37 (I2): every card gets the 1 vp role stroke, so a card is a card
-          // in dark mode instead of a slightly-different dark rectangle (the I1
-          // screenshot's complaint). One role, both themes, no second surface.
+          .borderRadius(SETTINGS_GROUP_RADIUS_VP)
           .border({ width: 1, color: $r('app.color.nb_card_border') })
           .backgroundColor($r('app.color.nb_card_background'))
-          .onClick(() => {
-            this.confirmExplicitQuit();
-          })
+          .clip(true)
+          .alignItems(HorizontalAlign.Start)
           Text('关闭窗口只是隐藏到后台，连接保持；「退出应用」和状态栏图标菜单里的「退出」都会先断开 VPN 并停止后台保活，再结束应用。')
             .fontSize(TYPE_CAPTION_FP)
             .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
-            .margin({ top: 6 })
+            .margin({ top: 8 })
         }
       }
       .width('100%')
-      .padding(RAIL_PAGE_PADDING_VP)
+      // 0.0.52: 16 vp on the narrow branch, 24 vp on the wide one (the official
+      // page margin is 16 / 24 — see pagePaddingVp).
+      .padding(this.pagePadding())
       // 0.0.39 (I4) P0.3: the settings column is capped at 680 vp (I3 used 840; the
       // review's §3.3 measured the result and asked for a form column) instead of
       // letting every card stretch the full window width. The cap is CENTRED by this
@@ -6841,30 +6940,8 @@ struct Index {
   @Builder
   routeSelectionView() {
     Column({ space: 10 }) {
-      Row({ space: 12 }) {
-        // 0.0.51: same arrow back control as 对端详情 (36 vp tap target, no fill).
-        Row() {
-          Text('‹')
-            .fontSize(TYPE_PAGE_TITLE_FP)
-            .maxFontScale(TYPE_SCALE_MAX_ROW)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.nb_text_primary'))
-        }
-        .height(40)
-        .padding({ left: 10, right: 10 })
-        .justifyContent(FlexAlign.Center)
-        .hoverEffect(HoverEffect.Highlight)
-        .focusable(true)
-        .onClick(() => {
-          this.closeVisibleSubflow();
-        })
-        Text('路由选择')
-          .fontSize(TYPE_PAGE_TITLE_FP)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.nb_text_primary'))
-      }
-      .width('100%')
-      .margin({ top: 8 })
+      // 0.0.52: the one standard subpage title bar (see pageTitleBar).
+      this.pageTitleBar('路由选择')
 
       Text('按网络（NetID）选择要走隧道的 IPv4 路由；同一网络的高可用候选始终一起开关。' +
         '改动立即保存并通知当前连接，离线时下次连接生效；切换瞬间可能短暂中断数据。' +
@@ -6885,33 +6962,44 @@ struct Index {
           .width('100%')
       }
 
-      Row({ space: 12 }) {
-        Button('全部启用')
+      // 0.0.52 — THE BATCH ACTIONS ARE TEXT BUTTONS, NOT FULL-WIDTH BARS.
+      // The official grouped list puts a group-level action at the RIGHT of the
+      // section's own text line (14 fp, primary ink, no background block). The two
+      // actions keep exactly the same handlers and the same disabled rule as the two
+      // 38 vp buttons they replace; the caption that used to sit under them rides on
+      // the left of the same line, so nothing is added or lost.
+      Row({ space: 16 }) {
+        Text('全部停用也适用于以后新增的路由')
+          .fontSize(TYPE_CAPTION_FP)
+          .fontColor($r('app.color.nb_text_muted'))
+          .layoutWeight(1)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text('全部启用')
           .fontSize(TYPE_CAPTION_FP)
           .maxFontScale(TYPE_SCALE_MAX_ROW)
-          .height(38)
-          .layoutWeight(1)
-          .backgroundColor($r('app.color.nb_card_background'))
-          .fontColor($r('app.color.nb_text_primary'))
-          .border({ width: 1, color: $r('app.color.nb_border') })
+          .fontColor(this.routeLoadError
+            ? $r('app.color.nb_text_muted') : $r('app.color.nb_primary'))
+          .padding({ top: 8, bottom: 8, left: 8, right: 8 })
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
           .enabled(!this.routeLoadError)
           .onClick(() => this.routeEnableAll())
-        Button('全部停用')
+        Text('全部停用')
           .fontSize(TYPE_CAPTION_FP)
           .maxFontScale(TYPE_SCALE_MAX_ROW)
-          .height(38)
-          .layoutWeight(1)
-          .backgroundColor($r('app.color.nb_card_background'))
-          .fontColor($r('app.color.nb_text_primary'))
-          .border({ width: 1, color: $r('app.color.nb_border') })
+          .fontColor(this.routeLoadError
+            ? $r('app.color.nb_text_muted') : $r('app.color.nb_primary'))
+          .padding({ top: 8, bottom: 8, left: 8, right: 8 })
+          .hoverEffect(HoverEffect.Highlight)
+          .focusable(true)
           .enabled(!this.routeLoadError)
           .onClick(() => this.routeDisableAll())
       }
       .width('100%')
-      Text('全部停用也适用于以后新增的路由')
-        .fontSize(TYPE_CAPTION_FP)
-        .fontColor($r('app.color.nb_text_muted'))
-        .width('100%')
+      .alignItems(VerticalAlign.Center)
+      // (the old caption row: 「全部停用也适用于以后新增的路由」 now lives on the line
+      // above, so it is not repeated here)
 
       if (this.routeLoadError) {
         Text(this.routeLoadErrorText)
@@ -7523,6 +7611,15 @@ struct Index {
    */
   private peerSearchWidth(): Length {
     return '100%';
+  }
+
+  /**
+   * 0.0.52 — the PAGE's horizontal padding (vp): 16 on the narrow branch, 24 on the
+   * wide one. The pure module owns both numbers and the classifier (pagePaddingVp,
+   * the same paneLayoutOf split), so a page margin cannot drift from the shell.
+   */
+  private pagePadding(): number {
+    return pagePaddingVp(this.widthVp);
   }
 
   /**
@@ -8171,9 +8268,11 @@ struct Index {
       Column() {
         // The SAME header as peerListBody's (title + one caption line), so the page
         // starts in the same place whether the tunnel is up or down.
+        // 0.0.52: the title is the same 32 fp Bold large title the list page opens
+        // with (the count chip has no business here — there is no list to count).
         Column({ space: 2 }) {
           Text('对端')
-            .fontSize(TYPE_PAGE_TITLE_FP)
+            .fontSize(TYPE_LARGE_TITLE_FP)
             .fontWeight(FontWeight.Bold)
             .fontColor($r('app.color.nb_text_primary'))
             .width('100%')
@@ -8267,7 +8366,8 @@ struct Index {
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
-      .padding(RAIL_PAGE_PADDING_VP)
+      // 0.0.52: the official page margin (16 narrow / 24 wide).
+      .padding(this.pagePadding())
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -8467,7 +8567,8 @@ struct Index {
       }
       .width('100%')
       .constraintSize({ maxWidth: OVERVIEW_CONTENT_MAX_WIDTH_VP })
-      .padding(RAIL_PAGE_PADDING_VP)
+      // 0.0.52: the official page margin (16 narrow / 24 wide).
+      .padding(this.pagePadding())
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')

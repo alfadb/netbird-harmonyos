@@ -748,7 +748,10 @@ try {
     closeHandler.includes('this.activeTab === 2 && !this.showDiagnostics && this.routeSelectionOpen'));
   check('W4 the global all-off note and the plain-Chinese catalog/empty states are unchanged',
     PAGE.includes("Text('全部停用也适用于以后新增的路由')") &&
-    PAGE.includes("this.sectionTitle('路由选择')") &&
+    // 0.0.52: the settings entry is the 状态与路由 group's 路由选择 row (the grouped
+    // list replaced the per-item card and its own section title).
+    PAGE.includes("this.sectionTitle('状态与路由')") &&
+    PAGE.includes("label: '路由选择'") &&
     sliceFrom(PAGE, 'private routeCatalogNote(): string', 'private routeEmptyText(): string')
       .includes('上次连接获取') &&
     sliceFrom(PAGE, 'private routeEmptyText(): string', 'private routeNoRowsText(): string')

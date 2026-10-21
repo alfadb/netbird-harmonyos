@@ -397,12 +397,20 @@ export function wideGuideKind(facts: WidePaneFacts): string {
 // uses to hold those claims; the page reads only the three caps.
 /** The app title inside the rail ("NetBird"). */
 export const TYPE_APP_TITLE_FP: number = 22;
-/** A page/section headline (对端, 设置, 对端详情, the guide's state). */
+/**
+ * 0.0.52 — THE LARGE PAGE TITLE (32 fp Bold). HarmonyOS's own settings app opens a
+ * tab page with one large title at the page's top-left (设置 / 对端 here), and the
+ * official type scale's "大标题" is 32 fp. It replaces the 20 fp page headline on the
+ * TWO tab pages only; a subpage keeps TYPE_PAGE_TITLE_FP 20 in its title bar, which
+ * is the standard 标题栏 hierarchy (large title on the landing page, 20 fp inside).
+ */
+export const TYPE_LARGE_TITLE_FP: number = 32;
+/** A page/section headline (对端详情, 设置 subpages, the guide's state). */
 export const TYPE_PAGE_TITLE_FP: number = 20;
-/** A settings group header above its cards. */
+/** A settings group header above its group container (16 fp row labels). */
 export const TYPE_SECTION_TITLE_FP: number = 16;
-/** Body text and the primary value of a label/value row. */
-export const TYPE_BODY_FP: number = 15;
+/** Body text and the primary value of a label/value row (官方 正文 16 fp). */
+export const TYPE_BODY_FP: number = 16;
 /** Secondary/caption text: ≥ 12 vp everywhere, ≥ 14 vp on the PC (this value). */
 export const TYPE_CAPTION_FP: number = 14;
 /** The 连接概览 pane's stat-tile number (the review's 24 vp Medium tile figure). */
@@ -412,6 +420,76 @@ export const TYPE_STAT_VALUE_FP: number = 24;
  * label. It used to be a bare `18` literal at five call sites.
  */
 export const TYPE_CHEVRON_FP: number = 18;
+
+// ---------------------------------------------------------------------------
+// 0.0.52 — THE OFFICIAL PAGE CHROME
+// ---------------------------------------------------------------------------
+// The owner's brief for this round: align the LOOK (nothing else) with HarmonyOS's
+// official design language — a standard title hierarchy, one settings-style grouped
+// list, 8 vp spacing, ≥ 40/48 vp hit areas, PC weak text at ≥ 14 fp. Every number
+// below is the one the page uses, so the host check can pin the scale instead of
+// grepping for literals.
+//
+// THE TITLE HIERARCHY
+//   tab page (设置 / 对端): one TYPE_LARGE_TITLE_FP 32 title, Bold, top-left.
+//   subpage (对端详情 / 详细状态 / 路由选择): ONE 56 vp title bar, back glyph at 24 fp
+//   inside a 40 vp hit target, the title at TYPE_PAGE_TITLE_FP 20 next to it, and a
+//   reserved empty action slot on the right so the title stays left-aligned.
+/** The subpage title bar's height (vp) — the standard 标题栏 band. */
+export const PAGE_TITLE_BAR_HEIGHT_VP: number = 56;
+/** The back arrow's ink size (fp) inside that bar. */
+export const PAGE_BACK_GLYPH_FP: number = 24;
+/** The back arrow's hit target (vp) — ≥ 40 vp, the pointer/touch floor. */
+export const PAGE_BACK_TARGET_VP: number = 40;
+
+/**
+ * The page's horizontal padding (vp): 16 on the narrow branch, 24 on the wide one.
+ * The wide branch is the split shell — the same breakpoint that mounts it
+ * (HARMONY_BP_LG_VP) is what widens the padding, so "wide page" and "wide shell"
+ * cannot disagree. The RAIL keeps its own 16 (it is a navigation column whose width
+ * table is measured from that number, not a page).
+ */
+export const PAGE_PADDING_NARROW_VP: number = 16;
+export const PAGE_PADDING_WIDE_VP: number = 24;
+export function pagePaddingVp(widthVp: number): number {
+  return paneLayoutOf(widthVp) === PANE_SPLIT ? PAGE_PADDING_WIDE_VP : PAGE_PADDING_NARROW_VP;
+}
+
+// ---- the settings grouped list ---------------------------------------------
+// Official settings shape: a 14 fp muted GROUP TITLE outside the box, then ONE
+// container holding every row of the group, 1 vp dividers between the rows, each
+// row 48…56 vp tall with 16 vp side padding. A row that navigates carries '›' at
+// the caption size on its right; a row with a value shows it right-aligned in the
+// secondary ink.
+/** The group container's corner radius (vp) — the app's one card radius. */
+export const SETTINGS_GROUP_RADIUS_VP: number = 16;
+/** The shortest row of a settings group (vp) — the ≥ 48 vp pointer row. */
+export const SETTINGS_ROW_MIN_HEIGHT_VP: number = 48;
+/** A settings row's left/right padding (vp) — the group's own text axis. */
+export const SETTINGS_ROW_PADDING_VP: number = 16;
+/** The divider's inset inside a group (vp): the rows' own side padding. */
+export const SETTINGS_DIVIDER_INSET_VP: number = SETTINGS_ROW_PADDING_VP;
+/** The group title's font size (fp) — caption scale, muted, outside the box. */
+export const SETTINGS_GROUP_TITLE_FP: number = TYPE_CAPTION_FP;
+/** The group title's 8 vp-grid margins (vp). */
+export const SETTINGS_GROUP_TITLE_TOP_VP: number = 24;
+export const SETTINGS_GROUP_TITLE_BOTTOM_VP: number = 8;
+
+// ---- the 对端 page's title chip --------------------------------------------
+/**
+ * The connected-count chip beside the 对端 large title: a pill (radius 999) in the
+ * info tint, 8/4 vp padding, caption-size text. It is a CHIP, not a second title
+ * line — the Row centres it against the 32 fp title and it never grows the row.
+ */
+export const TITLE_CHIP_RADIUS_VP: number = 999;
+export const TITLE_CHIP_PADDING_H_VP: number = 8;
+export const TITLE_CHIP_PADDING_V_VP: number = 4;
+
+// ---- the 对端 search field --------------------------------------------------
+/** The Search field's height (vp) — the official search bar, 40 vp. */
+export const PEER_SEARCH_HEIGHT_VP: number = 40;
+/** The Search field's corner radius (vp) — a full pill for a 40 vp bar. */
+export const PEER_SEARCH_RADIUS_VP: number = 20;
 
 // ---- the three ceilings (0.0.46) -------------------------------------------
 /** The app's ceiling — AppScope/resources/base/profile/configuration.json. */
@@ -798,6 +876,20 @@ export const PEER_ROW_NAME_CHAR_VP: number = 7;
 /** The floor line 1's name column must clear: a real 28-character fqdn at 14 vp. */
 export const PEER_ROW_NAME_MIN_WIDTH_VP: number =
   PEER_ROW_FQDN_CHARS * PEER_ROW_NAME_CHAR_VP;
+/**
+ * 0.0.52 — THE PEER ROW NAME'S OWN SIZE (15 fp), deliberately NOT following
+ * TYPE_BODY_FP's move to 16.
+ *
+ * The reason is arithmetic, not taste. The approved compact split (840 vp window ⇒
+ * 600 vp pane ⇒ 280 vp list / 320 vp detail) leaves the name column 203 vp
+ * (peerRowTextWidthFor(840) 221 − the compact meta 18). At 15 fp a 28-character
+ * fqdn needs 28 × 7 = 196 vp and fits; at 16 fp it needs 28 × 8 = 224 vp and would
+ * be ellipsised at that one tier. Widening the list column to pay for it would mean
+ * changing Navigation's own 600 vp split reservation — which this round explicitly
+ * does not touch (and the 28-char guarantee is a pinned acceptance property). So the
+ * dense row keeps 15 fp and every other body run in the app takes the 16 fp scale.
+ */
+export const PEER_ROW_NAME_FP: number = 15;
 // 0.0.41 (I6) §3: PEER_SEARCH_MAX_WIDTH_VP (320) is RETIRED. The search field is
 // the list card's own width now (peerListCardWidthVp below) — see that function.
 
@@ -1699,12 +1791,17 @@ export const DETAIL_ROW_ICON_SLOT_VP: number = 16;
 /**
  * The gap between the leading glyph and the label (vp). Tighter than
  * DETAIL_ROW_GAP_VP because the glyph reads as part of the label, and because this
- * pair (slot + gap) is the only width the value column pays for the glyph: at the
- * narrowest wide tier the value keeps 108 vp of its former 132 (the copyable rows
- * keep 108 against the copy rows' former 128), which still clears the one-line floor
- * below.
+ * pair (slot + gap) is the only width the value column pays for the glyph.
+ *
+ * 0.0.52 — 4 → 2, and the reason is arithmetic: TYPE_BODY_FP rose 15 → 16, so the
+ * one-line IPv4 floor rose with it (DETAIL_ROW_VALUE_CHARS 14 × 8 = 112 vp), while
+ * the narrowest detail pane (320 vp) leaves the value column 111 vp with the old
+ * 4 vp gap. The gap pays the 1 vp the floor needed plus 1 vp of slack (value 113).
+ * The pair's total (slot 16 + gap) is still what the row's own budget subtracts, so
+ * nothing else in the row moves; the glyph's 16 vp box already reads as separated
+ * from the label because the drawn marks ink only the middle of that box.
  */
-export const DETAIL_ROW_ICON_GAP_VP: number = 4;
+export const DETAIL_ROW_ICON_GAP_VP: number = 2;
 /**
  * The gap between the label block and the value, and between the value and the copy
  * mark (vp) — the detail row's own `Row({ space: DETAIL_ROW_GAP_VP })`, unchanged

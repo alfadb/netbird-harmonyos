@@ -93,19 +93,24 @@ try {
   const loginArgs = fontArgs(LOGIN);
   const SCALE_NAMES: string[] = ['TYPE_APP_TITLE_FP', 'TYPE_PAGE_TITLE_FP',
     'TYPE_SECTION_TITLE_FP', 'TYPE_BODY_FP', 'TYPE_CAPTION_FP', 'TYPE_STAT_VALUE_FP',
-    'TYPE_CHEVRON_FP'];
+    'TYPE_CHEVRON_FP', 'TYPE_LARGE_TITLE_FP',
+    // 0.0.52: the round's own fp roles — the dense peer row's name (15), the settings
+    // group title (14, an alias of the caption) and the title bar's back glyph (24).
+    'PEER_ROW_NAME_FP', 'SETTINGS_GROUP_TITLE_FP', 'PAGE_BACK_GLYPH_FP'];
 
   // =========================================================================
   // A. THE UNIT: every font size is the fp scale, never a fixed-unit literal
   // =========================================================================
-  check('A: the page has 129 fontSize call sites (the pinned inventory of 0.0.47)',
-    // 0.0.47 (I12) §3 DELIBERATE UPDATE: 130 → 129. The collapsed sections' expand
-    // indicator is a DRAWN 12 vp Path stroke now (a Unicode ▾/▸ at the caption size
-    // inked only a fraction of its em box — the re-review's "仍像很小的针点"), so the
-    // DetailSectionHeader's third Text and its fontSize call are gone. It carried no
-    // maxFontScale and no fixed height of its own, so no other pin moves: the page's
-    // cap inventory (38) is untouched.
-    pageArgs.length === 129, `got ${pageArgs.length}`);
+  check('A: the page has 115 fontSize call sites (the pinned inventory of 0.0.52)',
+    // 0.0.52 DELIBERATE UPDATE: 129 → 115. The settings page's per-item cards became
+    // ONE SettingsRow component (3 sizes) plus group containers, the three back rows
+    // became ONE pageTitleBar builder (2 sizes), the route page's two 38 vp buttons
+    // became two text actions, the 关于 rows moved to SettingsRow, and the search field
+    // is ArkUI's Search component (which sizes its text through textFont /
+    // placeholderFont, so it carries no fontSize call at all). The INVENTORY is what
+    // this check pins (a new ad-hoc size must be a deliberate edit); the scale itself
+    // is still checked by the "names one constant" assertion below.
+    pageArgs.length === 115, `got ${pageArgs.length}`);
   check('A: the login chrome has 3 (the page title and its two captions)',
     loginArgs.length === 3, `got ${loginArgs.length}`);
   check('A: NO font size is a numeric literal (a bare number IS fp, but a literal is ' +
@@ -136,20 +141,23 @@ try {
   // =========================================================================
   // B. THE SCALE: the values are unchanged, and they are fp
   // =========================================================================
-  check('B: the six scale values are byte-identical to 0.0.45 (22/20/16/15/14/24)',
-    m.TYPE_APP_TITLE_FP === 22 && m.TYPE_PAGE_TITLE_FP === 20 &&
-    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 15 &&
+  check('B: the official scale is 32 / 20 / 16 / 16 / 14 / 24 (0.0.52)',
+    m.TYPE_APP_TITLE_FP === 22 && m.TYPE_LARGE_TITLE_FP === 32 &&
+    m.TYPE_PAGE_TITLE_FP === 20 &&
+    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 16 &&
     m.TYPE_CAPTION_FP === 14 && m.TYPE_STAT_VALUE_FP === 24);
-  check('B: the disclosure mark is the same 18 fp it was as a literal',
-    m.TYPE_CHEVRON_FP === 18 && PAGE.split('.fontSize(TYPE_CHEVRON_FP)').length - 1 === 5);
+  check('B: the one row chevron role is still 18 fp at its two remaining sites, and ' +
+    'the settings rows take the caption-size 14 fp mark',
+    m.TYPE_CHEVRON_FP === 18 && PAGE.split('.fontSize(TYPE_CHEVRON_FP)').length - 1 === 2 &&
+    PAGE.split("Text('›')\n          .fontSize(TYPE_CAPTION_FP)").length - 1 === 1);
   check('B: the guide body\'s line height is fp too (a number lineHeight is fp: ' +
     '"设置值不大于0时…number类型时单位为fp"), so it grows with the glyphs',
     m.GUIDE_BODY_LINE_HEIGHT_FP === 22 &&
     PAGE.split('.lineHeight(GUIDE_BODY_LINE_HEIGHT_FP)').length - 1 === 2);
-  check('B: the module declares exactly the 7 fp type constants, and NO TYPE_*_VP ' +
-    'anywhere (the old name was the misleading half of the defect)',
+  check('B: the module declares exactly the 8 fp TYPE_*_FP constants, and NO ' +
+    'TYPE_*_VP anywhere (the old name was the misleading half of the defect)',
     (readFileSync(join(ets, 'pages', 'NetBirdHarmonyLayout.ets'), 'utf8')
-      .match(/export const TYPE_[A-Z_]+_FP: number/g) ?? []).length === 7 &&
+      .match(/export const TYPE_[A-Z_]+_FP: number/g) ?? []).length === 8 &&
     !/TYPE_[A-Z0-9_]*_VP/.test(PAGE) && !/TYPE_[A-Z0-9_]*_VP/.test(LOGIN) &&
     !/TYPE_[A-Z0-9_]*_VP/.test(readFileSync(join(ets, 'pages',
       'NetBirdHarmonyLayout.ets'), 'utf8')));
@@ -180,7 +188,10 @@ try {
   const caps = capArgs(PAGE);
   check('C: every maxFontScale in the page names one of the three declared ceilings ' +
     '(no literal, no fourth value)',
-    caps.length === 38 && caps.every((arg) => arg === 'TYPE_SCALE_MAX_ROW' ||
+    // 0.0.52 DELIBERATE UPDATE: 38 → 41 — SettingsRow's label/value/chevron (3), the
+    // title chip, the Search field and the two route text actions, less the caps of
+    // the six back/title texts the one pageTitleBar replaced.
+    caps.length === 41 && caps.every((arg) => arg === 'TYPE_SCALE_MAX_ROW' ||
       arg === 'TYPE_SCALE_MAX_DISC'),
     `n=${caps.length} distinct=${JSON.stringify([...new Set(caps)])}`);
   check('C: the disc is the ONLY surface on the disc ceiling',
@@ -196,6 +207,10 @@ try {
       '@Component\nstruct RailInfoRow {', '@Component\nstruct PaneEmptyState {'],
     ['the peer list row (two-line, minHeight 64, IP must stay on one line)',
       'peerRow(peer: UiPeerEntry) {', 'peersTab() {'],
+    // 0.0.52: the settings group row — a 48 vp minimum band whose label, value and
+    // '›' all carry the row ceiling.
+    ['the settings group row (48 vp minHeight)',
+      '@Component\nstruct SettingsRow {', '@Component\nstruct PaneEmptyState {'],
     ['the three 连接概览 tiles (fixed 96 vp)',
       'if (this.overviewHas(OV_TILE_CONNECTED)) {',
       'if (this.overviewHas(OV_ROW_RELAY_IN_USE)) {'],    ['the rail\'s two destination rows (fixed 48 vp)',
@@ -229,31 +244,41 @@ try {
       "        : '保存并连接')\n        .fontSize(TYPE_BODY_FP)\n" +
       '        .maxFontScale(TYPE_SCALE_MAX_ROW)\n        .height(42)'],
     ['the 更改配置 button (40 vp)',
-      "      Button('更改配置')\n        .fontSize(TYPE_BODY_FP)\n" +
-      '        .maxFontScale(TYPE_SCALE_MAX_ROW)\n        .height(40)'],
+      "        Button('更改配置')\n          .fontSize(TYPE_BODY_FP)\n" +
+      '          .maxFontScale(TYPE_SCALE_MAX_ROW)\n          .height(40)'],
     ['the 导出日志 button (38 vp)',
       "      Button(this.logExportBusy ? '正在导出…' : '导出日志')\n" +
       '        .fontSize(TYPE_BODY_FP)\n        .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
       '        .height(38)'],
-    ['the 全部启用 / 全部停用 buttons (38 vp)',
-      "        Button('全部启用')\n          .fontSize(TYPE_CAPTION_FP)\n" +
-      '          .maxFontScale(TYPE_SCALE_MAX_ROW)\n          .height(38)'],
-    ['the peer detail\'s back arrow (40 vp tap target)',
-      "          Row() {\n            Text('‹')\n" +
-      '              .fontSize(TYPE_PAGE_TITLE_FP)\n              .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
-      '              .fontWeight(FontWeight.Medium)\n' +
-      "              .fontColor($r('app.color.nb_text_primary'))\n" +
-      '          }\n          .height(40)'],
-    ['the 详细状态 / 路由选择 back arrows (40 vp tap targets)',
-      "        Row() {\n          Text('‹')\n" +
-      '            .fontSize(TYPE_PAGE_TITLE_FP)\n            .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
-      '            .fontWeight(FontWeight.Medium)\n' +
-      "            .fontColor($r('app.color.nb_text_primary'))\n" +
-      '        }\n        .height(40)'],
-    ['the search field (42 vp)',
-      "          TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })\n" +
-      '            .fontSize(TYPE_BODY_FP)\n            .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
-      '            .height(42)'],
+    // 0.0.52: the two batch actions are TEXT actions on a caption line (14 fp,
+    // primary ink, no fill) — each still carries the row ceiling.
+    ['the 全部启用 batch action (text, no fill)',
+      "        Text('全部启用')\n          .fontSize(TYPE_CAPTION_FP)\n" +
+      '          .maxFontScale(TYPE_SCALE_MAX_ROW)'],
+    ['the 全部停用 batch action (text, no fill)',
+      "        Text('全部停用')\n          .fontSize(TYPE_CAPTION_FP)\n" +
+      '          .maxFontScale(TYPE_SCALE_MAX_ROW)'],
+    // 0.0.52: the ONE subpage title bar — 24 fp back glyph in a 40 vp target, 20 fp
+    // title; both are fixed by the bar's 56 vp band (three contiguous chains, one per
+    // pinned piece, because the chain form matches contiguous lines only).
+    ['the title bar back glyph (24 fp system symbol)',
+      "        SymbolGlyph($r('sys.symbol.chevron_left'))\n" +
+      '          .fontSize(PAGE_BACK_GLYPH_FP)'],
+    ['the title bar back hit target (40 vp)',
+      '      .width(PAGE_BACK_TARGET_VP)\n      .height(PAGE_BACK_TARGET_VP)'],
+    ['the title bar title (20 fp, capped)',
+      "      Text(title)\n        .fontSize(TYPE_PAGE_TITLE_FP)\n" +
+      '        .maxFontScale(TYPE_SCALE_MAX_ROW)'],
+    // 0.0.52: the Search field (40 vp pill) — Search sizes its text through
+    // textFont/placeholderFont (it has no `.fontSize`), and the row ceiling is the
+    // component's own `.maxFontScale`. Two chains: the fonts and the height.
+    ['the 对端 search field fonts (body text / caption placeholder)',
+      "          Search({ value: this.peerQuery, placeholder: '搜索对端名称或 IP' })\n" +
+      '            .maxFontScale(TYPE_SCALE_MAX_ROW)\n' +
+      '            .placeholderFont({ size: TYPE_CAPTION_FP })'],
+    ['the 对端 search field height (40 vp)',
+      '            .height(PEER_SEARCH_HEIGHT_VP)\n' +
+      '            .width(this.peerSearchWidth())'],
     ['the home card\'s 去设置 (40 vp)',
       "            Button('去设置')\n              .fontSize(TYPE_SECTION_TITLE_FP)\n" +
       '              .maxFontScale(TYPE_SCALE_MAX_ROW)\n              .height(40)'],
@@ -269,14 +294,19 @@ try {
     check(`C: ${row[0]} carries TYPE_SCALE_MAX_ROW`, PAGE.includes(text));
   }
 
-  // 0.0.51: the three back controls are bare arrow glyphs, not filled 返回 buttons
-  // — and the two settings subpage arrows are the SAME 40 vp tap target.
-  check('C: the three back controls are arrow glyphs with no filled 返回 button left',
-    (PAGE.match(/Text\('‹'\)/g) ?? []).length === 3 &&
-    !PAGE.includes("Button('返回')"));
-  check('C: both settings subpage back arrows carry the same 40 vp tap target',
-    (PAGE.split("            .fontColor($r('app.color.nb_text_primary'))\n" +
-      '        }\n        .height(40)').length - 1) === 2);
+  // 0.0.52: the three subpages share ONE 56 vp title bar whose back control is the
+  // SYSTEM symbol (sys.symbol.chevron_left) at 24 fp inside a 40 vp target; the old
+  // '‹' text glyph and the filled 返回 button are both gone.
+  check('C: the three subpages use the ONE title bar, and its back control is the ' +
+    'system chevron symbol (no filled 返回 button, no text glyph)',
+    (PAGE.match(/this\.pageTitleBar\('/g) ?? []).length === 3 &&
+    PAGE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))") &&
+    !PAGE.includes("Text('‹')") && !PAGE.includes("Button('返回')"));
+  check('C: the title bar is a 56 vp band with a 40 vp back target',
+    m.PAGE_TITLE_BAR_HEIGHT_VP === 56 && m.PAGE_BACK_TARGET_VP === 40 &&
+    m.PAGE_BACK_GLYPH_FP === 24 &&
+    PAGE.includes('.height(PAGE_TITLE_BAR_HEIGHT_VP)') &&
+    PAGE.includes('.width(PAGE_BACK_TARGET_VP)\n      .height(PAGE_BACK_TARGET_VP)'));
 
   // THE GROW DECISIONS. The two multi-line row kinds are minHeight, so a large
   // scale makes them taller and the list/scroll absorbs it; the disclosure chevrons
@@ -287,11 +317,14 @@ try {
   check('C: the detail row GROWS (minHeight 48 when it carries an icon)',
     PAGE.includes('.constraintSize({ minHeight: this.iconKind.length > 0 ? ' +
       'DETAIL_ROW_MIN_HEIGHT_VP : 0 })') && m.DETAIL_ROW_MIN_HEIGHT_VP === 48);
-  check('C: the 5 disclosure chevrons sit in auto-height rows (no fixed height in ' +
+  check('C: the 2 remaining row chevrons sit in auto-height rows (no fixed height in ' +
     'their own chains), so they grow with the app ceiling',
+    // 0.0.52 DELIBERATE UPDATE: 5 → 2. The settings page's three '›' marks are gone
+    // (they are SettingsRow's own caption-size mark now, one site, pinned above); the
+    // two left are the home card's 详细状态 row and the overview's peer link.
     (() => {
       const sites = PAGE.match(/\.fontSize\(TYPE_CHEVRON_FP\)[\s\S]{0,140}/g) ?? [];
-      return sites.length === 5 && sites.every((site) => !/\.height\(/.test(site));
+      return sites.length === 2 && sites.every((site) => !/\.height\(/.test(site));
     })());
   check('C: the rail\'s destination rows stay the measured 48 vp bands',
     m.RAIL_NAV_ROW_HEIGHT_VP === 48 &&
@@ -324,9 +357,12 @@ try {
     m.railInfoValueHoldsIpAtCap(840) && m.railInfoValueHoldsIpAtCap(1024) &&
     m.railInfoValueHoldsIpAtCap(1440) && m.railInfoValueHoldsIpAtCap(2560));
   check('C: at the row ceiling the 64-character mono key stays inside the detail ' +
-    'row\'s 8-line allowance at the narrowest pane (7 lines)',
+    'row\'s 8-line allowance at the narrowest pane (8 lines at the 16 fp body)',
     m.detailRowLongestValueLinesAtCap(320, true) <= m.DETAIL_ROW_VALUE_MAX_LINES &&
-    m.detailRowLongestValueLinesAtCap(320, true) === 7,
+    // 0.0.52 DELIBERATE UPDATE: 7 → 8. The value is 16 fp now (was 15), so the mono
+    // advance at the cap is 9.6 x 1.3 = 12.48 vp and 64 chars need 8 of the 8 allowed
+    // lines — still not ellipsised, but with no slack left (recorded as a risk).
+    m.detailRowLongestValueLinesAtCap(320, true) === 8,
     `lines=${m.detailRowLongestValueLinesAtCap(320, true)}`);
   check('C: the disc\'s ceiling is 1 because 1.15 (the NEXT system 档位) clips the ' +
     'widest label on BOTH shells — 110 of 126 vp / 90 of 98 vp at 1x',
