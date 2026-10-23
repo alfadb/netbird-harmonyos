@@ -111,6 +111,13 @@ import { CONNECT_ENTRY_REJECT_RUNNING, UiStatusDocument, buildUiStatusDocument,
 // client/entry/selfcheck/run-status-freshness.mts.
 import { shouldPublishStatus, statusHeartbeatMaxAgeMs, statusPublishChangeKey }
   from './NetBirdStatusPolicy';
+// 0.0.54 data-plane watchdog (PC 2026-10-21 capture, peers 0 after a lid-close
+// wake): pure, import-free, exercised byte-identically by
+// client/entry/selfcheck/run-dataplane-policy.mts and driven through the REAL
+// watcher by run-network-recovery.mts.
+import { dataPlaneStaleReason, nextStaleSince, resumeGapDetected, shouldRecover }
+  from './NetBirdDataPlanePolicy';
+import type { DataPlaneFacts } from './NetBirdDataPlanePolicy';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
@@ -1007,6 +1014,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // is a deliberate user stop — rebuilding the data plane under either would be
   // wrong. '' = no status observed yet.
   private connectorStateNow: string = '';
+  // 0.0.54 data-plane watchdog (PC 2026-10-21 capture). The three clocks ride
+  // the EXISTING 5 s watcher tick — no new timer and no extra core call:
+  //   dataPlaneStaleSinceMs  when the CURRENT "connected but data plane gone"
+  //                          run was first observed (0 = none); a wake edge
+  //                          restarts it at the wake tick (see noteWatcherTick).
+  //   lastDataPlaneRecoveryMs when this watchdog last STARTED a recovery
+  //                          (0 = never) — the 60 s floor between attempts.
+  //   lastWatcherTickMs      the previous tick's wall clock — the suspend/wake
+  //                          edge itself (W3 woke with NO network callback).
+  private dataPlaneStaleSinceMs: number = 0;
+  private lastDataPlaneRecoveryMs: number = 0;
+  private lastWatcherTickMs: number = 0;
   // N1(ii): de-duplicates the cheap "already flowing" attempt outcome so a
   // healthy tunnel does not print one line per tick.
   private lastRecoveryOutcome: string = '';
@@ -2044,6 +2063,82 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     } else if (this.connectorDownSinceMs < 0) {
       this.connectorDownSinceMs = Date.now();
     }
+  }
+
+  // 0.0.54 data-plane watchdog, part 1 — the WAKE edge. A box suspend (modern
+  // standby) starves this 5 s interval, and on W3 (16:17–16:31) the platform
+  // delivered NO network-change callback at all after the wake, so the 0.0.50
+  // recovery leg never ran (vpn_recovery_stage: 0 records). The wall-clock gap
+  // between two ticks is the only edge left: a gap over 15 s RESTARTS the stale
+  // clock at the wake tick, so the watchdog evaluates once ~30 s later instead
+  // of trusting a stale mark from before the freeze and rebuilding blind. This
+  // method NEVER starts a recovery — it only arms the clock; the decision still
+  // needs the fresh status document (part 2).
+  private noteWatcherTick(): void {
+    const now: number = Date.now();
+    if (this.lastWatcherTickMs > 0 && resumeGapDetected(now - this.lastWatcherTickMs)) {
+      this.dataPlaneStaleSinceMs = now;
+    }
+    this.lastWatcherTickMs = now;
+  }
+
+  // 0.0.54 data-plane watchdog, part 2 — "connected" is not a data plane.
+  // `connector: state -> connected` only proves the management Sync stream; the
+  // 2026-10-21 PC capture (artifacts/incident-20261021-pc-peers0/pc/REPORT.md)
+  // kept saying 已连接 with peers_online 0 for up to 4816 s after a lid-close
+  // wake (W2/W4: recovery legs ran but signal did not register and ICE was
+  // never rebuilt; W3: no callback at all). Runs on the status read the watcher
+  // ALREADY performs — no new timer, no extra core call. The gates live in the
+  // pure policy; this method only keeps the clocks and performs the action:
+  //   * a user stop reads as state 'disconnected' and a terminal worker as
+  //     running=false, so the policy already refuses both;
+  //   * destroyRequested is the teardown latch — never rebuild into it;
+  //   * recoveryActive: the policy refuses to start a second attempt; the
+  //     in-flight one owns the pending mechanism (recoverPhysicalNetwork).
+  private noteDataPlaneWatchdog(status: ConnectorStatusResult): void {
+    const now: number = Date.now();
+    const facts: DataPlaneFacts = {
+      running: status.running === true,
+      state: status.state,
+      signalRegistered: status.signal !== undefined && status.signal !== null &&
+        status.signal.registered === true,
+      peerCount: status.peer_count,
+      // -1 = the core did not deliver the WG section (an older core): the
+      // session clause stays unreadable rather than guessing "0 sessions".
+      wgPeersWithSession: status.wg !== undefined && status.wg !== null
+        ? status.wg.peers_with_session : -1,
+      recoveryActive: this.networkRecoveryActive,
+      staleSinceMs: this.dataPlaneStaleSinceMs,
+      lastRecoveryMs: this.lastDataPlaneRecoveryMs,
+      nowMs: now
+    };
+    const since: number = nextStaleSince(facts);
+    this.dataPlaneStaleSinceMs = since;
+    facts.staleSinceMs = since;
+    if (this.destroyRequested || !shouldRecover(facts)) {
+      return;
+    }
+    // The data-plane facts ARE the reason the recovery is owed. Arming the
+    // recovery's own bookkeeping keeps the already-flowing shortcut in
+    // recoverPhysicalNetwork from swallowing this call (it would otherwise see
+    // `connected` + `device_up` and return `already-flowing`), and keeps the
+    // existing 15 s retry + the recreate finally re-triggering until a COMPLETE
+    // leg clears it. No new timer: recoverPhysicalNetwork's pending mechanism
+    // handles a call that races an in-flight attempt.
+    this.networkDirty = true;
+    this.recoveryRetryArmed = true;
+    const reason: string = dataPlaneStaleReason(facts);
+    const ageSeconds: number = Math.floor((now - since) / 1000);
+    const milestoneFields: DiagFields = { 'reason': reason, 'age': ageSeconds };
+    this.diagMilestone('vpn_dataplane_stale', milestoneFields);
+    this.recoverPhysicalNetwork().catch((error: Error): void => {
+      this.n2NetworkRecoveryFail(error);
+    });
+    // One watchdog recovery per DATA_PLANE_RECOVER_MIN_GAP_MS. The stale run
+    // restarts now: if this attempt does not heal it, the next evaluation needs
+    // a fresh 30 s window rather than firing every 5 s tick.
+    this.lastDataPlaneRecoveryMs = Date.now();
+    this.dataPlaneStaleSinceMs = this.lastDataPlaneRecoveryMs;
   }
 
   // N1(ii): "the tunnel is broken and owes a recovery" — the health half of the
@@ -5499,6 +5594,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // No new timer, no loop, no await; ARM/latch/WAITING semantics
       // untouched; C7 counting input only, never Evidence/judge.
       this.maybeCloseInterfaceStatsWindow();
+      // 0.0.54 data-plane watchdog part 1: the WALL-CLOCK gap between watcher
+      // ticks is the wake edge (a box suspend starves this interval and W3's
+      // wake delivered no network callback at all). It only restarts the stale
+      // clock and starts the ~30 s evaluation window; the recovery decision
+      // still needs the status read below, so this can never rebuild blind.
+      this.noteWatcherTick();
       // F2 (v0.0.27 outage REPORT.md §5): the recovery's OWN retry. Placed with
       // the other periodic work at the TOP of the tick — before the status read
       // and every early return below — so an unreachable connector, a terminal
@@ -5555,6 +5656,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // health gate of `retryPhysicalNetworkRecovery` (next tick reads it) —
         // one function call, no new timer, no second core call.
         this.noteConnectorHealth(status);
+        // 0.0.54 data-plane watchdog part 2: the SAME status document decides
+        // whether the data plane behind `connected` is really usable (signal
+        // registered, WG sessions). A stale run lasting 30 s starts the
+        // existing recovery; nothing new is polled.
+        this.noteDataPlaneWatchdog(status);
         const errorClass: string =
           status.last_error !== null && status.last_error !== undefined
             ? status.last_error.class

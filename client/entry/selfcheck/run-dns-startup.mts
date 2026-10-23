@@ -14,7 +14,8 @@ const dir = mkdtempSync(join(HERE, 'build', 'dns-startup-'));
 const G = globalThis as unknown as Record<string, any>;
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector', 'NetBirdVpnConfig',
   'NetBirdRouteValidation', 'NetBirdEndpointExclusion', 'NetBirdInterfaceStatsProbe',
-  'NetBirdPhysicalNetworkPolicy', 'NetBirdStatusPolicy', 'NetBirdUiModel',
+  'NetBirdPhysicalNetworkPolicy', 'NetBirdStatusPolicy', 'NetBirdDataPlanePolicy',
+  'NetBirdUiModel',
   'NetBirdRecreatePolicy', 'NetBirdDiagnosticsCore', 'NetBirdN2Stimulus',
   'NetBirdN2AEvent', 'NetBirdN2Sandwich', 'NetBirdN2ControlRequest',
   'NetBirdN2CdPlan', 'NetBirdN2Ring'];

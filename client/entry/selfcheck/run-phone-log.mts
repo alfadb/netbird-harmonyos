@@ -539,6 +539,10 @@ try {
     // per step) and the retry's silent early-return reason (once per epoch).
     ['vpn_recovery_stage', ['stage', 'result']],
     ['vpn_recovery_skip', ['reason']],
+    // 0.0.54 data-plane watchdog (PC 2026-10-21 capture): `connected` with the
+    // data plane gone (signal unregistered / no WG session) — the reason token
+    // and how many seconds the stale run had lasted before the recovery started.
+    ['vpn_dataplane_stale', ['reason', 'age']],
     // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the extension's
     // publication stamp + the core's edge revision + the two peer counts the F5
     // label change moves — one record per REAL write (the debounce above folds
@@ -885,8 +889,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 22 reviewed names / 27 helper calls',
-    milestones.length === 22 && extText.split('this.diagMilestone(').length === 28);
+  check('the wired milestone surface is exactly the 23 reviewed names / 28 helper calls',
+    milestones.length === 23 && extText.split('this.diagMilestone(').length === 29);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

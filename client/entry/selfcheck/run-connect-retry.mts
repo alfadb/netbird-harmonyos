@@ -69,6 +69,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // the REAL extension now imports by value — zero imports, no erased type
   // crossing the value import, staged byte-identically, no shim.
   'NetBirdStatusPolicy',
+  // 0.0.54 data-plane watchdog: the pure policy the REAL extension imports by
+  // value — zero imports and no erased types, so no shim.
+  'NetBirdDataPlanePolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy',
   'NetBirdDiagnosticsCore', 'NetBirdN2Stimulus', 'NetBirdN2AEvent', 'NetBirdN2Sandwich',
   'NetBirdN2ControlRequest', 'NetBirdN2CdPlan', 'NetBirdN2Ring'];

@@ -1059,6 +1059,9 @@ const SHIMS = {
   // module with no erased type crossing the value import, so it is staged
   // byte-identically and needs no shim (same rule as the two above).
   './NetBirdStatusPolicy': 'NetBirdStatusPolicy.ts',
+  // 0.0.54 data-plane watchdog: another zero-import pure policy the REAL
+  // extension imports by value, staged byte-identically and needing no shim.
+  './NetBirdDataPlanePolicy': 'NetBirdDataPlanePolicy.ts',
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',
