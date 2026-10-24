@@ -108,7 +108,7 @@ lane 提交时校验目标 client 是否已进入终态。**为什么**：pump �
 
 | 套件 | 命令 | 结果 |
 | --- | --- | --- |
-| Rust 全量 | `cargo test --offline --locked` | 合并后 exit 0 全绿（`0413865` 记录）；修复轮记录最好一次 1124 passed / 0 failed（`d9144fe`） |
+| Rust 全量 | `cargo test --offline --locked` | 合并后 exit 0 全绿（`0413865`）；修复轮最好一次 1124 passed / 0 failed（`d9144fe`）；测试稳定性修复后连续 10 次 exit 0，每轮 1129 passed / 0 failed（lib 716，`97874ff`） |
 | selfcheck 主套件 | `run.mts` | 81 passed, 0 failed |
 | keep-alive | `run-keep-alive.mts` | 200 passed, 0 failed |
 | tray | `run-tray.mts` | 61 passed, 0 failed |
@@ -131,9 +131,18 @@ lane 提交时校验目标 client 是否已进入终态。**为什么**：pump �
 
 sessionId 的 wire 兼容目前只由「本仓 proto 副本 + 信封往返单测」保证，**没有**与真实官方 NetBird 0.81.x 对端做过互通验证；与旧版本（不带 sessionId）对端混部时，本机重启后的恢复路径也未验证。这一条不能读成「已兼容上游」。
 
-### 4.3 client/core 全量测试套件在并行负载下不稳定（根因未证实）
+### 4.3 client/core 全量测试套件：两处真实竞态已修，SIGSEGV 仍未解释
 
-多次运行全量 `cargo test`，每次各挂 1 个**互不相同**的用例：`wg_dns_seam`、`ice_mux`、`n2_ring`、`peer_conn::black_holed_stun`、`phone_log`；其中一次 lib 测试二进制以 SIGSEGV 退出。所有失败用例单独跑都能通过。根因**未证实**，正在进行排查。这条影响的是测试可信度：不能把「某次全量全绿」当作稳定信号，也不能把某次单点失败直接归因于当轮改动。
+此前多次全量各挂 1 个互不相同的用例（`wg_dns_seam`、`ice_mux`、`n2_ring`、`peer_conn::black_holed_stun`、`phone_log`）。排查后（`97874ff`）确认并修掉**两处真实的并行竞态**，都在测试侧、不涉生产逻辑：
+
+1. **高 fd 编号命名空间竞态**：`host_sockets::tests::fd_bag_closes_every_kept_fd` 与 `ice_mux::tests::dropping_the_last_mux_…` 都把 socket `F_DUPFD_CLOEXEC` 到同一组高 floor，一方 close 后另一方的 dup 会拿到同一编号，EBADF 探针于是看到 fd 仍打开。修法是给这两个用例加共享锁（只串行这两个，不全局单线程）。修复前在 20 轮 lib 的第 16 轮复现。
+2. **`dns_runtime` wake 用例的「一次 drain 即静止」假设**：`drain_wake` 在 worker 持输出队列锁时会保守重新 signal，pipe 里可能留一个合法通知。改为有界循环 drain 到静止，断言仍是「无输出时最终不可读」。修复前在 200 轮中第 145 轮复现。
+
+另外查明历史日志里「FAILED 但无 panic 文本」的成因：boringtun 0.7.1 的 FFI 在首个 tunnel 创建时装了进程级 `panic::set_hook(|_| raise(SIGSEGV))`，吞掉了断言文本。测试路径现在于首个 tunnel 后换回打印 hook。
+
+**仍未解释的是那次 lib 二进制的 SIGSEGV**：该 hook 在本机 rustc 1.98 上实测只产生 silent FAILED（exit 101），不产生 signal 11，因此不能把它当作 SIGSEGV 的解释；那次崩溃没有留下栈，不能排除真实内存错误。若再出现，应保留 core 或用 gdb 在 `core::panicking::panic_fmt` 下跑 lib 二进制。
+
+仍无证据、未改动的两项：`peer_conn::tests::black_holed_stun_never_blocks_the_pump`（300 ms 窗口 / `<50ms` tick 对负载敏感）与 `wg_dns_seam::external_cname_target_uses_private_group_and_primary_udp_tcp`（600 轮未复现）。另登记一个未修的隔离缺口：`ledger` 注释要求所有 emitter 测试持 `lock_ledger_for_test()`，实际只有一处持有。
 
 ### 4.4 其他风险与待办
 
