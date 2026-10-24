@@ -199,6 +199,16 @@ pub fn arm(enabled: bool) {
 /// and the peer label; this function re-checks, so an unarmed call is a no-op
 /// by construction (the zero-output negative control).
 pub fn note_udp(local: Option<SocketAddr>, src: SocketAddr, datagram: &[u8], peer: &str) {
+    // Host tests: `note_udp` also runs on pump/reader threads owned by OTHER
+    // tests in the same lib binary, and those threads append into the
+    // process-global emitted ring whenever the receipt is armed. A test that
+    // arms the receipt and asserts on exact line counts owns the ring, so it
+    // holds this gate for its whole body; emitters take it for one receipt.
+    // The re-check below matters: a test may have disarmed (and cleared the
+    // ring) while this emitter waited for the gate, so the earlier
+    // `armed()` check is no longer sufficient.
+    #[cfg(test)]
+    let _gate = emit_gate::lock();
     if !armed() {
         return;
     }
@@ -238,6 +248,58 @@ pub(crate) fn global_lock() -> std::sync::MutexGuard<'static, ()> {
     match lock.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Host-test emission gate (see [`note_udp`]): emitters owned by other tests
+/// run on their own threads and append into the same process-global emitted
+/// ring, so the test that owns the ring excludes them for its whole body.
+/// RE-ENTRANT because that owner's own `note_udp` calls run on its thread.
+/// Never part of the release build (the arm/emit path has no gate there).
+#[cfg(test)]
+pub(crate) mod emit_gate {
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    thread_local! {
+        /// The underlying guard of the outermost acquisition on this thread.
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let left = DEPTH.with(|depth| {
+                let left = depth.get().saturating_sub(1);
+                depth.set(left);
+                left
+            });
+            if left == 0 {
+                HELD.with(|held| {
+                    let _ = held.borrow_mut().take();
+                });
+            }
+        }
+    }
+
+    pub(crate) fn lock() -> Guard {
+        let first = DEPTH.with(|depth| {
+            let before = depth.get();
+            depth.set(before + 1);
+            before == 0
+        });
+        if first {
+            let guard = LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            HELD.with(|held| *held.borrow_mut() = Some(guard));
+        }
+        Guard
     }
 }
 
@@ -353,6 +415,10 @@ mod tests {
     #[test]
     fn disarmed_note_udp_emits_nothing() {
         let _g = global_lock();
+        // This test owns the global emitted ring for exact-count assertions;
+        // parallel pump/reader threads from other tests emit into it through
+        // `note_udp` whenever the receipt is armed, so exclude them.
+        let _gate = emit_gate::lock();
         let local = Some(v4([0, 0, 0, 0], 51820));
         let src = v4([192, 168, 50, 199], 41234);
         arm(true);

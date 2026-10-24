@@ -158,6 +158,10 @@ native `phone_log` 已注册 NAPI 导出（`phone_log_configure` / `append` / `s
 - **宽限期（`grace`）。** VPN 不活跃时不再立刻撤任务：从最后一次活跃起 **120 s**（`KEEP_ALIVE_GRACE_MS`）内保留长时任务（`action=none`，`reason=grace`），实况窗正文改为"正在重新连接…"（仍按 30 s 节流重发，避免进度长时间不更新被系统取消）。超过 120 s 撤任务（`reason=vpn-inactive`）；自动重连已放弃时立即撤（`reason=reconnect-gave-up`）。**用户断开 / 注销 / 开关关闭仍然立即撤**——宽限只给"被系统拿走的隧道"，不给用户自己结束的连接。
 - **仍未被验证的项（本轮不声称）**：后台（持有长时任务时）`startVpnExtensionAbility` 是否被系统允许、真机上这个错误码长什么样、以及重连成功前 120 s 的宽限在真机上的实际效果。这两点在真机日志里都以 `ui_auto_reconnect` 记录本身为准。
 
+**重连验证修复（2026-10-16，版本保持 0.0.48）。** 扩展发布的状态文档新增可选数字 `pid`。自动重连 dispatch 记录时间，只锁存该时间之后写入的 marker PID；验证期间，带 `pid` 的活跃状态必须匹配此 PID，旧文档缺 `pid` 时按 `updated_at_ms >= dispatch - 1000ms` 兼容。旧进程的 fresh 文档不能关闭验证窗，30 s 仍可记 `failed / no-active-in-30s`；验证通过、超时或平台拒绝均清理本次身份锁存。手动 7 s 动作窗与保活规则不变。
+
+`ui_auto_reconnect` 的 result 闭集为 `requested / reconnected / skipped / limit / failed`：发起时记 `requested`，首次匹配本次尝试的活跃状态才记一次 `reconnected`。死亡证据门保持保守跳过，有序 reason 为 `kill-record-absent`（无本进程死亡记录）、`marker-pid-invalid`（marker PID 不可用）、`vpn-pid-mismatch`（两者 PID 不同）。跨 UI 进程/升级恢复仍未实现，须后续设备验证。
+
 **0.0.21 增量（一）：挂起 / 激活回调的完整记录。** 0.0.20 的真机证据里，全天只有一条挂起记录（`app-logs/netbird-ui.log:1800`）与一条激活记录（同文件 :1808）：
 
 ```text
@@ -172,7 +176,7 @@ ts=2026-10-11T10:24:32.311Z pid=39870 role=ui event=ui_bg_task count=0 reason=pl
 - **三条信号合流到一处。** (a) 平台的 `continuousTaskActive`（以及挂起回调里 `suspendState=false` 的那一种"重新活跃"）；(b) 页面自己的 2 s 轮询发现**与上一拍间隔 > 15 s**（`KEEP_ALIVE_RESUME_GAP_MS`，纯策略里的阈值与单次触发性质由宿主 selfcheck 在毫秒边界上钉住）；(c) UIAbility 的 `onForeground`。前两条由适配层转发到页面的唯一监听者，第三条由 ability 走同一条通道（只转发一个信号，不读任何状态文档）。
 - **动作只有一个**：立即执行**已有的** `pollConnectorStatus`（复用同一个函数、同一次状态文档读取），不新增定时器、不新增文档读取；已经在跑的那一拍本身就是它要的复查，直接跳过（`pollRunning` 单飞保护，`try/finally` 保证一次异常不会把锁留在 true 上）。冷启动的首拍之前不处理：那时还没有"上一拍"。
 - **记录一条** `ui_resume_check`，字段 `reason`（闭集 `active` / `gap` / `foreground`）与 `count`（两拍间隔秒数）；事件名是小写 token、不在内部事件名里，字段全在公开键集内。**一次恢复只记一条**：读完即把本拍时刻写回，下一拍的间隔就恢复正常。间隔不够大（例如只是切了个前台）时不记录，但那次立即复查照做。
-- **恢复后 10 s 内的额外复查不再新增机制**：`APP_KILLED` 可能在恢复瞬间才投递，第一次复查时文档已过期却还没有终止事件，按既有策略会 skip 成 `vpn-not-confirmed-dead`（安全行为）；页面自己的 2 s 轮询在这 10 s 内就是 5 拍，每拍都重读文档、每拍都会重新判一次重连（节流与上限仍在纯策略里），所以"多做几次复查"就是既有节拍本身。
+- **恢复后 10 s 内的额外复查不再新增机制**：`APP_KILLED` 可能在恢复瞬间才投递，第一次复查时文档已过期却还没有终止事件，按既有策略会 skip 成 `kill-record-absent`（安全行为）；页面自己的 2 s 轮询在这 10 s 内就是 5 拍，每拍都重读文档、每拍都会重新判一次重连（节流与上限仍在纯策略里），所以"多做几次复查"就是既有节拍本身。
 - **判据与防循环参数一字未改**：重连判据、60 s 冷却、连续失败 3 次、120 s 宽限期全部不动；本次只改"什么时候把状态文档再读一遍"。
 
 **本轮（0.0.21）新增记录仍未验证的项**：新记录在真机上是否如期出现、平台挂起时那两条回调是否真的投递（若 `-1` 之外还有别的取值，或 `suspendMessage` 根本不来，都会如实写进日志）、以及恢复后的立即复查在真机上能否把"后台重连失效"的窗口从小时级压到秒级。

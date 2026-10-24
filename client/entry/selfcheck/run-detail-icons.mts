@@ -200,8 +200,10 @@ try {
     PAGE.includes("this.peerDetailSectionFields(PEER_DETAIL_ICE)") &&
     PAGE.includes("this.peerDetailSectionFields(PEER_DETAIL_IDENTITY)"));
   check('C: the collapsed sections use the SAME row component (no second row shape)',
-    // the peer pane's four sections + the 详细状态 / 关于 pages' seven rows
-    (PAGE.match(/DetailRow\(\{/g) ?? []).length === 11 &&
+    // 0.0.52 DELIBERATE UPDATE: 11 → 9. The 关于 group's two read-only rows are
+    // SettingsRow children now (the settings page's one row grammar), so the detail
+    // row's users are the peer pane's 4 sections + the 详细状态 page's 5 sections.
+    (PAGE.match(/DetailRow\(\{/g) ?? []).length === 9 &&
     // the settings / 详细状态 / 关于 rows keep the icon-less call …
     (PAGE.match(/DetailRow\(\{ label: field\.label, value: field\.value \}\)/g) ?? []).length === 4 &&
     // … so they can never grow a leading glyph or a 48 vp band
@@ -255,7 +257,13 @@ try {
         wanted.every((name: string) => drawn.includes(name) || name in alias) &&
         icon.includes('.width(DETAIL_ROW_ICON_SLOT_VP)') &&
         icon.includes('.height(DETAIL_ROW_ICON_SLOT_VP)') &&
-        !PAGE_CODE.includes('sys.symbol') && !PAGE_CODE.includes('SymbolGlyph') &&
+        // 0.0.52 DELIBERATE UPDATE: the page now carries exactly ONE system symbol —
+        // the subpage title bar's back chevron, whose resource run-harmony-layout
+        // verifies against the SDK's sysResource table. The FIELD icons are still
+        // drawn Paths (this component's branches), which is what this check protects.
+        !icon.includes('SymbolGlyph') && !icon.includes('sys.symbol') &&
+        (PAGE_CODE.match(/SymbolGlyph\(/g) ?? []).length === 1 &&
+        PAGE_CODE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))") &&
         m.DETAIL_ROW_ICON_SLOT_VP === m.PEER_ROW_COPY_SLOT_VP && m.DETAIL_ROW_ICON_SLOT_VP === 16;
     })());
 
@@ -275,43 +283,47 @@ try {
     }
   }
   check('D: the narrowest wide tier is the 320 vp compact reservation',
+    // 0.0.53 DELIBERATE UPDATE: the list column is the 1:2 one now (280 at 1024,
+    // 374 at 1440 after the 1 vp snap, 400 from the indent cap on), so the detail
+    // pane's content is what the INDENT-CAPPED content area leaves:
+    // 744-280, 1120-374, 1200-400.
     narrowest === m.DETAIL_ROW_PANE_MIN_WIDTH_VP && narrowestAt === m.HARMONY_BP_LG_VP &&
     m.detailPaneContentWidthVp(m.HARMONY_BP_LG_VP) === 320 &&
-    m.detailPaneContentWidthVp(1024) === 360 && m.detailPaneContentWidthVp(1440) === 640);
+    m.detailPaneContentWidthVp(1024) === 464 && m.detailPaneContentWidthVp(1440) === 746 &&
+    m.detailPaneContentWidthVp(4000) === 800);
   check('D: the icons cost the value column EXACTLY the glyph slot and its gap',
     // the I8/I9 budget without a leading glyph, recomputed here from the pane's own
-    // padding and the label column. 0.0.45 (I10): the copy mark's own gap is now the
-    // shared COPY_ICON_GAP_VP (5 — the value is End-aligned, so its last glyph sits on
-    // the column's edge and the mark's 5 vp is what the eye reads), not the row's
-    // DETAIL_ROW_GAP_VP (8). The value column therefore GREW 3 vp: 111, and
-    // 111 + the leading glyph's 16 + 4 = 131 = I8's 128 + the 3 the tighter hug gave
-    // back. The label↔value gap is still the row's own 8.
-    m.detailRowValueWidthVp(320, true) === 111 && m.detailRowValueWidthVp(320, false) === 132 &&
+    // padding and the label column. 0.0.52 DELIBERATE UPDATE: the body is 16 fp now,
+    // so the value column grew 111 → 113 (the glyph↔label gap 4 → 2 paid for the wider
+    // floor — see DETAIL_ROW_ICON_GAP_VP). The pair's total is still 131 / 152.
+    m.detailRowValueWidthVp(320, true) === 113 && m.detailRowValueWidthVp(320, false) === 134 &&
     m.detailRowValueWidthVp(320, true) + m.DETAIL_ROW_ICON_SLOT_VP + m.DETAIL_ROW_ICON_GAP_VP === 131 &&
     m.detailRowValueWidthVp(320, false) + m.DETAIL_ROW_ICON_SLOT_VP + m.DETAIL_ROW_ICON_GAP_VP === 152 &&
     m.DETAIL_ROW_PAGE_PADDING_VP === 16 && m.DETAIL_ROW_CARD_PADDING_VP === 16 &&
-    m.DETAIL_ROW_LABEL_WIDTH_VP === 96 && m.DETAIL_ROW_GAP_VP === 8 && m.DETAIL_ROW_ICON_GAP_VP === 4 &&
+    m.DETAIL_ROW_LABEL_WIDTH_VP === 96 && m.DETAIL_ROW_GAP_VP === 8 && m.DETAIL_ROW_ICON_GAP_VP === 2 &&
     m.COPY_ICON_GAP_VP === 5 &&
     // the whole change in one line: copyable = non-copyable − the gap − the slot
     m.detailRowValueWidthVp(320, true) ===
       m.detailRowValueWidthVp(320, false) - m.COPY_ICON_GAP_VP - m.PEER_ROW_COPY_SLOT_VP);
   check('D: the value column still clears the one-line IPv4 floor at that tier',
-    m.DETAIL_ROW_VALUE_MIN_WIDTH_VP === 105 &&
+    // 0.0.52: the floor is the 14-char IPv4 at the 16 fp body (14 × 8 = 112); the
+    // narrowest pane leaves 113, i.e. 1 vp of slack (it was 105 / 6 vp at 15 fp).
+    m.DETAIL_ROW_VALUE_MIN_WIDTH_VP === 112 &&
     m.detailRowValueWidthVp(320, true) >= m.DETAIL_ROW_VALUE_MIN_WIDTH_VP &&
     m.detailRowValueWidthVp(320, false) >= m.DETAIL_ROW_VALUE_MIN_WIDTH_VP &&
-    m.detailRowValueWidthVp(320, true) - m.DETAIL_ROW_VALUE_MIN_WIDTH_VP === 6);
+    m.detailRowValueWidthVp(320, true) - m.DETAIL_ROW_VALUE_MIN_WIDTH_VP === 1);
   check('D: the pane\'s longest value still wraps inside the mounted 8-line cap',
     PAGE.includes('@Prop maxLines: number = 8;') &&
     m.DETAIL_ROW_VALUE_MAX_LINES === 8 &&
-    m.DETAIL_ROW_VALUE_CHARS === 14 && m.DETAIL_ROW_VALUE_CHAR_VP === 7.5 &&
-    m.DETAIL_ROW_LONGEST_VALUE_CHARS === 64 && m.DETAIL_ROW_MONO_CHAR_VP === 9 &&
+    m.DETAIL_ROW_VALUE_CHARS === 14 && m.DETAIL_ROW_VALUE_CHAR_VP === 8 &&
+    m.DETAIL_ROW_LONGEST_VALUE_CHARS === 64 && m.DETAIL_ROW_MONO_CHAR_VP === 9.6 &&
     m.detailRowValueLines(m.DETAIL_ROW_LONGEST_VALUE_CHARS, m.DETAIL_ROW_MONO_CHAR_VP,
       m.detailRowValueWidthVp(320, true)) === 6 &&
     m.detailRowValueLines(m.DETAIL_ROW_LONGEST_VALUE_CHARS, m.DETAIL_ROW_MONO_CHAR_VP,
       m.detailRowValueWidthVp(320, true)) <= m.DETAIL_ROW_VALUE_MAX_LINES &&
     // the 域名 and the endpoint are two lines at that tier, well inside the cap
-    m.detailRowValueLines(25, 7.5, m.detailRowValueWidthVp(320, true)) === 2 &&
-    m.detailRowValueLines(21, 7.5, m.detailRowValueWidthVp(320, true)) === 2);
+    m.detailRowValueLines(25, 8, m.detailRowValueWidthVp(320, true)) === 2 &&
+    m.detailRowValueLines(21, 8, m.detailRowValueWidthVp(320, true)) === 2);
   check('D: the width functions are total (no negative, no NaN, no divide by zero)',
     m.detailRowValueWidthVp(0, true) === 0 && m.detailRowValueWidthVp(-500, false) === 0 &&
     m.detailRowValueWidthVp(Number.NaN, true) === 0 &&

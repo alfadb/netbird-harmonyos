@@ -33,7 +33,9 @@ const accountErrorText = sliceFrom(PAGE, 'private accountLoginErrorText(',
   'private async beginAccountLogin()');
 
 check('configuration summary separates server address and login method and has one edit entry',
-  configSummary.includes("Text('服务器地址')") && configSummary.includes("Text('登录方式')") &&
+  // 0.0.52: the two read-only facts are SettingsRow labels in the 服务器配置 group
+  // (the group's row grammar took them out of bare Text nodes).
+  configSummary.includes("label: '服务器地址'") && configSummary.includes("label: '登录方式'") &&
   configSummary.includes("Button('更改配置')") && !configSummary.includes('认证方式：'));
 check('form offers two equal auth choices and only renders the selected Setup Key field',
   configForm.includes("Button('账户登录')") && configForm.includes("Button('Setup Key')") &&

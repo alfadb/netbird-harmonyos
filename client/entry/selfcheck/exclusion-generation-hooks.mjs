@@ -211,6 +211,7 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return files()[path];\n' +
   '  },\n' +
   '  openSync: (path) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("open:" + path);\n' +
   '    const code = (g().__NB_FS_OPEN_ERROR || {})[path];\n' +
   '    if (code !== undefined) {\n' +
   '      const e = new Error("open failed: " + path); e.code = code; throw e;\n' +
@@ -218,6 +219,7 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return { fd: path };\n' +
   '  },\n' +
   '  writeSync: (fd, text) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("write:" + fd);\n' +
   '    const err = (g().__NB_FS_WRITE_ERROR || {})[fd];\n' +
   '    if (err !== undefined) {\n' +
   '      files()[fd] = ""; // the open already TRUNCed; nothing got written\n' +
@@ -228,7 +230,9 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return bytes;\n' +
   '  },\n' +
   '  closeSync: () => {},\n' +
-  '  unlinkSync: (path) => { delete files()[path]; },\n' +
+  '  unlinkSync: (path) => {\n' +
+  '    g().__NB_FS_MUTATIONS?.push("unlink:" + path); delete files()[path];\n' +
+  '  },\n' +
   // The SDK's SYNCHRONOUS temp+fsync+rename document pattern, kept functional
   // for any staged writer that uses it: renameSync moves the stored text
   // exactly like the real 13900002-less happy path, and throws the SDK's
@@ -467,6 +471,7 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '}\n' +
   'export default {\n' +
   '  n2_socket_trace_arm: () => JSON.stringify({ ok: true }),\n' +
+  '  n2_tun_dest_configure: () => JSON.stringify({ ok: true }),\n' +
   '  n2_socket_trace_protect: () => JSON.stringify({ ok: true }),\n' +
   // N2 T5a「B 断流刺激」(2026-09-28): the shell's armed-only stimulus entry.
   // Functional and recording like the other seams — every call is counted and
@@ -888,7 +893,45 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  }\n' +
   '};');
 
+// 2026-10-17 peer meta identity: the REAL NetBirdVpnExtensionAbility.ets now
+// imports bundleManager (the app versionName it sends as `netbird_version`) and
+// deviceInfo (the numeric OS release it sends as `os_version`), so both
+// specifiers must resolve for the byte-identical extension fixture to link.
+// Both stubs are FUNCTIONAL, not empty: this suite drives the REAL start call,
+// and its config must show the values the shipped helpers actually produce.
+// The defaults are fixed host answers; a test may override any field through
+// globalThis.__NB_BUNDLE_INFO / globalThis.__NB_DEVICE_INFO (an own property
+// set to undefined makes that field absent, which is how the fallback chain is
+// exercised). The platform's own BundleFlag values are kept verbatim because
+// the extension passes GET_BUNDLE_INFO_DEFAULT by name.
+const BUNDLE_MANAGER = 'data:text/javascript,' + encodeURIComponent(
+  'const info = () => globalThis.__NB_BUNDLE_INFO || {\n' +
+  '  name: "com.example.netbird", versionName: "0.0.49", versionCode: 49 };\n' +
+  'export default {\n' +
+  '  BundleFlag: { GET_BUNDLE_INFO_DEFAULT: 0, GET_BUNDLE_INFO_WITH_APPLICATION: 1 },\n' +
+  '  getBundleInfoForSelfSync: () => info()\n' +
+  '};');
+
+const DEVICE_INFO = 'data:text/javascript,' + encodeURIComponent(
+  'const field = (name, fallback) => {\n' +
+  '  const over = globalThis.__NB_DEVICE_INFO;\n' +
+  '  return over !== undefined && Object.prototype.hasOwnProperty.call(over, name)\n' +
+  '    ? over[name] : fallback;\n' +
+  '};\n' +
+  'export default {\n' +
+  '  get majorVersion() { return field("majorVersion", 7); },\n' +
+  '  get seniorVersion() { return field("seniorVersion", 0); },\n' +
+  '  get featureVersion() { return field("featureVersion", 0); },\n' +
+  '  get buildVersion() { return field("buildVersion", "107"); },\n' +
+  '  get displayVersion() { return field("displayVersion", "OpenHarmony-7.0.0.107"); },\n' +
+  '  get osFullName() { return field("osFullName", "OpenHarmony-7.0.0.107"); },\n' +
+  '  get sdkApiVersion() { return field("sdkApiVersion", 14); },\n' +
+  '  get deviceType() { return field("deviceType", "default"); }\n' +
+  '};');
+
 const STUBS = {
+  '@ohos.bundle.bundleManager': BUNDLE_MANAGER,
+  '@ohos.deviceInfo': DEVICE_INFO,
   '@ohos.app.ability.VpnExtensionAbility': 'data:text/javascript,' + encodeURIComponent(
     'export default class VpnExtensionAbility {}'),
   // The fixture EntryAbility (arm private channel): a bare base class so the
@@ -1016,6 +1059,9 @@ const SHIMS = {
   // module with no erased type crossing the value import, so it is staged
   // byte-identically and needs no shim (same rule as the two above).
   './NetBirdStatusPolicy': 'NetBirdStatusPolicy.ts',
+  // 0.0.54 data-plane watchdog: another zero-import pure policy the REAL
+  // extension imports by value, staged byte-identically and needing no shim.
+  './NetBirdDataPlanePolicy': 'NetBirdDataPlanePolicy.ts',
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',
@@ -1081,6 +1127,14 @@ const SHIMS = {
 };
 
 export function resolve(specifier, context, next) {
+  if (specifier === '../../../../build/default/generated/profile/default/BuildProfile') {
+    // Each ability module URL selects an immutable profile. Distinct data
+    // URLs keep debug/release isolated even when both run in the same process.
+    const debug = new URL(context.parentURL).searchParams.get('build') === 'debug';
+    return { url: 'data:text/javascript,' + encodeURIComponent(
+      'export default class BuildProfile { static DEBUG = ' + debug + '; }'),
+      shortCircuit: true };
+  }
   if (specifier === './NetBirdN2Control') {
     // N2 T3 §3 (2026-09-28): the positive-control sender the REAL extension now
     // calls from its armed-only `pollN2Control` (the control channel's missing
@@ -1116,6 +1170,10 @@ export function resolve(specifier, context, next) {
       '};'), shortCircuit: true };
   }
   if (specifier === './NetBirdN2Evidence') {
+    if (new URL(context.parentURL).searchParams.get('n2') === 'real') {
+      return { url: new URL('NetBirdN2Evidence.shim.ts', context.parentURL).href,
+        shortCircuit: true };
+    }
     return { url: 'data:text/javascript,' + encodeURIComponent(
       'export const N2EvidenceOptions = undefined; export const N2EvidenceDecision = undefined; ' +
       'export const parseN2Evidence = () => ({ options: undefined }); ' +

@@ -397,12 +397,20 @@ export function wideGuideKind(facts: WidePaneFacts): string {
 // uses to hold those claims; the page reads only the three caps.
 /** The app title inside the rail ("NetBird"). */
 export const TYPE_APP_TITLE_FP: number = 22;
-/** A page/section headline (对端, 设置, 对端详情, the guide's state). */
+/**
+ * 0.0.52 — THE LARGE PAGE TITLE (32 fp Bold). HarmonyOS's own settings app opens a
+ * tab page with one large title at the page's top-left (设置 / 对端 here), and the
+ * official type scale's "大标题" is 32 fp. It replaces the 20 fp page headline on the
+ * TWO tab pages only; a subpage keeps TYPE_PAGE_TITLE_FP 20 in its title bar, which
+ * is the standard 标题栏 hierarchy (large title on the landing page, 20 fp inside).
+ */
+export const TYPE_LARGE_TITLE_FP: number = 32;
+/** A page/section headline (对端详情, 设置 subpages, the guide's state). */
 export const TYPE_PAGE_TITLE_FP: number = 20;
-/** A settings group header above its cards. */
+/** A settings group header above its group container (16 fp row labels). */
 export const TYPE_SECTION_TITLE_FP: number = 16;
-/** Body text and the primary value of a label/value row. */
-export const TYPE_BODY_FP: number = 15;
+/** Body text and the primary value of a label/value row (官方 正文 16 fp). */
+export const TYPE_BODY_FP: number = 16;
 /** Secondary/caption text: ≥ 12 vp everywhere, ≥ 14 vp on the PC (this value). */
 export const TYPE_CAPTION_FP: number = 14;
 /** The 连接概览 pane's stat-tile number (the review's 24 vp Medium tile figure). */
@@ -412,6 +420,76 @@ export const TYPE_STAT_VALUE_FP: number = 24;
  * label. It used to be a bare `18` literal at five call sites.
  */
 export const TYPE_CHEVRON_FP: number = 18;
+
+// ---------------------------------------------------------------------------
+// 0.0.52 — THE OFFICIAL PAGE CHROME
+// ---------------------------------------------------------------------------
+// The owner's brief for this round: align the LOOK (nothing else) with HarmonyOS's
+// official design language — a standard title hierarchy, one settings-style grouped
+// list, 8 vp spacing, ≥ 40/48 vp hit areas, PC weak text at ≥ 14 fp. Every number
+// below is the one the page uses, so the host check can pin the scale instead of
+// grepping for literals.
+//
+// THE TITLE HIERARCHY
+//   tab page (设置 / 对端): one TYPE_LARGE_TITLE_FP 32 title, Bold, top-left.
+//   subpage (对端详情 / 详细状态 / 路由选择): ONE 56 vp title bar, back glyph at 24 fp
+//   inside a 40 vp hit target, the title at TYPE_PAGE_TITLE_FP 20 next to it, and a
+//   reserved empty action slot on the right so the title stays left-aligned.
+/** The subpage title bar's height (vp) — the standard 标题栏 band. */
+export const PAGE_TITLE_BAR_HEIGHT_VP: number = 56;
+/** The back arrow's ink size (fp) inside that bar. */
+export const PAGE_BACK_GLYPH_FP: number = 24;
+/** The back arrow's hit target (vp) — ≥ 40 vp, the pointer/touch floor. */
+export const PAGE_BACK_TARGET_VP: number = 40;
+
+/**
+ * The page's horizontal padding (vp): 16 on the narrow branch, 24 on the wide one.
+ * The wide branch is the split shell — the same breakpoint that mounts it
+ * (HARMONY_BP_LG_VP) is what widens the padding, so "wide page" and "wide shell"
+ * cannot disagree. The RAIL keeps its own 16 (it is a navigation column whose width
+ * table is measured from that number, not a page).
+ */
+export const PAGE_PADDING_NARROW_VP: number = 16;
+export const PAGE_PADDING_WIDE_VP: number = 24;
+export function pagePaddingVp(widthVp: number): number {
+  return paneLayoutOf(widthVp) === PANE_SPLIT ? PAGE_PADDING_WIDE_VP : PAGE_PADDING_NARROW_VP;
+}
+
+// ---- the settings grouped list ---------------------------------------------
+// Official settings shape: a 14 fp muted GROUP TITLE outside the box, then ONE
+// container holding every row of the group, 1 vp dividers between the rows, each
+// row 48…56 vp tall with 16 vp side padding. A row that navigates carries '›' at
+// the caption size on its right; a row with a value shows it right-aligned in the
+// secondary ink.
+/** The group container's corner radius (vp) — the app's one card radius. */
+export const SETTINGS_GROUP_RADIUS_VP: number = 16;
+/** The shortest row of a settings group (vp) — the ≥ 48 vp pointer row. */
+export const SETTINGS_ROW_MIN_HEIGHT_VP: number = 48;
+/** A settings row's left/right padding (vp) — the group's own text axis. */
+export const SETTINGS_ROW_PADDING_VP: number = 16;
+/** The divider's inset inside a group (vp): the rows' own side padding. */
+export const SETTINGS_DIVIDER_INSET_VP: number = SETTINGS_ROW_PADDING_VP;
+/** The group title's font size (fp) — caption scale, muted, outside the box. */
+export const SETTINGS_GROUP_TITLE_FP: number = TYPE_CAPTION_FP;
+/** The group title's 8 vp-grid margins (vp). */
+export const SETTINGS_GROUP_TITLE_TOP_VP: number = 24;
+export const SETTINGS_GROUP_TITLE_BOTTOM_VP: number = 8;
+
+// ---- the 对端 page's title chip --------------------------------------------
+/**
+ * The connected-count chip beside the 对端 large title: a pill (radius 999) in the
+ * info tint, 8/4 vp padding, caption-size text. It is a CHIP, not a second title
+ * line — the Row centres it against the 32 fp title and it never grows the row.
+ */
+export const TITLE_CHIP_RADIUS_VP: number = 999;
+export const TITLE_CHIP_PADDING_H_VP: number = 8;
+export const TITLE_CHIP_PADDING_V_VP: number = 4;
+
+// ---- the 对端 search field --------------------------------------------------
+/** The Search field's height (vp) — the official search bar, 40 vp. */
+export const PEER_SEARCH_HEIGHT_VP: number = 40;
+/** The Search field's corner radius (vp) — a full pill for a 40 vp bar. */
+export const PEER_SEARCH_RADIUS_VP: number = 20;
 
 // ---- the three ceilings (0.0.46) -------------------------------------------
 /** The app's ceiling — AppScope/resources/base/profile/configuration.json. */
@@ -665,49 +743,73 @@ export function railTrafficVisible(txBytes: number, rxBytes: number): boolean {
 // never wraps" and "real names fit" requirements become arithmetic instead of a
 // screenshot someone has to squint at.
 
-// 0.0.39 (I4) — THE TIERED LIST COLUMN AND THE 28-CHARACTER NAME FLOOR
+// 0.0.53 — THE OFFICIAL 1:2 SPLIT, AND THE ROW FORM FOLLOWS THE COLUMN
 // ---------------------------------------------------------------------------
-// I3 widened the column to `pane - 360` (capped 420), which is right for a
-// 1024 vp+ window and does NOTHING at the bottom of the shell: at 840 vp the rail
-// is 240, the pane is exactly 600, and the detail pane's own 360 vp reservation
-// leaves the list column at 240 — the same column the review measured, with the
-// name down to ~64 vp (the "blkint…" of §P0.1). Three things fix it, and all
-// three are arithmetic here:
+// Up to 0.0.52 the list column was a per-tier CAP table (360 / 440 / 480 vp) and the
+// detail pane got whatever was left, which on a wide desktop window made the LIST the
+// larger half — the inverse of the official 分栏 guidance (the list column takes one
+// third of the content area, the detail two thirds). 0.0.52's tier table is retired:
 //
-//   1. THE COLUMN IS A TIER TABLE (like the rail's own 240/280/320): a cap per
-//      rail tier — 360 / 440 / 480 — monotone in the window, so the list is never
-//      narrower than I3's at any window and a 4000 vp desktop window cannot give
-//      the list a 2000 vp column.
-//   2. THE COMPACT TIER RESERVES LESS FOR THE DETAIL. NavigationMode.Auto derives
-//      its split from the DEFAULTS (240 + 360 = 600) and clamps the real
-//      navBarWidth to `pane - minContentWidth - 1`, so the reservation is ours to
-//      set per tier: at the compact tier the pane's 600 vp is split 280 (list) /
-//      320 (detail) instead of 240 / 360. The 40 vp the list gains is exactly what
-//      makes a real fqdn fit; the detail keeps 320 vp, the width the review's own
-//      numbers leave it, and the pane still splits (320 > 0 and the framework's
-//      `>= 600 vp` rule is measured on the PANE, which never moves).
-//   3. THE ROW IS CONDENSED AT THAT TIER. The 直连/中继 chip and the 空闲/离线 text
-//      move from line 1 to line 2 (beside the IP, which only needs its own 120 vp
-//      floor), leaving line 1's name all but the status dot. Line 2 still holds
-//      everything it did (the IP never wraps: text >= 120 + 88 at every tier).
+//   list = clamp(round(paneWidth / 3), 280, 480)
 //
-// The floor itself is stated the way the review stated it — "what a 28-character
-// fqdn needs at 14 vp" — as 28 x 7 vp (0.5 em, the proportional-Latin rule of
-// thumb, at the 14 vp caption size the PC floor is set in). The selfcheck sweeps
-// EVERY window of the shell (840 … 4000) and asserts the name column clears it,
-// so "a real name fits" is a property of the table, not of one screenshot.
+// with `paneWidth` the CONTENT area (splitPaneWidthVp) — capped by the xl indent
+// layout's 1200 vp, because from 1440 vp the pane really is that wide and the
+// Navigation is inside the capped, centred column (see peerSplitPaneWidthVp) — and
+// 280 the lower clamp: the width at which the CONDENSED row still fits a real
+// 28-character fqdn (203 vp of name column; see PEER_ROW_META_COMPACT_VP). Below the
+// clamp the ratio is honoured only up to 280 and the deviation is REAL and recorded:
+// at 840 vp (pane 600) 1:2 wants 200 and the column is 280, so that pane splits
+// 280 / 319 instead of 200 / 400. 480 is the upper clamp — a 1:2 column of a 1200 vp
+// pane is 400, so it only binds once the indent cap goes away.
+//
+// THE SECOND RULE IS WHAT KEEPS THE 28-CHARACTER FLOOR TRUE. A third of the pane at
+// 1024…1440 vp is 280…373 vp, and the WIDE row form (the full-height 直连/中继 chip +
+// 空闲/离线 text + dot column beside the two text lines, 98 vp) plus its copy marks
+// (21 vp) cannot fit the name's 196 vp floor in that column. So the row's form is now
+// a function of the COLUMN rather than of the rail tier (peerRowCondensed):
+//
+//   column <  PEER_LIST_WIDE_FORM_MIN_VP (374)  →  CONDENSED: the dot rides line 1,
+//                                                  the chip + status ride line 2
+//   column >= 374                               →  WIDE: the trailing meta column
+//
+// and the copy marks (I8 §3) follow the same arithmetic: they are reserved while the
+// SHIPPED form's name still clears the floor (column >= PEER_LIST_COPY_SLOT_MIN_VP,
+// 294 with the condensed chrome), which is why the 280 vp windows (840…1160) lose them
+// again — that column cannot pay 21 vp and keep 196 — while the 1250…1440 PC columns
+// (324…373 vp) keep them.
+// Both thresholds are DERIVED from the name floor and the chrome below — never a
+// hand-picked breakpoint — and the selfcheck asserts the name floor at EVERY window
+// of the shell (840…4000), which is the property these two rules exist to protect.
+//
+// AND THE FORM THRESHOLD CARRIES A 1 vp SNAP (PEER_LIST_SNAP: peerListSnapToWideFormVp).
+// A form threshold that is a pure function of the window has one ugly window width in
+// it: 1:2 is measured on the CONTENT area, and the content area takes a 40 vp step DOWN
+// at 1440 vp when the rail goes 280 → 320. 1439 vp ⇒ pane 1159 ⇒ column 386 (wide);
+// 1440 vp ⇒ pane 1120 ⇒ column round(1120/3) = 373 — ONE vp under 374 — so the rows
+// condensed; 1441 vp ⇒ column 374, wide again. Dragging a window across 1440 therefore
+// made the list's density flicker for a single window width. The snap closes that band:
+// a 1:2 column in [360, 374) is raised to 374 (PEER_LIST_FORM_SNAP_BAND_VP). It moves
+// the DENSITY threshold only — the column is still the 1:2 answer (374 / 1120 at 1440,
+// 0.09% off the ratio, recorded here), never a new ratio and never a new clamp — and the
+// room clamp at the end of peerListNavBarWidthVp still wins, so the split cannot break.
+// The same band widens the PC windows 1359…1400 vp (columns 360…373), which were one to
+// fourteen vp from the wide form and would have condensed for the same accident.
 
-/** The peer list column's cap (vp) at the compact rail tier — [840, 1024). */
-export const PEER_LIST_NAV_BAR_CAP_COMPACT_VP: number = 360;
-/** The peer list column's cap (vp) at the medium rail tier — [1024, 1440). */
-export const PEER_LIST_NAV_BAR_CAP_MEDIUM_VP: number = 440;
-/** The peer list column's cap (vp) at the roomy rail tier — [1440, +inf). */
-export const PEER_LIST_NAV_BAR_CAP_ROOMY_VP: number = 480;
+/** The 1:2 split's divisor: the list column is a third of the content area. */
+export const PEER_LIST_PANE_DIVISOR: number = 3;
+/**
+ * The list column's lower clamp (vp): the width at which the CONDENSED row still
+ * holds a real 28-character fqdn (203 vp of name column at 280). A narrower column
+ * cannot, at any font size the design allows.
+ */
+export const PEER_LIST_NAV_BAR_MIN_VP: number = 280;
+/** The list column's upper clamp (vp): one third of a 1440 vp content area. */
+export const PEER_LIST_NAV_BAR_MAX_VP: number = 480;
 /**
  * The compact tier's reservation for the detail pane (vp). 360 is the framework's
  * own minContentWidth default and stays the reservation at the two wider tiers;
  * the compact tier reserves 320 so the 600 vp pane at the bottom of the shell
- * splits 280 / 320 — the same 600 the Auto rule requires, redistributed towards
+ * splits 280 / 319 — the same 600 the Auto rule requires, redistributed towards
  * the list (the review's §P0.1: "the navBar is the bottleneck, not the rail").
  */
 export const PEER_LIST_CONTENT_MIN_COMPACT_VP: number = 320;
@@ -798,27 +900,31 @@ export const PEER_ROW_NAME_CHAR_VP: number = 7;
 /** The floor line 1's name column must clear: a real 28-character fqdn at 14 vp. */
 export const PEER_ROW_NAME_MIN_WIDTH_VP: number =
   PEER_ROW_FQDN_CHARS * PEER_ROW_NAME_CHAR_VP;
+/**
+ * 0.0.52 — THE PEER ROW NAME'S OWN SIZE (15 fp), deliberately NOT following
+ * TYPE_BODY_FP's move to 16.
+ *
+ * The reason is arithmetic, not taste. The approved compact split (840 vp window ⇒
+ * 600 vp pane ⇒ 280 vp list / 320 vp detail) leaves the name column 203 vp
+ * (peerRowTextWidthFor(840) 221 − the compact meta 18). At 15 fp a 28-character
+ * fqdn needs 28 × 7 = 196 vp and fits; at 16 fp it needs 28 × 8 = 224 vp and would
+ * be ellipsised at that one tier. Widening the list column to pay for it would mean
+ * changing Navigation's own 600 vp split reservation — which this round explicitly
+ * does not touch (and the 28-char guarantee is a pinned acceptance property). So the
+ * dense row keeps 15 fp and every other body run in the app takes the 16 fp scale.
+ */
+export const PEER_ROW_NAME_FP: number = 15;
 // 0.0.41 (I6) §3: PEER_SEARCH_MAX_WIDTH_VP (320) is RETIRED. The search field is
 // the list card's own width now (peerListCardWidthVp below) — see that function.
-
-/** The peer list column's cap (vp) for a window width — one per rail tier. */
-export function peerListNavBarCapVp(windowVp: number): number {
-  const tier: string = railTierOf(windowVp);
-  if (tier === RAIL_TIER_ROOMY) {
-    return PEER_LIST_NAV_BAR_CAP_ROOMY_VP;
-  }
-  if (tier === RAIL_TIER_MEDIUM) {
-    return PEER_LIST_NAV_BAR_CAP_MEDIUM_VP;
-  }
-  return PEER_LIST_NAV_BAR_CAP_COMPACT_VP;
-}
 
 /**
  * The width (vp) the detail pane keeps at a window width: the compact tier's
  * 320, the framework's own 360 from the medium tier up. This is what the page
  * hands Navigation's `minContentWidth` — the value the framework derives the real
  * navBarWidth from (`calcNavBarWidth = width - minContentWidth - divider`), so it
- * is the number that decides the split, not a comment about it.
+ * is the number that decides the split, not a comment about it. Under the 0.0.53
+ * 1:2 rule it is also the reservation the 280 vp floor is measured against: at the
+ * shell's floor (pane 600) 600 - 320 = 280 is exactly the floor.
  */
 export function peerContentMinWidthVp(windowVp: number): number {
   return railTierOf(windowVp) === RAIL_TIER_COMPACT
@@ -826,47 +932,86 @@ export function peerContentMinWidthVp(windowVp: number): number {
 }
 
 /**
- * The peer list column's width (vp) for a pane width at a window's tier:
- * everything the pane can give it above that tier's reservation, capped so the
- * list never eats the detail. Below the floor (a pane narrower than 240 + its
- * reservation, which the split shell never mounts) the answer is the framework
- * default, and a nonsense pane width answers the same — never NaN, never a
+ * The content area the 1:2 split is measured against (vp): the mounted pane's width,
+ * capped by the xl indent layout's CONTENT_MAX_WIDTH_VP — from 1440 vp the pane stops
+ * growing at 1200 and is CENTRED, so the Navigation really is 1200 vp wide and a third
+ * of the uncapped 1680 vp pane would over-reserve the list by 80 vp.
+ */
+export function peerSplitPaneWidthVp(windowVp: number): number {
+  const pane: number = splitPaneWidthVp(windowVp);
+  const cap: number = contentMaxWidthVp(windowVp);
+  return cap > 0 && pane > cap ? cap : pane;
+}
+
+/**
+ * The peer list column's width (vp) for a content-area width at a window's tier:
+ * the official 1:2 split — one third of the content area, clamped into
+ * [PEER_LIST_NAV_BAR_MIN_VP (280), PEER_LIST_NAV_BAR_MAX_VP (480)] — and then
+ * snapped across the row's own form threshold (peerListSnapToWideFormVp: a 1:2
+ * column in [360, 374) is raised to 374, so the row's DENSITY cannot flip for a few
+ * vp of window drag — see PEER_LIST_FORM_SNAP_BAND_VP) — and finally clamped to the
+ * room the detail pane's own reservation leaves (`pane - minContentWidth`), so the
+ * column can never break the split it lives in. Below the floor (a pane narrower than
+ * 240 + its reservation, which the split shell never mounts) the answer is the
+ * framework default, and a nonsense pane width answers the same — never NaN, never a
  * negative width.
  *
  * 0.0.48 (I13): THIS IS A REQUEST, NOT THE ANSWER. The page hands it to
  * `Navigation.navBarWidth`, and the framework may render less: `maxNavBarWidth`
  * defaults to 40% of the pane ("the maximum width defaults to 40% of the component
- * width", SDK navigation.d.ts) and beats a larger request. At the owner's 0.0.47 PC
- * window (1250 vp window, 972 vp pane) the table asks for 440 vp and the rendered
- * column is 389 vp — the 51 vp the search field was wrongly sized from. Nothing whose
- * edge must match the rendered card may be derived from this number.
+ * width", SDK navigation.d.ts) and beats a larger request. Up to 0.0.52 the tier table
+ * asked for up to 480 vp, i.e. ABOVE that ceiling at a 972 vp pane (40% = 389), which
+ * is the 51 vp the search field was wrongly sized from. The 1:2 column is a third of
+ * the pane, i.e. always BELOW the 40% ceiling, so request and render agree again —
+ * except where the 280 vp floor itself is above 40% (a pane below 700 vp, i.e. the
+ * 840…939 vp windows, where the detail reservation still wins the clamp first).
  */
 export function peerListNavBarWidthVp(paneWidthVp: number, windowVp: number): number {
   const room: number = paneWidthVp - peerContentMinWidthVp(windowVp);
   if (!(room >= NAV_BAR_WIDTH_VP)) {
     return NAV_BAR_WIDTH_VP;
   }
-  const cap: number = peerListNavBarCapVp(windowVp);
-  return room < cap ? room : cap;
+  const third: number = Math.round(paneWidthVp / PEER_LIST_PANE_DIVISOR);
+  let width: number = third;
+  if (!(width >= PEER_LIST_NAV_BAR_MIN_VP)) {
+    width = PEER_LIST_NAV_BAR_MIN_VP;
+  }
+  if (width > PEER_LIST_NAV_BAR_MAX_VP) {
+    width = PEER_LIST_NAV_BAR_MAX_VP;
+  }
+  // 0.0.53 — the 1 vp snap: a column one to fourteen vp short of the WIDE form's
+  // threshold is raised to it, so crossing a window width cannot flip the rows'
+  // density. Only the FORM threshold moves; the column is still the 1:2 answer, and
+  // the room clamp below still wins if a snapped column would ever not fit.
+  width = peerListSnapToWideFormVp(width);
+  return width < room ? width : room;
 }
 
 /**
- * The peer list column's width (vp) for a WINDOW width — the pane's own width
- * first (`splitPaneWidthVp`), which is what makes the column a function of the
- * rail tier table and therefore of the window.
+ * The peer list column's width (vp) for a WINDOW width — the content area's own width
+ * first (`peerSplitPaneWidthVp`), which is what makes the column follow the rail tier
+ * table only through the pane it leaves.
  */
 export function peerListNavBarWidthFor(windowVp: number): number {
-  return peerListNavBarWidthVp(splitPaneWidthVp(windowVp), windowVp);
+  return peerListNavBarWidthVp(peerSplitPaneWidthVp(windowVp), windowVp);
 }
 
 /**
- * True when the peer row must use the CONDENSED form: the split shell's compact
- * rail tier. The narrow branch (the phone's bottom-tab list) is never condensed —
- * its rows own the whole page width and keep I3's shape.
+ * True when the peer row must use the CONDENSED form: the split shell's list column is
+ * narrower than the WIDE form needs to keep the 28-character name floor. Since 0.0.53
+ * the form follows the COLUMN (the 1:2 split gives 280…373 vp across 840…1440 vp,
+ * where the wide form's 98 vp meta column + 21 vp of copy marks do not fit) instead of
+ * the rail tier — see the 0.0.53 note above the column constants. The column has
+ * already been snapped across this very threshold (peerListSnapToWideFormVp), so the
+ * band [360, 374) answers WIDE here: the form changes at the threshold, not one vp
+ * under it. The narrow branch (the phone's bottom-tab list) is never condensed — its
+ * rows own the whole page width.
  */
 export function peerRowCondensed(windowVp: number): boolean {
-  return paneLayoutOf(windowVp) === PANE_SPLIT &&
-    railTierOf(windowVp) === RAIL_TIER_COMPACT;
+  if (paneLayoutOf(windowVp) !== PANE_SPLIT) {
+    return false;
+  }
+  return peerListNavBarWidthFor(windowVp) < PEER_LIST_WIDE_FORM_MIN_VP;
 }
 
 /**
@@ -1053,19 +1198,103 @@ export function copyIconGapInBand(gapVp: number): boolean {
   return gapVp >= COPY_ICON_GAP_MIN_VP && gapVp <= COPY_ICON_GAP_MAX_VP;
 }
 
-/**
- * Does the peer LIST ROW render a copy slot at this window width? True exactly on
- * the split shell at the medium/roomy rail tiers — the pointer branch whose width
- * budget can afford it. The narrow (phone/tablet) branch is FALSE: it has no hover,
- * so its rows stay byte-for-byte what they were (I8's phone-branch decision), and
- * the compact split tier is false because its name floor cannot pay for the slot.
- */
-export function peerRowCopyVisible(windowVp: number): boolean {
-  return paneLayoutOf(windowVp) === PANE_SPLIT &&
-    railTierOf(windowVp) !== RAIL_TIER_COMPACT;
+// ---------------------------------------------------------------------------
+// 0.0.53 — THE TWO COLUMN THRESHOLDS the row's FORM and its copy marks derive from
+// ---------------------------------------------------------------------------
+// Both are the SAME arithmetic: the 28-character name floor (196 vp) plus the chrome
+// the form spends beside the name, plus the paddings and the always-reserved 3 vp
+// marker. Nothing here is a breakpoint someone chose — `peerListColumnForNameFloorVp`
+// is the only expression, so moving the floor or the chrome moves both thresholds.
+//
+//   wide form    196 + 98 (meta column) + 21 (copy gap + slot) + 24 + 3 + 32 = 374
+//   condensed    196 + 18 (line-1 dot) + 21 (copy gap + slot) + 24 + 3 + 32 = 294
+//
+// 374 is what the 1:2 rule crosses at a pane of 1122 vp (window 1441): below it the
+// row is condensed (the chip + status ride line 2) and above it the trailing meta
+// column is back. 294 is why 840…1160 vp windows have no copy marks at all: their
+// column is the 280 floor, where the condensed name column is 203 vp — and
+// 203 - 21 = 182 is under the floor.
+/** The list column (vp) a row FORM needs so its name column keeps the 28-char floor. */
+export function peerListColumnForNameFloorVp(metaVp: number, copyTakeVp: number): number {
+  return PEER_ROW_NAME_MIN_WIDTH_VP + metaVp + copyTakeVp +
+    2 * PEER_ROW_LIST_PADDING_VP + PEER_ROW_SELECT_BAR_VP + 2 * RAIL_PAGE_PADDING_VP;
 }
 
-/** The row's copy slot (vp) at a window width — 0 when the tier cannot afford it. */
+/** The column (vp) at which the WIDE row form can keep the name floor. */
+export const PEER_LIST_WIDE_FORM_MIN_VP: number =
+  peerListColumnForNameFloorVp(PEER_ROW_META_WIDE_VP, COPY_ICON_GAP_VP + PEER_ROW_COPY_SLOT_VP);
+
+/** The column (vp) at which the CONDENSED row can still afford the copy marks. */
+export const PEER_LIST_COPY_SLOT_MIN_VP: number =
+  peerListColumnForNameFloorVp(PEER_ROW_META_COMPACT_VP, COPY_ICON_GAP_VP + PEER_ROW_COPY_SLOT_VP);
+
+/**
+ * The 1 vp FORM SNAP's band (vp): the widest shortfall below
+ * PEER_LIST_WIDE_FORM_MIN_VP that the list column closes by SNAPPING UP to it.
+ *
+ * Why: the wide form's threshold is DERIVED (374) and the 1:2 column is derived too,
+ * so the two meet at a window width — and the content area under them takes a 40 vp
+ * step down at 1440 vp (rail 280 → 320). The four windows around it were:
+ *
+ *   1439 vp  pane 1159  column 386  WIDE
+ *   1440 vp  pane 1120  column 373  CONDENSED   ← one vp under the threshold
+ *   1441 vp  pane 1121  column 374  WIDE
+ *
+ * so a single window width — the very one a user lands on by dragging the window —
+ * flipped the list's density for no design reason. A 1:2 column of 360…373 is one to
+ * fourteen vp from the wide form; paying that from the detail pane (374 / 1120 instead
+ * of 373 / 1120 at 1440, 0.09% off 1:2) is invisible, while the density flip is not.
+ *
+ * The band therefore is [PEER_LIST_WIDE_FORM_MIN_VP − 14, PEER_LIST_WIDE_FORM_MIN_VP).
+ * This is a DENSITY snap only: the 1:2 rule, its 280/480 clamps and the split invariant
+ * are untouched (see peerListSnapToWideFormVp), and the band's own floor (360) is the
+ * arithmetic the 1:2 column passes at a 1080 vp content area.
+ */
+export const PEER_LIST_FORM_SNAP_BAND_VP: number = 14;
+
+/**
+ * The 1 vp snap itself: `widthVp` unchanged, except inside the band
+ * [PEER_LIST_WIDE_FORM_MIN_VP − PEER_LIST_FORM_SNAP_BAND_VP, PEER_LIST_WIDE_FORM_MIN_VP)
+ * where it is raised to PEER_LIST_WIDE_FORM_MIN_VP — the exact column at which the WIDE
+ * row form's name column still clears the 28-character floor.
+ *
+ * Kept a function of its own so the boundary is asserted directly (359 → 359,
+ * 360 → 374, 373 → 374, 374 → 374) instead of being re-derived from a comment. It
+ * never synthesizes a width: a nonsense input (NaN) passes through unchanged, and it
+ * is applied to the already-clamped 1:2 column inside peerListNavBarWidthVp, whose
+ * final room clamp still wins.
+ */
+export function peerListSnapToWideFormVp(widthVp: number): number {
+  if (!(widthVp >= PEER_LIST_WIDE_FORM_MIN_VP - PEER_LIST_FORM_SNAP_BAND_VP)) {
+    return widthVp;
+  }
+  if (widthVp >= PEER_LIST_WIDE_FORM_MIN_VP) {
+    return widthVp;
+  }
+  return PEER_LIST_WIDE_FORM_MIN_VP;
+}
+
+/**
+ * Does the peer LIST ROW render a copy slot at this window width? True exactly on the
+ * split shell where the SHIPPED row form's name column can still pay for the mark —
+ * `column >= PEER_LIST_COPY_SLOT_MIN_VP` (294, i.e. the condensed form's own floor).
+ * The narrow (phone/tablet) branch is FALSE: it has no hover, so its rows stay
+ * byte-for-byte what they were (I8's phone-branch decision).
+ *
+ * 0.0.53 DELIBERATE UPDATE: the gate was the rail TIER (`railTier != compact`) while
+ * the column was a per-tier cap table. The 1:2 split gives a 280 vp column at 1024…
+ * 1119 vp windows, where the mark's 21 vp would cut the name to 182 — under the
+ * pinned floor — so the gate is the COLUMN's own arithmetic now, and the 1250…1440 PC
+ * columns (324…373 vp) keep their marks.
+ */
+export function peerRowCopyVisible(windowVp: number): boolean {
+  if (paneLayoutOf(windowVp) !== PANE_SPLIT) {
+    return false;
+  }
+  return peerListNavBarWidthFor(windowVp) >= PEER_LIST_COPY_SLOT_MIN_VP;
+}
+
+/** The row's copy slot (vp) at a window width — 0 when the column cannot afford it. */
 export function peerRowCopySlotVp(windowVp: number): number {
   return peerRowCopyVisible(windowVp) ? PEER_ROW_COPY_SLOT_VP : 0;
 }
@@ -1073,15 +1302,14 @@ export function peerRowCopySlotVp(windowVp: number): number {
 /**
  * What the copy affordance takes out of a text BUDGET (vp) at a window width: the
  * mark's slot AND the gap that puts it 5 vp after the last glyph, or 0 where the
- * tier has no slot at all.
+ * column has no slot at all.
  *
  * 0.0.45 (I10) is the reason the gap joined the budget. The two numbers used to be
  * one (the slot alone), because the text was STRETCHED: its box ran to the meta
  * column and the icon followed the box, wherever the box ended. Now the box is the
  * glyphs, so `budget + gap + slot` is what the row really spends — and the text's
  * max width must already carry it, or a name that fills its budget would push the
- * mark into the chip. The floors are unaffected: the gap is only spent at the
- * medium/roomy tiers, where the name's floor has 60+ vp of room.
+ * mark into the chip.
  */
 export function peerRowCopyTakeVp(windowVp: number): number {
   return peerRowCopyVisible(windowVp) ? COPY_ICON_GAP_VP + PEER_ROW_COPY_SLOT_VP : 0;
@@ -1110,17 +1338,18 @@ export function peerRowNameWidthFor(windowVp: number): number {
 }
 
 /**
- * The width (vp) line 2's IP has. At the compact tier the IP shares line 2 with the
- * chip + status text (I4's condensation) and the dot is on line 1, so only that
- * line's block comes off. At the wide tiers the IP shares the ROW with the
- * full-height meta column (I8 §2) and carries its own copy icon (I8 §3), so both
- * come off.
+ * The width (vp) line 2's IP has. In the CONDENSED form the IP shares line 2 with the
+ * chip + status text (I4's condensation) and the dot is on line 1, so that line's
+ * block comes off — and, since 0.0.53, its own copy mark too (the condensed form can
+ * afford the mark from a 294 vp column up, see peerRowCopyVisible). In the WIDE form
+ * the IP shares the ROW with the full-height meta column (I8 §2) and carries its own
+ * copy icon (I8 §3), so both come off.
  * `>= PEER_ROW_IP_MIN_WIDTH_VP` is exactly "the IP never wraps" at every window.
  */
 export function peerRowIpWidthVp(navBarWidthVp: number, windowVp: number): number {
   const text: number = peerRowTextWidthVp(navBarWidthVp);
   if (peerRowCondensed(windowVp)) {
-    return text - PEER_ROW_L2_META_COMPACT_VP;
+    return text - PEER_ROW_L2_META_COMPACT_VP - peerRowCopyTakeVp(windowVp);
   }
   return text - peerRowMetaWidthVp(windowVp) - peerRowCopyTakeVp(windowVp);
 }
@@ -1129,7 +1358,7 @@ export function peerRowIpWidthVp(navBarWidthVp: number, windowVp: number): numbe
 export function peerRowIpWidthFor(windowVp: number): number {
   const text: number = peerRowTextWidthFor(windowVp);
   if (peerRowCondensed(windowVp)) {
-    return text - PEER_ROW_L2_META_COMPACT_VP;
+    return text - PEER_ROW_L2_META_COMPACT_VP - peerRowCopyTakeVp(windowVp);
   }
   return text - peerRowMetaWidthVp(windowVp) - peerRowCopyTakeVp(windowVp);
 }
@@ -1229,6 +1458,30 @@ export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();
  * 2560 vp pane reads as a half-drawn page.
  */
 export const SETTINGS_CONTENT_MAX_WIDTH_VP: number = 680;
+
+// ---------------------------------------------------------------------------
+// 0.0.53 — KEYBOARD FOCUS and the SUBPAGE TRANSITION
+// ---------------------------------------------------------------------------
+// The PC shell is keyboard-reachable (every tappable row is `focusable`), but until
+// 0.0.53 nothing PAINTED focus: the pointer got hoverEffect and an explicit role
+// tint, the keyboard got only the framework's default box (which the list's own
+// `.clip(true)` and the rows' own fills swallow). These two numbers are the shared
+// answer, so every focusable row in the app speaks one focus language and every
+// subpage enters and leaves with one motion.
+/** The focus ring's width (vp) on a focusable row — the 1 vp border's 2 vp sibling. */
+export const FOCUS_RING_WIDTH_VP: number = 2;
+/**
+ * The subpage transition's duration (ms). 250 ms is the short end of the platform's
+ * page-transition band and is deliberately SHORTER than a state tick (1 s), so a
+ * transition can never read as the status document refreshing.
+ */
+export const PANE_TRANSITION_MS: number = 250;
+/**
+ * The subpage transition's vertical offset (vp): a slight 8 vp rise on enter and
+ * settle on exit, which says "a new layer came in" without moving the page's content
+ * far enough to re-read it.
+ */
+export const PANE_TRANSITION_TRANSLATE_VP: number = 8;
 
 /**
  * The settings column's `maxWidth` for a pane width: 0 = NO constraint (the
@@ -1699,12 +1952,17 @@ export const DETAIL_ROW_ICON_SLOT_VP: number = 16;
 /**
  * The gap between the leading glyph and the label (vp). Tighter than
  * DETAIL_ROW_GAP_VP because the glyph reads as part of the label, and because this
- * pair (slot + gap) is the only width the value column pays for the glyph: at the
- * narrowest wide tier the value keeps 108 vp of its former 132 (the copyable rows
- * keep 108 against the copy rows' former 128), which still clears the one-line floor
- * below.
+ * pair (slot + gap) is the only width the value column pays for the glyph.
+ *
+ * 0.0.52 — 4 → 2, and the reason is arithmetic: TYPE_BODY_FP rose 15 → 16, so the
+ * one-line IPv4 floor rose with it (DETAIL_ROW_VALUE_CHARS 14 × 8 = 112 vp), while
+ * the narrowest detail pane (320 vp) leaves the value column 111 vp with the old
+ * 4 vp gap. The gap pays the 1 vp the floor needed plus 1 vp of slack (value 113).
+ * The pair's total (slot 16 + gap) is still what the row's own budget subtracts, so
+ * nothing else in the row moves; the glyph's 16 vp box already reads as separated
+ * from the label because the drawn marks ink only the middle of that box.
  */
-export const DETAIL_ROW_ICON_GAP_VP: number = 4;
+export const DETAIL_ROW_ICON_GAP_VP: number = 2;
 /**
  * The gap between the label block and the value, and between the value and the copy
  * mark (vp) — the detail row's own `Row({ space: DETAIL_ROW_GAP_VP })`, unchanged
@@ -1958,13 +2216,14 @@ export function peerDetailCopyable(label: string): boolean {
 }
 
 /**
- * The width (vp) the detail pane's CONTENT has at a window width: the pane's width
- * (window − rail) minus the list column Navigation carves out of it — the same two
- * functions the shell itself is built from, so the row budget cannot drift from the
- * layout. Never negative.
+ * The width (vp) the detail pane's CONTENT has at a window width: the content area's
+ * width (window − rail, capped by the xl indent limit — the box the Navigation really
+ * occupies, `peerSplitPaneWidthVp`) minus the list column it carves out of it — the
+ * same two functions the shell itself is built from, so the row budget cannot drift
+ * from the layout. Never negative.
  */
 export function detailPaneContentWidthVp(windowVp: number): number {
-  const pane: number = splitPaneWidthVp(windowVp);
+  const pane: number = peerSplitPaneWidthVp(windowVp);
   const navBar: number = peerListNavBarWidthVp(pane, windowVp);
   const content: number = pane - navBar;
   return content > 0 ? content : 0;

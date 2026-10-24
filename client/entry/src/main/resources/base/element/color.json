@@ -30,15 +30,15 @@
     },
     {
       "name": "nb_text_muted",
-      "value": "#8A9AA6"
+      "value": "#5C6B77"
     },
     {
       "name": "nb_border",
-      "value": "#AAB5BC"
+      "value": "#848F97"
     },
     {
       "name": "nb_card_border",
-      "value": "#DEE5EA"
+      "value": "#B2BEC7"
     },
     {
       "name": "nb_primary",
@@ -50,7 +50,7 @@
     },
     {
       "name": "nb_neutral_button_background",
-      "value": "#8A9AA6"
+      "value": "#5A6874"
     },
     {
       "name": "nb_on_neutral_button",
@@ -62,7 +62,7 @@
     },
     {
       "name": "nb_status_warning",
-      "value": "#8A6D1A"
+      "value": "#7E6415"
     },
     {
       "name": "nb_status_error",
@@ -90,7 +90,7 @@
     },
     {
       "name": "nb_row_divider",
-      "value": "#E8EEF2"
+      "value": "#C8D2D9"
     },
     {
       "name": "nb_on_status",

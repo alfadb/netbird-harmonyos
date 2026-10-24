@@ -1437,7 +1437,8 @@ mod tests {
         mux.register_session(1, "AAAA", "stalled-consumer");
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let extra = 10usize;
-        for _ in 0..(MUX_STUN_QCAP + extra) {
+        let total = (MUX_STUN_QCAP + extra) as u64;
+        for _ in 0..total {
             loopback_sender(&sender, mux.local_port(), &binding_request_with_username("AAAA:ZZZZ"));
         }
         // the stalled session never drains: the reader must count the overflow and
@@ -1446,9 +1447,17 @@ mod tests {
         while mux.stats().queue_dropped < extra as u64 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
+        // `queue_dropped` is bumped per datagram INSIDE a drain pass, but `reads`
+        // is published once at the END of that pass. The overflow total can be
+        // visible one pass before `reads` catches up (observed: dropped=10 with
+        // reads=73, the 74th already read), so wait for the pass to publish its
+        // count before asserting — a half-counted pass is not a lost datagram.
+        while mux.stats().reads < total && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let s = mux.stats();
         assert_eq!(s.queue_dropped, extra as u64, "exactly the overflow is dropped+counted");
-        assert!(s.reads >= (MUX_STUN_QCAP + extra) as u64, "every datagram was still read");
+        assert!(s.reads >= total, "every datagram was still read");
         assert_eq!(mux.take_stun(1, usize::MAX).len(), MUX_STUN_QCAP, "queue stayed bounded");
         // a SECOND session on the same socket is served normally afterwards
         mux.register_session(2, "BBBB", "live-consumer");
@@ -1468,10 +1477,25 @@ mod tests {
     fn dropping_the_last_mux_closes_its_own_fd_exactly_once_and_leaves_the_socket() {
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let raw = std::os::fd::IntoRawFd::into_raw_fd(sock); // the mux takes it over
-        // a second dup of the SAME socket keeps the underlying socket alive, so the
-        // number `raw` cannot be recycled by anyone while we assert on it
-        let keep = crate::mgmtsock::dup_socket_fd(raw).expect("dup for the assertion");
-        let owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw) };
+        // Move the socket OUT of the concurrent-allocator range (the same fix
+        // `host_sockets::tests::fd_bag_closes_every_kept_fd` documents): fd
+        // numbers are handed out lowest-free-first, so a number opened here can
+        // be recycled by a parallel test between the mux's drop and the EBADF
+        // probe — that is the observed flake. A high number is never handed out
+        // by those tests, so the post-drop probe is race-free.
+        let high = [1 << 20, 1 << 18, 1 << 16, 1 << 14]
+            .into_iter()
+            .find_map(|floor| {
+                let hi = unsafe { sys::fcntl(raw, sys::F_DUPFD_CLOEXEC, floor) };
+                (hi >= floor).then_some(hi)
+            })
+            .unwrap_or_else(|| {
+                panic!("no high-fd tier worked for fd {raw}: race-free EBADF assertion impossible")
+            });
+        unsafe { sys::close(raw) };
+        // a second dup of the SAME socket keeps the underlying socket alive
+        let keep = crate::mgmtsock::dup_socket_fd(high).expect("dup for the assertion");
+        let owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(high) };
         let mux = IceMux::adopt(owned, vec![], 0).expect("mux over the bound socket");
         assert!(mux.start_reader());
         assert_ne!(mux.local_port(), 0);
@@ -1480,7 +1504,7 @@ mod tests {
         let mut name = sys::sockaddr_in::new([0, 0, 0, 0], 0);
         let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
         assert_eq!(
-            unsafe { sys::getsockname(raw, &mut name, &mut len) },
+            unsafe { sys::getsockname(high, &mut name, &mut len) },
             -1,
             "the mux's own fd is closed when the last Arc goes"
         );

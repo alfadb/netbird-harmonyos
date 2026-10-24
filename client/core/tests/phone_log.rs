@@ -425,12 +425,35 @@ fn rate_budget_bounds_bytes_per_window_and_stays_separate_from_queue_drops() {
     // ... and the bound is not trivially satisfied by refusing everything.
     assert!(during.accepted >= 30, "the first window must admit its bytes: {during:?}");
 
+    // `dropped=` is snapshotted when the writer RENDERS a record, and the
+    // writer can render the whole accepted burst before the producer has even
+    // counted the first refusal — whether ANY accepted record sees the count
+    // is scheduling-dependent (observed: "no record carried the refusal
+    // count"). The documented contract ("cumulative refusal count at write
+    // time") needs a record written AFTER a refusal, so wait out the one-second
+    // window and append one marker; it is admitted by the fresh window and is
+    // rendered with the cumulative count already on the counter.
+    let admitted = during.accepted;
+    thread::sleep(Duration::from_millis(1100));
+    phone_log::append("RATE|after-refusal");
+    let after_marker = phone_log::stats();
+    assert!(
+        after_marker.accepted > admitted,
+        "the post-refusal marker must be admitted in the next window: {after_marker:?}"
+    );
+
     assert!(phone_log::flush(Duration::from_secs(5)), "flush timed out");
     assert!(phone_log::shutdown(Duration::from_secs(5)));
     let records = parse_records(&read_segments(&path, 4));
     assert!(!records.is_empty());
     // Suppression is visible in the persisted records as the refusal count.
     assert!(records.iter().any(|r| r.dropped > 0), "no record carried the refusal count");
+    assert!(
+        records
+            .iter()
+            .any(|r| r.line.starts_with("RATE|after-refusal") && r.dropped > 0),
+        "the record written after a refusal must carry the cumulative refusal count"
+    );
 }
 
 #[test]

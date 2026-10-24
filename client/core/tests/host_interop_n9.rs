@@ -219,6 +219,14 @@ fn fd_feed_seams_still_refuse_missing_and_dead_fds() {
 
 #[test]
 fn host_socket_creators_follow_their_contracts() {
+    // The per-fd "must be closed" checks below re-read the fd NUMBER after the
+    // bag closed it. Fd numbers are process-global: while this test is between
+    // close() and the fcntl re-check, another test in this binary can open a
+    // socket and be handed the same number, which made the check report
+    // "fd 3 must be closed" spuriously. Every creator test here serializes on
+    // the same slot lock, so no other test owns (or can recycle) an fd during
+    // that window.
+    let _g = slot_lock();
     let tcp = hs::open_tcp_prebound().expect("tcp prebound");
     assert!(tcp >= 0);
     let udp = hs::open_udp_unbound().expect("udp unbound");

@@ -80,6 +80,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // the REAL extension now imports by value — zero imports, no erased type
   // crossing the value import, staged byte-identically, no shim.
   'NetBirdStatusPolicy',
+  // 0.0.54 data-plane watchdog: the pure policy the REAL extension imports by
+  // value — zero imports and no erased types, so no shim.
+  'NetBirdDataPlanePolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy',
   // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
   // REAL extension now imports by value for its synchronous write; zero
@@ -374,12 +377,68 @@ try {
     await driveStart(ability, new FakeConnection());
     const config = startConfig();
     const device = parseDevice(fileOf(DEVICE_PATH) ?? '');
+    const baseline = JSON.parse(buildBaseline(device, false)) as Record<string, unknown>;
     check('S2a a MISSING selection document starts with NO route_selection key',
       config !== undefined && !Object.prototype.hasOwnProperty.call(config, 'route_selection'),
       JSON.stringify(config));
-    check('S2b that start config is BYTE-IDENTICAL to the pre-existing two-argument JSON',
-      config !== undefined && JSON.stringify(config) === buildBaseline(device, false),
-      JSON.stringify({ got: JSON.stringify(config), want: buildBaseline(device, false) }));
+    // 2026-10-17 peer meta identity: the two-argument call keeps the historical
+    // placeholders (nothing injected), while the DRIVEN start config carries the
+    // REAL values the bundleManager/deviceInfo stubs answer. Everything else is
+    // still the same document, byte for byte.
+    check('S2b the two-argument call still emits the historical placeholder identity',
+      baseline['netbird_version'] === '0.1.0' && baseline['os_version'] === 'unknown',
+      JSON.stringify({ netbird_version: baseline['netbird_version'],
+        os_version: baseline['os_version'] }));
+    const withoutIdentity = (doc: Record<string, unknown>): string => {
+      const copy: Record<string, unknown> = { ...doc };
+      delete copy['netbird_version'];
+      delete copy['os_version'];
+      return JSON.stringify(copy);
+    };
+    check('S2c apart from the injected identity the start config is BYTE-IDENTICAL to the two-argument JSON',
+      config !== undefined && withoutIdentity(config) === withoutIdentity(baseline),
+      JSON.stringify({ got: withoutIdentity(config ?? {}), want: withoutIdentity(baseline) }));
+    check('S2d the start config carries the REAL runtime identity, not the placeholders',
+      config !== undefined && config['netbird_version'] === '0.0.49' &&
+      config['os_version'] === '7.0.0.107',
+      JSON.stringify({ netbird_version: config?.['netbird_version'],
+        os_version: config?.['os_version'] }));
+  }
+
+  // ---- S2e: the OS release fallback chain, driven through the REAL start ----
+  // deviceInfo answers are switched per scenario; the helper under test is the
+  // shipped osVersionName(), reached only through the start config.
+  const osVersionFromStart = async (over: Record<string, unknown>):
+    Promise<string | undefined> => {
+    resetWorld();
+    G['__NB_DEVICE_INFO'] = over;
+    seedCredentials(MGMT);
+    const ability = makeAbility(mod);
+    await driveStart(ability, new FakeConnection());
+    const config = startConfig();
+    return config === undefined ? undefined : config['os_version'] as string | undefined;
+  };
+  {
+    const nonNumericBuild = await osVersionFromStart({ buildVersion: 'n/a',
+      displayVersion: 'OpenHarmony-Display' });
+    check('S2e a NON-NUMERIC build part skips the numeric form -> displayVersion',
+      nonNumericBuild === 'OpenHarmony-Display', String(nonNumericBuild));
+    const missingMajor = await osVersionFromStart({ majorVersion: undefined });
+    check('S2f a MISSING major part skips the numeric form -> displayVersion',
+      missingMajor === 'OpenHarmony-7.0.0.107', String(missingMajor));
+    const emptyDisplay = await osVersionFromStart({ buildVersion: 'n/a',
+      displayVersion: '', osFullName: 'OpenHarmony-Full' });
+    check('S2g an empty displayVersion falls back to osFullName',
+      emptyDisplay === 'OpenHarmony-Full', String(emptyDisplay));
+    const emptyFull = await osVersionFromStart({ buildVersion: 'n/a',
+      displayVersion: '', osFullName: '', sdkApiVersion: 14 });
+    check('S2h an empty osFullName falls back to the numeric sdkApiVersion',
+      emptyFull === '14', String(emptyFull));
+    const noAnswer = await osVersionFromStart({ buildVersion: 'n/a',
+      displayVersion: '', osFullName: '', sdkApiVersion: undefined });
+    check('S2i no platform answer at all is the literal "unknown"',
+      noAnswer === 'unknown', String(noAnswer));
+    delete G['__NB_DEVICE_INFO'];
   }
 
   // ---- S3: a document scoped to ANOTHER server is not this server's ---------

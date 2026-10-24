@@ -790,8 +790,21 @@ fn external_cname_target_uses_private_group_and_primary_udp_tcp() {
     use std::{io::{Read, Write}, net::TcpListener};
     for primary in [false, true] {
         for tcp in [false, true] {
-            let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-            let listener = TcpListener::bind(udp.local_addr().unwrap()).unwrap();
+            // UDP and TCP allocate ephemeral ports independently, so another
+            // test in this binary can claim the TCP half of the port we just
+            // bound for UDP (observed: AddrInUse errno 98). Retry with a fresh
+            // pair instead of assuming the first one is free.
+            let (udp, listener) = 'pair: {
+                for _ in 0..64 {
+                    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+                    match TcpListener::bind(udp.local_addr().unwrap()) {
+                        Ok(listener) => break 'pair (udp, listener),
+                        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                        Err(e) => panic!("TCP bind on {}: {e}", udp.local_addr().unwrap()),
+                    }
+                }
+                panic!("no free loopback UDP/TCP port pair after 64 tries");
+            };
             let mut c = cname_config();
             let mut target_group = group(vec![udp.local_addr().unwrap()]);
             if primary {

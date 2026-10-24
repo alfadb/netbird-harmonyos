@@ -509,7 +509,13 @@ struct RateLimit {
 ///   `N13_WG_FEED|…` and the bounded `N13_WG|carrier-reject` lines are NOT
 ///   transitions and stay ordinary;
 /// * `connector: state ->` and `connector: login` — the management state
-///   machine and every login outcome (attempt/ok/needs-login/fatal/exhausted).
+///   machine and every login outcome (attempt/ok/needs-login/fatal/exhausted);
+/// * `connector: management stream established` / `connector: physical network
+///   changed; management redialing` / `connector: signal link started` — the
+///   three once-per-event connector lines that say the management stream came
+///   back, why it was redialed, and that the signal worker armed. Without them
+///   a field log cannot tell a redial storm from a dead link, and the ordinary
+///   budget is spent exactly in those network-change minutes.
 ///
 /// Deliberately absent: every high-rate producer (`N5c_ICE|gather-stun`,
 /// `N5d_ICE|check-rx`, `N11_ICE|failed`, relay-lane retries, `N5e_ICE|mux`),
@@ -527,6 +533,9 @@ pub const PRIORITY_MARKERS: &[&str] = &[
     "N13_WG|direct->carrier",
     "connector: state ->",
     "connector: login",
+    "connector: management stream established",
+    "connector: physical network changed; management redialing",
+    "connector: signal link started",
 ];
 
 /// Whether `line` carries one of the [`PRIORITY_MARKERS`]. PURE (no clock, no
@@ -1818,6 +1827,9 @@ mod tests {
             "connector: state -> connected",
             "connector: login attempt=login result=ok",
             "connector: login ok (peer address assigned)",
+            "connector: management stream established",
+            "connector: physical network changed; management redialing",
+            "connector: signal link started (real SignalSession worker)",
         ] {
             assert!(is_evidence(line), "{line}");
         }
@@ -1834,6 +1846,7 @@ mod tests {
             "N13_WG_FEED|replay-carrier-failed|peer=t7tldQA3",
             "N11_ICE|failed|peer=t7tldQA3",
             "connector: signal frame routed (kind=offer)",
+            "connector: signal stream broken (backoff, will re-register)",
             "ROTLINE|i=1|pad=xxxx",
             "",
         ] {

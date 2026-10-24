@@ -10,12 +10,8 @@
 // and the device private key are SECRET — they never appear in logs, only
 // file names + byte counts.
 
-// Default management server prefilled in the form: the deployment this
-// project actually validates against — production management
-// https://api.netcenter.alfadb.cn (docs/device-relay-enablement-runbook-20260914.md
-// 「生产 management https://api.netcenter.alfadb.cn」, Caddy-terminated TLS,
-// public CA).
-export const DEFAULT_MANAGEMENT_URL: string = 'https://api.netcenter.alfadb.cn';
+// Users supply their own management server; the client provides no network service.
+export const DEFAULT_MANAGEMENT_URL: string = '';
 
 // Exact credential basenames shared by EntryAbility (--ps channel) and the
 // extension's readCredentialFileText: the UI writes the very same files,

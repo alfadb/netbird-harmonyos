@@ -2,8 +2,8 @@
   modelVersion: '26.0.0',
   name: 'netbird-client',
   version: '1.0.0',
-  description: 'NetBird HarmonyOS client: product engineering skeleton (Rust core + entry HAP).',
-  license: 'MIT',
+  description: 'Unofficial NetBird private-network client for HarmonyOS NEXT, with a Rust networking core and ArkTS application.',
+  license: 'AGPL-3.0-or-later',
   dependencies: {},
   devDependencies: {}
 }

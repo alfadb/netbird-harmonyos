@@ -66,16 +66,34 @@ const CONTRACT: Array<[string, string, string]> = [
   ['nb_text_primary', '#17324D', '#E8EEF3'],
   ['nb_text_secondary', '#3D4A55', '#C3CED7'],
   ['nb_text_tertiary', '#52615B', '#AEBBC5'],
-  ['nb_text_muted', '#8A9AA6', '#93A4B0'],
-  ['nb_border', '#AAB5BC', '#4A5A66'],
+  // 0.0.53 — THE CONTRAST PASS MOVED FIVE STEPS, and only to clear WCAG AA. The
+  // ratios themselves live in run-contrast.mts (which computes them from these same
+  // two files); this table stays the exact-value pin so a value cannot drift while
+  // the ratio check keeps passing on some neighbouring hex.
+  //   * nb_text_muted  #8A9AA6 → #5C6B77: 2.66:1 / 2.90:1 on page/card was under AA
+  //     for the 14 fp captions and the row IPs that use it as TEXT (and it still
+  //     clears AA on the hover/selected ROW tints it is painted on);
+  //   * nb_border      #AAB5BC → #848F97: 1.92:1 / 2.09:1 could not carry the
+  //     offline status DOT or any icon it inks (target 3:1);
+  //   * nb_card_border #DEE5EA → #B2BEC7: 1.27:1 against a white card made the card
+  //     outline the palest thing on the page (target 1.5:1, so a card reads as a box);
+  //   * nb_row_divider #E8EEF2 → #C8D2D9: 1.17:1, i.e. the hairline was invisible on
+  //     a white card; it stays strictly lighter than the card outline below;
+  //   * nb_neutral_button_background #8A9AA6 → #5A6874: its OWN on-ink is white and
+  //     2.90:1 was not readable as a button label (target 4.5:1 for text).
+  // The dark steps move the two strokes up one shade for the same reason
+  // (#4A5A66 → #5E7080 is 2.21 → 3.07:1 against the dark card; the divider moves
+  // #33414A → #3D4D57, 1.49 → 1.80:1) and the dark muted ink already cleared AA.
+  ['nb_text_muted', '#5C6B77', '#97A8B4'],
+  ['nb_border', '#848F97', '#5E7080'],
   // 0.0.39 (I4) P2 (review §4.1): the card stroke was #3C4B57 in dark — ~2.06:1
   // against the page, which is at the edge of vanishing on a dim panel. It is now
   // the SAME value as nb_border's dark step (~2.8:1), so no new colour entered the
   // system; the light step is unchanged.
-  ['nb_card_border', '#DEE5EA', '#4A5A66'],
+  ['nb_card_border', '#B2BEC7', '#5E7080'],
   ['nb_primary', '#17324D', '#7FB2D9'],
   ['nb_on_primary', '#FFFFFF', '#0B1218'],
-  ['nb_neutral_button_background', '#8A9AA6', '#3A4750'],
+  ['nb_neutral_button_background', '#5A6874', '#3A4750'],
   // 0.0.40 (I5) §4: the ink that sits ON the neutral surface. Until I5 every
   // neutral button borrowed nb_on_primary, which is a DARK ink in dark mode
   // (#0B1218 on #3A4750 — ~2:1, i.e. the ASTRA review's "返回 按钮的深色文字像禁用
@@ -84,7 +102,11 @@ const CONTRACT: Array<[string, string, string]> = [
   // #E8EEF3, the colour the review named.
   ['nb_on_neutral_button', '#FFFFFF', '#E8EEF3'],
   ['nb_status_success', '#176B3A', '#6FCF97'],
-  ['nb_status_warning', '#8A6D1A', '#E8C468'],
+  // 0.0.53 — #8A6D1A → #7E6415: the warning ink is also TEXT (the verdict line and
+  // the warning chip's own label), and on its own warning tint it measured 4.12:1,
+  // under AA. Same ochre family, one step down; it now clears AA on the page, the
+  // card AND the tint it is painted on.
+  ['nb_status_warning', '#7E6415', '#E8C468'],
   ['nb_status_error', '#A12622', '#F08A82'],
   ['nb_status_success_background', '#E3EFE7', '#22402F'],
   ['nb_status_warning_background', '#F5EBCF', '#3F351A'],
@@ -110,7 +132,7 @@ const CONTRACT: Array<[string, string, string]> = [
   // as a grid. This is the review's own suggested softer step for dark (#33414A) and its
   // light analogue; the property that matters — the line is strictly LIGHTER than the
   // card outline it used to borrow — is asserted below, in both modes.
-  ['nb_row_divider', '#E8EEF2', '#33414A'],
+  ['nb_row_divider', '#C8D2D9', '#3D4D57'],
   ['nb_on_status', '#FFFFFF', '#0B1218'],
   ['nb_window_status_bar_background', '#F2F6F8', '#10171D'],
   ['nb_window_navigation_bar_background', '#F2F6F8', '#10171D'],

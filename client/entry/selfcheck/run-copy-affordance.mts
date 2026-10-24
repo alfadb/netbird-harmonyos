@@ -148,16 +148,20 @@ try {
       .length === 4);
 
   // ---- B. which SURFACES show it ---------------------------------------------
-  check('B: the LIST rows show the icon only on the pointer tiers (hover/selection)',
-    // the tier: the split shell from the medium rail tier up, never the phone branch
-    m.peerRowCopyVisible(1024) === true && m.peerRowCopyVisible(1250) === true &&
-    m.peerRowCopyVisible(1440) === true && m.peerRowCopyVisible(4000) === true &&
+  check('B: the LIST rows show the icon only where the column can pay for it',
+    // 0.0.53 DELIBERATE UPDATE: the gate is the COLUMN's own budget (>= 294 vp — the
+    // condensed row's name floor with the mark), not the rail tier: the 1:2 split
+    // leaves 280 vp at 1024…1119, where the mark's 21 vp would cut the name to 182.
+    m.peerRowCopyVisible(1250) === true && m.peerRowCopyVisible(1440) === true &&
+    m.peerRowCopyVisible(4000) === true &&
     m.peerRowCopyVisible(840) === false && m.peerRowCopyVisible(1023) === false &&
+    m.peerRowCopyVisible(1024) === false && m.peerRowCopyVisible(1120) === false &&
+    m.peerRowCopyVisible(1161) === true &&
     // the narrow (phone/tablet) branch: no hover, so no slot at all — its rows keep
     // today's bytes and the copy affordance there is the detail pane's
     m.peerRowCopyVisible(600) === false && m.peerRowCopyVisible(320) === false &&
     m.peerRowCopyVisible(839) === false && m.peerRowCopySlotVp(600) === 0 &&
-    // the TIER gate and the POINTER gate are two different questions in the page:
+    // the COLUMN gate and the POINTER gate are two different questions in the page:
     // the slot exists for every row of the tier (so a hidden icon keeps its place
     // and hover cannot reflow the list) and only `visible` follows the pointer
     PAGE.includes('private peerRowCopySlotVisible(): boolean {') &&
@@ -187,8 +191,10 @@ try {
 
   const detailRow = PAGE.slice(PAGE.indexOf('struct DetailRow {'),
     PAGE.indexOf('struct DetailSectionHeader {'));
+  // 0.0.52: the settings row sits between RailInfoRow and the empty state now, so the
+  // rail slice ends at ITS struct — the property under test is the rail row's own.
   const railRow = PAGE.slice(PAGE.indexOf('struct RailInfoRow {'),
-    PAGE.indexOf("// 0.0.37 (I2) — THE PANE'S EMPTY / ERROR STATE"));
+    PAGE.indexOf('struct SettingsRow {'));
   check('B: the DETAIL and the RAIL show it ALWAYS (no hover term in either component)',
     detailRow.includes('if (this.copyValue.length > 0) {') &&
     railRow.includes('if (this.copyValue.length > 0) {') &&
@@ -236,7 +242,12 @@ try {
     (copyGlyph.match(/\.borderRadius\(2\)/g) ?? []).length === 2 &&
     (copyGlyph.match(/\.border\(\{ width: 1\.5,/g) ?? []).length === 2 &&
     icon.includes('FieldIcon({ kind: DETAIL_ICON_COPY })') &&
-    !PAGE_CODE.includes('sys.symbol') && !PAGE_CODE.includes('SymbolGlyph'));
+    // 0.0.52 DELIBERATE UPDATE: the page has exactly ONE system symbol — the subpage
+    // title bar's back chevron (run-harmony-layout verifies it against the SDK's
+    // sysResource table). The COPY glyph is still drawn, not a symbol.
+    !icon.includes('SymbolGlyph') && !icon.includes('sys.symbol') &&
+    (PAGE_CODE.match(/SymbolGlyph\(/g) ?? []).length === 1 &&
+    PAGE_CODE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))"));
   check('B: the touch target is 40x40 though the glyph is 16, and the slot never reflows',
     icon.includes('width: PEER_ROW_COPY_TOUCH_VP') &&
     icon.includes('height: PEER_ROW_COPY_TOUCH_VP') &&
@@ -315,20 +326,25 @@ try {
     // pair is a child of the line, so the mark can only follow the text it belongs to
     nameText.includes('visible: this.peerRowCopyIconVisible(peer) && peer.name.length > 0,') &&
     ipText.includes('visible: this.peerRowCopyIconVisible(peer) && peer.ip.length > 0,'));
-  check('D: each peer line packs the pair left and pushes the tier\'s meta right',
+  check('D: each peer line packs the pair left and pushes the form\'s meta right',
     // the condensed dot (line 1) / chip + status (line 2) are the SECOND child, so
     // SpaceBetween lands them on the row's edge exactly as before I10
     (row.match(/\.justifyContent\(FlexAlign\.SpaceBetween\)/g) ?? []).length === 2 &&
     row.includes("Text(connectionLabel(peer.connection))") &&
     row.includes('Circle({ width: PEER_ROW_DOT_VP, height: PEER_ROW_DOT_VP })') &&
     // the slot's budget is the gap AND the glyph, and it is spent only where the
-    // mark exists (the compact split tier still has no slot at all)
-    m.peerRowCopyTakeVp(1024) === m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP &&
-    m.peerRowCopyTakeVp(840) === 0 &&
-    m.peerRowNameWidthFor(1024) + m.peerRowCopyTakeVp(1024) + m.PEER_ROW_META_WIDE_VP ===
-      m.peerRowTextWidthFor(1024) &&
-    m.peerRowIpWidthFor(1024) + m.peerRowCopyTakeVp(1024) + m.PEER_ROW_META_WIDE_VP ===
-      m.peerRowTextWidthFor(1024) &&
+    // mark exists — 0.0.53: the column decides, so 840/1024 have no slot and the
+    // 1250/1441 columns do
+    m.peerRowCopyTakeVp(1250) === m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP &&
+    m.peerRowCopyTakeVp(840) === 0 && m.peerRowCopyTakeVp(1024) === 0 &&
+    m.peerRowNameWidthFor(1250) + m.peerRowCopyTakeVp(1250) + m.PEER_ROW_META_COMPACT_VP ===
+      m.peerRowTextWidthFor(1250) &&
+    m.peerRowIpWidthFor(1250) + m.peerRowCopyTakeVp(1250) +
+      m.PEER_ROW_L2_META_COMPACT_VP === m.peerRowTextWidthFor(1250) &&
+    m.peerRowNameWidthFor(1441) + m.peerRowCopyTakeVp(1441) + m.PEER_ROW_META_WIDE_VP ===
+      m.peerRowTextWidthFor(1441) &&
+    m.peerRowIpWidthFor(1441) + m.peerRowCopyTakeVp(1441) + m.PEER_ROW_META_WIDE_VP ===
+      m.peerRowTextWidthFor(1441) &&
     // 0.0.45 (I10): the cap the page spends is BRANCH-AWARE — the narrow branch's row
     // has no mark, so it must not be handed the split shell's 240 vp list column
     // (which cut the phone's IPs to `100.108.2…` before this was fixed)
@@ -381,8 +397,12 @@ try {
     !icon.includes('Visibility.None') &&
     // the name is ellipsised at a budget that ALREADY pays for the gap + the slot, so
     // the pointer's arrival cannot buy the name any width and cannot take any away
-    m.peerRowNameWidthFor(1024) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(1024)) -
+    // 0.0.53: the WIDE form's decomposition, at the first column that carries it
+    m.peerRowNameWidthFor(1441) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(1441)) -
       m.PEER_ROW_META_WIDE_VP - m.COPY_ICON_GAP_VP - m.PEER_ROW_COPY_SLOT_VP &&
+    // and the condensed form's, at the PC window that now uses it
+    m.peerRowNameWidthFor(1250) === m.peerRowTextWidthVp(m.peerListNavBarWidthFor(1250)) -
+      m.PEER_ROW_META_COMPACT_VP - m.COPY_ICON_GAP_VP - m.PEER_ROW_COPY_SLOT_VP &&
     // and the mark is at the same x whether it is Visible or Hidden, because its node
     // stays in the row either way (the `visible` @Prop is the only thing that moves)
     (PAGE.match(/visible: this\.peerRowCopyIconVisible\(peer\)/g) ?? []).length === 2 &&

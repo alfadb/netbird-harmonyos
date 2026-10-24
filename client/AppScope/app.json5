@@ -2,8 +2,8 @@
   app: {
     bundleName: 'cn.alfadb.netbird',
     vendor: 'alfadb',
-    versionCode: 48,
-    versionName: '0.0.48',
+    versionCode: 54,
+    versionName: '0.0.54',
     icon: '$media:app_icon',
     label: '$string:app_name',
     // 0.0.46 (I11) 跟随系统字体大小. A HarmonyOS application does NOT follow

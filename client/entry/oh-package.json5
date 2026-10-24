@@ -2,8 +2,8 @@
   modelVersion: '26.0.0',
   name: 'entry',
   version: '1.0.0',
-  description: 'Entry module for the NetBird HarmonyOS client (UI trigger + VPN extension skeleton).',
-  license: 'MIT',
+  description: 'ArkTS application and VPN extension for the unofficial NetBird private-network client for HarmonyOS NEXT.',
+  license: 'AGPL-3.0-or-later',
   dependencies: {},
   devDependencies: {}
 }

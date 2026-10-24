@@ -4790,8 +4790,40 @@ mod tests {
         orch.set_peers(&["P0".into(), "P1".into()]);
         orch.set_signal_ready(true);
 
+        // Keep stage/timing evidence even when another test replaces the panic hook.
+        struct Progress {
+            started: std::time::Instant,
+            phase: &'static str,
+            ticks: u64,
+            last_tick: std::time::Duration,
+            worst_tick: std::time::Duration,
+            pump_total: std::time::Duration,
+            workers_waiting_at: Option<std::time::Duration>,
+            first_candidate_at: Option<std::time::Duration>,
+        }
+        impl Drop for Progress {
+            fn drop(&mut self) {
+                eprintln!(
+                    "black_holed_stun phase={} elapsed={:?} ticks={} last_tick={:?} worst_tick={:?} pump_total={:?} workers_waiting_at={:?} first_candidate_at={:?}",
+                    self.phase, self.started.elapsed(), self.ticks, self.last_tick,
+                    self.worst_tick, self.pump_total, self.workers_waiting_at,
+                    self.first_candidate_at,
+                );
+            }
+        }
         let t0 = std::time::Instant::now();
+        let mut progress = Progress {
+            started: t0,
+            phase: "first-tick",
+            ticks: 1,
+            last_tick: std::time::Duration::ZERO,
+            worst_tick: std::time::Duration::ZERO,
+            pump_total: std::time::Duration::ZERO,
+            workers_waiting_at: None,
+            first_candidate_at: None,
+        };
         orch.run_once(1_000).expect("beat 1");
+        progress.last_tick = t0.elapsed();
         assert!(
             t0.elapsed().as_millis() < 250,
             "the first tick must not wait for the STUN exchange: {:?}",
@@ -4805,8 +4837,12 @@ mod tests {
             "host candidates are immediate; only the srflx exchange is in flight"
         );
         let mux = orch.ice_mux().expect("the shared mux");
-        assert_eq!(mux.stats().xor_misses, 1, "ONE STUN round for both peers' agents");
+        let server = ([127, 0, 0, 1], port);
+        progress.phase = "worker-barrier-and-300ms-pump";
 
+        // Handle creation only proves spawn. Observe the sent request AND both
+        // waiters within the existing 300ms window, while continuing to pump.
+        // A send failure or an unscheduled worker fails this bounded barrier.
         // 收集被黑洞卡住的期间猛推 pump：每一拍都必须立刻返回。
         let mut worst_tick = std::time::Duration::ZERO;
         let mut pump_total = std::time::Duration::ZERO;
@@ -4818,8 +4854,26 @@ mod tests {
             let dt = tick.elapsed();
             worst_tick = worst_tick.max(dt);
             pump_total += dt;
+            progress.ticks += 1;
+            progress.last_tick = dt;
+            progress.worst_tick = worst_tick;
+            progress.pump_total = pump_total;
+            if progress.workers_waiting_at.is_none()
+                && mux.stats().xor_misses == 1
+                && mux.pending_waiters(server) == 2
+            {
+                progress.workers_waiting_at = Some(t0.elapsed());
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        eprintln!(
+            "black_holed_stun barrier elapsed={:?} misses={} waiters={}",
+            t0.elapsed(), mux.stats().xor_misses, mux.pending_waiters(server),
+        );
+        assert!(progress.workers_waiting_at.is_some(), "both workers must join the sent request within the 300ms pump window");
+        assert_eq!(mux.stats().xor_misses, 1, "ONE STUN round for both peers' agents");
+        assert_eq!(mux.pending_waiters(server), 2, "both workers are waiting on that round");
+        progress.phase = "300ms-nonblocking-and-still-gathering";
         assert!(
             worst_tick.as_millis() < 50,
             "a tick blocked on STUN would cost the STUN timeout; worst tick = {worst_tick:?}"
@@ -4831,6 +4885,7 @@ mod tests {
 
         // 超时到点：两个 peer 的 srflx 交换各自以 timeout 收尾（host 候选早已
         // 就位、早已 advertise），pump 花的墙钟总量仍然远小于它。
+        progress.phase = "timeout-recovery";
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut first_candidate_at = None;
         while orch.peers.iter().any(|p| p.gather.is_some()) && std::time::Instant::now() < deadline {
@@ -4841,10 +4896,16 @@ mod tests {
             let dt = tick.elapsed();
             worst_tick = worst_tick.max(dt);
             pump_total += dt;
+            progress.ticks += 1;
+            progress.last_tick = dt;
+            progress.worst_tick = worst_tick;
+            progress.pump_total = pump_total;
             if first_candidate_at.is_none() && orch.peers[0].gather.is_none() {
                 first_candidate_at = Some(t0.elapsed());
+                progress.first_candidate_at = first_candidate_at;
             }
         }
+        progress.phase = "recovery-assertions";
         let first_candidate_at = first_candidate_at.expect("the blocked exchange must still finish");
         assert!(
             first_candidate_at.as_millis() as u64 >= DEFAULT_STUN_TIMEOUT_MS - 700,

@@ -315,7 +315,10 @@ check('0.0.33: the page\'s tray routing has NO quit arm — the system row is th
   QUIT_TEXT.indexOf('QUIT_REASON_TRAY') < 0 &&
   PAGE.indexOf('QUIT_REASON_TRAY') < 0);
 check('the Settings entry runs the SAME flow (设置 → 应用 → 退出应用)',
-  PAGE.indexOf("Text('退出应用（断开 VPN）')") >= 0 &&
+  // 0.0.52: the row is a SettingsRow in the 应用 group (its label is a property, so
+  // the row is pinned by label + the group title, not by a Text(...) literal).
+  PAGE.indexOf("label: '退出应用（断开 VPN）'") >= 0 &&
+  PAGE.indexOf("this.sectionTitle('应用')") >= 0 &&
   PAGE.indexOf('this.beginExplicitQuit(QUIT_REASON_SETTINGS);') >= 0);
 check('one quit at a time: the page latches it before doing anything',
   PAGE.indexOf('private quitInFlight: boolean = false;') >= 0 &&
@@ -380,9 +383,9 @@ check('0.0.32: a refused showAbility on the reopen path is contained, never thro
     return open.indexOf('try {') >= 0 && open.indexOf('catch (error)') >= 0 &&
       (open.match(/\.catch\(\(error: Error\)/g) ?? []).length === 2;
   })());
-check('the version is 48 / 0.0.48 in both profiles',
-  /versionCode: 48/.test(BUILD_PROFILE) && /versionName: '0\.0\.48'/.test(BUILD_PROFILE) &&
-  /versionCode: 48/.test(APP_JSON5) && /versionName: '0\.0\.48'/.test(APP_JSON5));
+check('the version is 54 / 0.0.54 in both profiles',
+  /versionCode: 54/.test(BUILD_PROFILE) && /versionName: '0\.0\.54'/.test(BUILD_PROFILE) &&
+  /versionCode: 54/.test(APP_JSON5) && /versionName: '0\.0\.54'/.test(APP_JSON5));
 check('0.0.31: the system tray 退出 takes the SAME full-quit path (veto once, then quit)',
   ABILITY.indexOf('private closeToBackgroundRegistered: boolean = false;') >= 0 &&
   ABILITY.indexOf('this.closeToBackgroundRegistered = true;') >= 0 &&

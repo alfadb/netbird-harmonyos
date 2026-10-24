@@ -1436,6 +1436,11 @@ mod tests {
     #[test]
     fn configure_validates_and_appends_durable_records() {
         let _guard = test_guard();
+        // The ring is process-global and `hilog::emit` tees into whatever ring is
+        // configured: hold the re-entrant tee lock for the whole body so no
+        // OTHER test thread can append a record between this test's appends and
+        // its seq assertions (the same discipline as the torn-tail test).
+        let _tee = crate::hilog::tee_lock::lock();
         disable();
         let dir = TempDir::new("append");
         assert_eq!(configure("", DEFAULT_MAX_BYTES, DEFAULT_SEGMENTS), Err("invalid-path"));
@@ -1471,6 +1476,10 @@ mod tests {
     #[test]
     fn ack_gated_rotation_never_deletes_an_unacknowledged_segment() {
         let _guard = test_guard();
+        // Same discipline as the torn-tail test: the rotations, segment contents
+        // and watermark asserted below must only reflect THIS test's appends, so
+        // exclude concurrent emitters from the whole configured window.
+        let _tee = crate::hilog::tee_lock::lock();
         disable();
         let dir = TempDir::new("rotate");
         assert_eq!(configure(&ring_path(&dir), MIN_MAX_BYTES, 2), Ok(()));

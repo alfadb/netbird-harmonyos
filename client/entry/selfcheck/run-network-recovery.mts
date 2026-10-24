@@ -55,6 +55,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // the REAL extension now imports by value — zero imports, no erased type
   // crossing the value import, staged byte-identically, no shim.
   'NetBirdStatusPolicy',
+  // 0.0.54 data-plane watchdog: the pure policy the REAL extension imports by
+  // value; group L drives it through the real watcher tick.
+  'NetBirdDataPlanePolicy',
   'NetBirdUiModel', 'NetBirdRecreatePolicy', 'NetBirdDiagnosticsCore',
   'NetBirdN2Stimulus', 'NetBirdN2AEvent', 'NetBirdN2Sandwich',
   'NetBirdN2ControlRequest', 'NetBirdN2CdPlan', 'NetBirdN2Ring'];
@@ -114,6 +117,34 @@ function lastLine(prefix: string): string {
 function fieldOf(line: string, key: string): string {
   const hit = line.split('|').find((f: string): boolean => f.indexOf(key + '=') === 0);
   return hit === undefined ? '' : hit.slice(key.length + 1);
+}
+// 0.0.50 C: the diagnostics writer's `event` calls (recorded by the shim below),
+// so a persistent `vpn_recovery_stage` record is assertable on the host.
+function diagEvents(): Record<string, unknown>[] {
+  return (G['__NB_DIAG_EVENTS'] as Record<string, unknown>[]) ?? [];
+}
+function resetDiagEvents(): void {
+  G['__NB_DIAG_EVENTS'] = [];
+}
+function stageRecorded(stage: string, result: string): boolean {
+  return diagEvents().some((e: Record<string, unknown>): boolean => {
+    const fields: Record<string, string> = (e['fields'] as Record<string, string>) ?? {};
+    return e['name'] === 'vpn_recovery_stage' && fields['stage'] === stage &&
+      fields['result'] === result;
+  });
+}
+// 0.0.54 data-plane watchdog: the persistent `vpn_dataplane_stale` record —
+// the reason token and how many SECONDS the stale run had lasted.
+function dataPlaneStaleRecorded(reason: string, minAgeSeconds: number): boolean {
+  return diagEvents().some((e: Record<string, unknown>): boolean => {
+    const fields: Record<string, string> = (e['fields'] as Record<string, string>) ?? {};
+    return e['name'] === 'vpn_dataplane_stale' && fields['reason'] === reason &&
+      Number(fields['age']) >= minAgeSeconds;
+  });
+}
+function dataPlaneStaleEvents(): number {
+  return diagEvents().filter((e: Record<string, unknown>): boolean =>
+    e['name'] === 'vpn_dataplane_stale').length;
 }
 // The level the recording hilog stub prefixes each line with ('[W] ' etc.).
 function levelLoggedWarn(prefix: string): boolean {
@@ -254,10 +285,19 @@ try {
         .join('\n') + '\n');
   }
   // The two platform-IO siblings the REAL extension imports by value are bridged
-  // with no-op modules (host-checked by their own suites, never here).
+  // with no-op modules (host-checked by their own suites, never here). The
+  // diagnostics `event` is NOT dropped: 0.0.50 C's persistent last-known-good
+  // evidence is a `vpn_recovery_stage` event, so every call is recorded in
+  // globalThis.__NB_DIAG_EVENTS for the assertions below (production code and
+  // its real writer are untouched).
   writeFileSync(join(dir, 'NetBirdDiagnostics.shim.ts'),
     'export const start = () => undefined;\n' +
-    'export const event = () => false;\n' +
+    'export const event = (name, fields) => {\n' +
+    '  const g = globalThis;\n' +
+    '  g.__NB_DIAG_EVENTS = g.__NB_DIAG_EVENTS || [];\n' +
+    '  g.__NB_DIAG_EVENTS.push({ name: name, fields: fields });\n' +
+    '  return false;\n' +
+    '};\n' +
     'export const appendSystemEvent = () => false;\n' +
     'export const stop = () => undefined;\n');
   writeFileSync(join(dir, 'NetBirdSystemEvents.shim.ts'),
@@ -275,6 +315,10 @@ try {
 
   const extText = readFileSync(join(REAL_DIR, 'NetBirdVpnExtensionAbility.ets'), 'utf8');
   const policyText = readFileSync(join(REAL_DIR, 'NetBirdPhysicalNetworkPolicy.ets'), 'utf8');
+  // 0.0.54 data-plane watchdog: the pure policy module the extension imports
+  // by value (group L drives it through the real watcher tick).
+  const dataPlanePolicyText = readFileSync(
+    join(REAL_DIR, 'NetBirdDataPlanePolicy.ets'), 'utf8');
   const coreText = readFileSync(join(HERE, '..', '..', 'core', 'src', 'connector.rs'), 'utf8');
   const uiText = readFileSync(join(ETS, 'pages', 'Index.ets'), 'utf8');
 
@@ -313,7 +357,9 @@ try {
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
   resetSupply();
   resetLog();
-  const live = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good address for this group — it measures the
+  // protected-DNS abort path itself (the fallback is group K's subject).
+  const live = recoveryAbility(mod, 101, FakeConnection, '');
   (live['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 314, 314);
   await sleepMs(300);
@@ -390,7 +436,9 @@ try {
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
   resetSupply();
   resetLog();
-  const stuck = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good — the recovery must keep failing so the
+  // retry window stays measurable.
+  const stuck = recoveryAbility(mod, 101, FakeConnection, '');
   stuck['lanRoamArmed'] = false;
   (stuck['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 314, 314);
@@ -582,7 +630,9 @@ try {
   await sleepMs(300);
   resetLog();
   G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
-  const n1 = recoveryAbility(mod, 101, FakeConnection);
+  // 0.0.50 C: NO last-known-good — this group measures the empty-resolution
+  // abort and the retry that follows it.
+  const n1 = recoveryAbility(mod, 101, FakeConnection, '');
   n1['lanRoamArmed'] = false;
   (n1['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
     'netAvailable', 514, 514);
@@ -711,6 +761,252 @@ try {
     pdnsText.includes('dns:{call}-failed errno={errno} ({error})'));
   check('J3 the OS resolver is no longer a hard OHOS error (N2b)',
     !iceText.includes('return Err(fail("stun:protected-dns-required".into()));'));
+
+  // -------------------------------------------------------------------------
+  // K. 0.0.50 C (10-19 02:52–03:13): the protected resolver can fail for a
+  // whole window while this process already owns a dial address. A recovery
+  // round must use that last-known-good address instead of aborting until the
+  // system resolver returns.
+  // -------------------------------------------------------------------------
+  seedCellular(614, '10.41.63.59');
+  await sleepMs(300); // let any earlier group's resolver await land
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const lkg = recoveryAbility(mod, 101, FakeConnection); // 203.0.113.9:33073
+  lkg['lanRoamArmed'] = false;
+  (lkg['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 614, 614);
+  await sleepMs(400);
+  const k1Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '614');
+  const k1Recovered = lastLine('VPN_NETWORK_RECOVERED|');
+  check('K1 an empty resolution falls back to the last-known-good address: NO protected-dns ' +
+    'abort, the recovery COMPLETES',
+    k1Aborts.length === 0 && k1Recovered.indexOf('netId=614') > 0 &&
+    supplyOf('WG_FEED') === 1 && supplyOf('MGMT_ADDR') === 1,
+    JSON.stringify({ aborts: k1Aborts, recovered: k1Recovered }));
+  check('K2 the fallback is a PERSISTENT vpn_recovery_stage record ' +
+    '(stage=mgmt-dns result=last-known-good)',
+    stageRecorded('mgmt-dns', 'last-known-good') && !stageRecorded('mgmt-dns', 'ok'),
+    JSON.stringify(diagEvents().filter((e: Record<string, unknown>): boolean =>
+      e['name'] === 'vpn_recovery_stage')));
+
+  // A mismatched port is NOT the frozen management endpoint: still fail closed.
+  seedCellular(714, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const badPort = recoveryAbility(mod, 101, FakeConnection, '203.0.113.9:33074');
+  badPort['lanRoamArmed'] = false;
+  (badPort['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 714, 714);
+  await sleepMs(300);
+  const k3Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '714');
+  check('K3 a last-known-good address on ANOTHER port is refused: protected-dns still aborts',
+    k3Aborts.length === 1 && k3Aborts[0].indexOf('|stage=protected-dns|') > 0 &&
+    !stageRecorded('mgmt-dns', 'last-known-good'),
+    JSON.stringify({ aborts: k3Aborts }));
+
+  // No address at all (the very first session before any resolution) is the
+  // same fail-closed path.
+  seedCellular(814, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '' };
+  const noAddr = recoveryAbility(mod, 101, FakeConnection, '');
+  noAddr['lanRoamArmed'] = false;
+  (noAddr['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 814, 814);
+  await sleepMs(300);
+  const k4Aborts = linesWith('VPN_NETWORK_RECOVERY_ABORT|')
+    .filter((l: string): boolean => fieldOf(l, 'netId') === '814');
+  check('K4 no last-known-good address at all still aborts protected-dns',
+    k4Aborts.length === 1 && k4Aborts[0].indexOf('|stage=protected-dns|') > 0 &&
+    !stageRecorded('mgmt-dns', 'last-known-good'),
+    JSON.stringify({ aborts: k4Aborts }));
+
+  check('K5 the chase falls back only via managementLastKnownIp (IPv4 literal + same port) and ' +
+    'records it once',
+    extText.includes('let managementIp: string = await this.recoveryAwait(') &&
+    recoveryBody.includes('managementIp = this.managementLastKnownIp();') &&
+    recoveryBody.includes("this.recoveryStageRecord('mgmt-dns', 'last-known-good');") &&
+    extText.includes('private managementLastKnownIp(): string {') &&
+    extText.includes("if (addr.slice(colon + 1) !== String(this.managementEndpoint.port)) " +
+      "{ return ''; }") &&
+    extText.includes("return isIPv4Literal(ip) ? ip : '';") &&
+    extText.includes('function isIPv4Literal(host: string): boolean {'));
+
+  // -------------------------------------------------------------------------
+  // L. 0.0.54 data-plane watchdog (PC 2026-10-21 capture, peers 0 after a
+  // lid-close wake). `connector: state -> connected` is only the management
+  // Sync stream; W2/W4 kept 已连接 with signal unregistered / ICE not rebuilt,
+  // W3 woke with NO network callback at all. The REAL watcher tick must keep
+  // the clocks, restart them on a suspend/wake wall-clock gap, and start the
+  // EXISTING recoverPhysicalNetwork once the stale run is 30 s old.
+  // -------------------------------------------------------------------------
+  seedCellular(914, '10.41.63.59');
+  await sleepMs(300); // let any earlier group's recovery land
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  // The W4 status document: connected, 13 peers configured, signal NOT
+  // registered, no peer has a WG session, device_up is true (which is exactly
+  // why the old "already-flowing" shortcut could swallow a recovery call).
+  const staleStatus: Record<string, unknown> = {
+    running: true, state: 'connected', peer_count: 13, route_count: 2,
+    reconnects: 0, terminal: false,
+    signal: { registered: false, reconnects: 0, last_error: null },
+    wg: { device_up: true, ready: true, peers_with_session: 0 }
+  };
+  G['__NB_STATUS'] = staleStatus;
+  const l4 = recoveryAbility(mod, 914, FakeConnection);
+  l4['lanRoamArmed'] = false;
+  const l4Tick = watcherTick(l4);
+
+  // L1 — the WAKE edge. A box suspend starves the 5 s interval and W3's wake
+  // delivered no network callback at all. The tick must RESTART the stale clock
+  // (a >15 s wall-clock gap) and must NOT recover from that alone; this tick's
+  // status read is unreachable, so only the clock can have moved.
+  G['__NB_STATUS'] = 'not-a-status-document'; // pollStatusOrNull -> null
+  l4['lastWatcherTickMs'] = Date.now() - 16000;
+  l4['dataPlaneStaleSinceMs'] = 0;
+  l4['lastDataPlaneRecoveryMs'] = 0;
+  l4Tick();
+  await sleepMs(50);
+  const wokeSince = Number(l4['dataPlaneStaleSinceMs']);
+  check('L1 a >15 s watcher gap (suspend/wake) restarts the stale clock, without recovering',
+    wokeSince > 0 && wokeSince <= Date.now() && dataPlaneStaleEvents() === 0 &&
+    l4['networkRecoveryActive'] !== true,
+    JSON.stringify({ since: wokeSince, events: dataPlaneStaleEvents() }));
+
+  // L2 — the stale run reaches 30 s: persistent evidence + the EXISTING
+  // recoverPhysicalNetwork, with both watchdog clocks reset.
+  G['__NB_STATUS'] = staleStatus;
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  l4['dataPlaneStaleSinceMs'] = Date.now() - 31000;
+  l4['lastDataPlaneRecoveryMs'] = 0;
+  l4['lastWatcherTickMs'] = Date.now(); // no new wake edge: the run AGE is the trigger
+  l4Tick();
+  await sleepMs(600);
+  const l2Recovered = lastLine('VPN_NETWORK_RECOVERED|');
+  check('L2 a 30 s stale data plane records vpn_dataplane_stale (reason=no-signal) and ' +
+    'runs the existing recovery',
+    dataPlaneStaleRecorded('no-signal', 30) && l2Recovered.indexOf('netId=914') > 0 &&
+    l4['lastRecoveryOutcome'] === 'recovered' && l4['networkDirty'] === false &&
+    supplyOf('WG_FEED') === 1,
+    JSON.stringify({ events: diagEvents(), recovered: l2Recovered,
+      dirty: l4['networkDirty'], wg: supplyOf('WG_FEED') }));
+  check('L3 the watchdog clocks are reset after the attempt (60 s gap / fresh 30 s window)',
+    Number(l4['lastDataPlaneRecoveryMs']) > 0 &&
+    Number(l4['dataPlaneStaleSinceMs']) === Number(l4['lastDataPlaneRecoveryMs']));
+
+  // L4 — the second stale shape: signal IS registered, 13 peers configured and
+  // NO WG session. The reason token must be no-session, not no-signal.
+  seedCellular(1014, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  const noSessionStatus: Record<string, unknown> = {
+    ...staleStatus, signal: { registered: true, reconnects: 0, last_error: null }
+  };
+  G['__NB_STATUS'] = noSessionStatus;
+  const l5 = recoveryAbility(mod, 1014, FakeConnection);
+  l5['lanRoamArmed'] = false;
+  const l5Tick = watcherTick(l5);
+  l5['dataPlaneStaleSinceMs'] = Date.now() - 31000;
+  l5['lastWatcherTickMs'] = Date.now();
+  l5Tick();
+  await sleepMs(600);
+  check('L4 registered signal + peers>0 + zero WG sessions records reason=no-session',
+    dataPlaneStaleRecorded('no-session', 30) &&
+    lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=1014') > 0 &&
+    l5['networkDirty'] === false,
+    JSON.stringify({ events: diagEvents(), recovered: lastLine('VPN_NETWORK_RECOVERED|') }));
+
+  // L5 — the 60 s floor: a stale run that just triggered must not trigger again
+  // on the next tick (the extension's own 15 s recovery retry owns retries).
+  seedCellular(1114, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_STATUS'] = staleStatus;
+  const l6 = recoveryAbility(mod, 1114, FakeConnection);
+  l6['lanRoamArmed'] = false;
+  const l6Tick = watcherTick(l6);
+  l6['dataPlaneStaleSinceMs'] = Date.now() - 31000;
+  l6['lastDataPlaneRecoveryMs'] = Date.now() - 30000; // inside the 60 s gap
+  l6['lastWatcherTickMs'] = Date.now();
+  l6Tick();
+  await sleepMs(300);
+  const cooldownAttempts = Number(l6['recoveryAttemptCount']);
+  check('L5 inside the 60 s gap no second watchdog recovery is started',
+    dataPlaneStaleEvents() === 0 && cooldownAttempts === 0 && l6['networkDirty'] === false,
+    JSON.stringify({ events: dataPlaneStaleEvents(), attempts: cooldownAttempts }));
+
+  // L6 — an in-flight recovery owns the next attempt: a second one must not
+  // start (the pending mechanism inside recoverPhysicalNetwork handles races).
+  l6['networkRecoveryActive'] = true;
+  l6['lastDataPlaneRecoveryMs'] = 0;
+  l6['dataPlaneStaleSinceMs'] = Date.now() - 31000;
+  l6Tick();
+  await sleepMs(200);
+  check('L6 a recovery already in flight is never doubled by the watchdog',
+    dataPlaneStaleEvents() === 0 && Number(l6['recoveryAttemptCount']) === 0,
+    JSON.stringify({ events: dataPlaneStaleEvents(),
+      attempts: l6['recoveryAttemptCount'] }));
+  l6['networkRecoveryActive'] = false;
+
+  // L7 — a healthy data plane (signal registered, peers with sessions) never
+  // triggers and never even starts a stale run.
+  seedCellular(1214, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_STATUS'] = {
+    running: true, state: 'connected', peer_count: 13, route_count: 2,
+    reconnects: 0, terminal: false,
+    signal: { registered: true, reconnects: 0, last_error: null },
+    wg: { device_up: true, ready: true, peers_with_session: 13 }
+  };
+  const l7 = recoveryAbility(mod, 1214, FakeConnection);
+  l7['lanRoamArmed'] = false;
+  const l7Tick = watcherTick(l7);
+  l7['dataPlaneStaleSinceMs'] = 0;
+  l7['lastWatcherTickMs'] = Date.now();
+  l7Tick();
+  await sleepMs(200);
+  check('L7 a healthy data plane keeps the stale clock at 0 and recovers nothing',
+    Number(l7['dataPlaneStaleSinceMs']) === 0 && dataPlaneStaleEvents() === 0 &&
+    Number(l7['recoveryAttemptCount']) === 0);
+
+  // L8 — the wiring the behaviour above depends on is the SHIPPED one: the real
+  // extension imports and calls the policy, and the evidence name is the one the
+  // reviewed milestone surface pins.
+  check('L8 the extension imports and calls the pure policy on its existing watcher tick',
+    extText.includes('from \'./NetBirdDataPlanePolicy\'') &&
+    extText.includes('this.noteWatcherTick();') &&
+    extText.includes('this.noteDataPlaneWatchdog(status);') &&
+    extText.indexOf('this.noteWatcherTick();') <
+      extText.indexOf('const status: ConnectorStatusResult | null = pollStatusOrNull();') &&
+    extText.indexOf('this.noteConnectorHealth(status);') <
+      extText.indexOf('this.noteDataPlaneWatchdog(status);'));
+  check('L9 the stale evidence and the recovery call are the shipped ones',
+    extText.includes("this.diagMilestone('vpn_dataplane_stale', milestoneFields);") &&
+    extText.includes("const milestoneFields: DiagFields = { 'reason': reason, 'age': ageSeconds };") &&
+    extText.includes('private noteDataPlaneWatchdog(status: ConnectorStatusResult): void {') &&
+    extText.includes('private noteWatcherTick(): void {') &&
+    dataPlanePolicyText.includes('export const DATA_PLANE_STALE_AFTER_MS: number = 30000;') &&
+    dataPlanePolicyText.includes('export const DATA_PLANE_RECOVER_MIN_GAP_MS: number = 60000;') &&
+    dataPlanePolicyText.includes('export const DATA_PLANE_RESUME_GAP_MS: number = 15000;'),
+    JSON.stringify({ milestone: extText.indexOf('vpn_dataplane_stale') }));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

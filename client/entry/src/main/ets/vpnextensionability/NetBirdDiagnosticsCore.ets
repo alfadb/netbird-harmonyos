@@ -483,7 +483,12 @@ export const PUBLIC_FIELD_KEYS: string[] = [
   // epoch-ms stamp, a small counter, a millisecond age and a boolean — and the
   // set stays closed.
   'updated_at_ms', 'status_revision', 'peers_online', 'peers_relay',
-  'age_ms', 'derived'
+  'age_ms', 'derived',
+  // 0.0.54 data-plane watchdog: `vpn_dataplane_stale` records how many SECONDS
+  // the "connected but no data plane" run had lasted when the recovery was
+  // started (a bounded small integer computed from the watcher's own clocks).
+  // A bounded scalar, so the public key set stays closed.
+  'age'
 ];
 
 // Public keys plus the runtime's own keys (memory readings, the every-10th

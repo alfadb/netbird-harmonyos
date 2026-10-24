@@ -29,6 +29,7 @@
 // Exit 0 = all assertions pass.
 
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -195,23 +196,31 @@ try {
   const noKill = decided(fresh(), { killedVpnPid: null });
   check('marker open + no fresh document + NO kill event never reconnects',
     noKill.action === policy.RECONNECT_ACTION_SKIPPED &&
-    noKill.reason === policy.RECONNECT_REASON_VPN_NOT_DEAD);
+    noKill.reason === policy.RECONNECT_REASON_KILL_RECORD_ABSENT);
   check('and it does not count or arm an attempt',
     noKill.attempt === 0 && noKill.state.attempts === 0 && noKill.state.verifyingSinceMs === 0);
   const otherKill = decided(fresh(), { killedVpnPid: MARKER_PID + 7 });
   check('a kill of a DIFFERENT pid (the marker writer may still be alive) never reconnects',
     otherKill.action === policy.RECONNECT_ACTION_SKIPPED &&
-    otherKill.reason === policy.RECONNECT_REASON_VPN_NOT_DEAD);
+    otherKill.reason === policy.RECONNECT_REASON_VPN_PID_MISMATCH);
   check('the marker pid itself in the kill record reconnects',
     decided(fresh(), { killedVpnPid: MARKER_PID }).action === policy.RECONNECT_ACTION_RECONNECT);
+  const invalidMarker = decided(fresh(), { markerPid: 0 });
   check('an unreadable marker pid + a kill record is refused (conservative)',
-    decided(fresh(), { markerPid: 0 }).reason === policy.RECONNECT_REASON_VPN_NOT_DEAD);
+    invalidMarker.reason === policy.RECONNECT_REASON_MARKER_PID_INVALID &&
+    invalidMarker.action === policy.RECONNECT_ACTION_SKIPPED);
   check('a negative/unusable marker pid is refused too (conservative)',
     decided(fresh(), { markerPid: -1, killedVpnPid: -1 }).reason ===
-      policy.RECONNECT_REASON_VPN_NOT_DEAD);
+      policy.RECONNECT_REASON_MARKER_PID_INVALID);
   check('a kill of the UI process itself (same shape, another pid) is not enough',
     decided(fresh(), { killedVpnPid: MARKER_PID + 1 }).reason ===
-      policy.RECONNECT_REASON_VPN_NOT_DEAD);
+      policy.RECONNECT_REASON_VPN_PID_MISMATCH);
+  check('death reasons form an ordered closed set: absent before invalid before mismatch',
+    decided(fresh(), { killedVpnPid: null, markerPid: 0 }).reason ===
+      policy.RECONNECT_REASON_KILL_RECORD_ABSENT &&
+    policy.RECONNECT_REASON_KILL_RECORD_ABSENT === 'kill-record-absent' &&
+    policy.RECONNECT_REASON_MARKER_PID_INVALID === 'marker-pid-invalid' &&
+    policy.RECONNECT_REASON_VPN_PID_MISMATCH === 'vpn-pid-mismatch');
   const armed2 = decided(fresh(), { killedVpnPid: MARKER_PID });
   const failed2 = decided(armed2.state, { nowMs: T0 + 30000, killedVpnPid: null });
   check('the anti-loop still runs AHEAD of criterion (7): cooldown, then the failure',
@@ -220,7 +229,7 @@ try {
       policy.RECONNECT_REASON_COOLDOWN);
   check('and at the end of the cool-down an unconfirmed death is the one thing left',
     decided(failed2.state, { nowMs: T0 + 60000, killedVpnPid: null }).reason ===
-      policy.RECONNECT_REASON_VPN_NOT_DEAD &&
+      policy.RECONNECT_REASON_KILL_RECORD_ABSENT &&
     decided(failed2.state, { nowMs: T0 + 60000 }).action === policy.RECONNECT_ACTION_RECONNECT);
 
   // -- foreground only -------------------------------------------------------
@@ -252,7 +261,7 @@ try {
       policy.RECONNECT_REASON_MARKER_STOPPING);
   check('... nor criterion (7): a held task is not proof that the extension is dead',
     decided(fresh(), { foreground: false, keepAliveActive: true, killedVpnPid: null }).reason ===
-      policy.RECONNECT_REASON_VPN_NOT_DEAD);
+      policy.RECONNECT_REASON_KILL_RECORD_ABSENT);
   check('... nor the user\u2019s own guards',
     decided(fresh(), { foreground: false, keepAliveActive: true, lastUserStopAtMs: T0 - 1000 })
       .reason === policy.RECONNECT_REASON_RECENT_STOP &&
@@ -358,6 +367,211 @@ try {
     sustained5.lastAttemptAtMs === T0 + 60000);
   check('after the reset a new reclaim starts again from attempt 1',
     decided(sustained5, { nowMs: T0 + 70000 + 300000 + 60000 }).attempt === 1);
+  // ---- attempt identity and real page methods (no rewritten method bodies) ---
+  const NEW_PID = MARKER_PID + 100;
+  const latched = policy.reconnectWithAttemptMarker(first.state, T0 + 1, NEW_PID);
+  check('dispatch records its own attempt timestamp and starts without a marker pid',
+    first.state.attemptDispatchedAtMs === T0 && first.state.attemptMarkerPid === 0);
+  check('old and same-time markers cannot identify the dispatched attempt',
+    policy.reconnectWithAttemptMarker(first.state, T0 - 1, MARKER_PID) === first.state &&
+    policy.reconnectWithAttemptMarker(first.state, T0, MARKER_PID) === first.state);
+  check('the first post-dispatch marker pid is latched once',
+    latched.attemptMarkerPid === NEW_PID &&
+    policy.reconnectWithAttemptMarker(latched, T0 + 2, NEW_PID + 1) === latched);
+  check('unreadable marker time or invalid pid does not latch',
+    policy.reconnectWithAttemptMarker(first.state, NaN, NEW_PID) === first.state &&
+    policy.reconnectWithAttemptMarker(first.state, T0 + 1, 0) === first.state);
+  check('an old process pid cannot verify even with a new timestamp',
+    !policy.reconnectStatusMatchesAttempt(latched, MARKER_PID, T0 + 2000));
+  check('a pid-bearing report waits for the new marker, never falls back to time',
+    !policy.reconnectStatusMatchesAttempt(first.state, NEW_PID, T0 + 2000));
+  check('a matching new pid verifies the attempt',
+    policy.reconnectStatusMatchesAttempt(latched, NEW_PID, T0 + 2000));
+  check('a fresh old legacy report cannot verify the attempt',
+    !policy.reconnectStatusMatchesAttempt(latched, undefined, T0 - 4747));
+  check('legacy pid-absent documents use the inclusive 1s time tolerance',
+    policy.reconnectStatusMatchesAttempt(latched, undefined, T0 - 1000) &&
+    !policy.reconnectStatusMatchesAttempt(latched, undefined, T0 - 1001));
+  for (const [label, settled] of [
+    ['success', policy.reconnectOnActive(latched, T0 + 2000)],
+    ['timeout', decided(latched, { nowMs: T0 + 30000 }).state],
+    ['platform rejection', policy.reconnectOnStartRejected(latched)]
+  ]) {
+    check(`${label} clears attempt identity and removes the gate from later ticks`,
+      settled.verifyingSinceMs === 0 && settled.attemptDispatchedAtMs === 0 &&
+      settled.attemptMarkerPid === 0 &&
+      policy.reconnectStatusMatchesAttempt(settled, MARKER_PID, T0 - 99999) &&
+      policy.reconnectWithAttemptMarker(settled, T0 + 40000, NEW_PID) === settled);
+  }
+  check('requested and reconnected have separate closed result tokens',
+    policy.RECONNECT_RESULT_REQUESTED === 'requested' &&
+    policy.RECONNECT_RESULT_RECONNECTED === 'reconnected');
+
+  const loadPure = async (name: string): Promise<any> => {
+    const path = join(dir, name + '.ts');
+    writeFileSync(path, readFileSync(join(ets, 'vpnextensionability', name + '.ets')));
+    return import(pathToFileURL(path).href);
+  };
+  const model = await loadPure('NetBirdUiModel');
+  const statusPolicy = await loadPure('NetBirdStatusPolicy');
+  const core = await loadPure('NetBirdDiagnosticsCore');
+  function method(source: string, name: string): string {
+    const hit = new RegExp('^  private (?:async )?' + name + '\\(', 'm').exec(source);
+    if (hit === null) { throw new Error('missing method: ' + name); }
+    const end = source.indexOf('\n  }', hit.index);
+    if (end < 0) { throw new Error('missing method end: ' + name); }
+    return source.slice(hit.index, end + 4);
+  }
+  const names = ['runAutoReconnect', 'requestStart', 'startVpnExtension',
+    'refreshReconnectAttemptMarker', 'extensionConfirmedDead', 'pollConnectorStatusPass',
+    'diagAutoReconnect', 'diagAutoReconnectOnce'];
+  const adapterTs = 'class Adapter {\n' + names.map(n => method(PAGE, n)).join('\n') + '\n}';
+  writeFileSync(join(dir, 'IndexMethods.ts'), adapterTs);
+  let clock = T0;
+  let doc: any = null;
+  let markerText = '';
+  let rejectStart = false;
+  const calls: string[] = [];
+  const records: any[] = [];
+  const env = { ...policy, ...model, ...statusPolicy, ...core,
+    Date: { now: () => clock, parse: Date.parse },
+    fs: { accessSync: () => true, readTextSync: () => markerText },
+    getContext: () => ({ filesDir: '/fixture' }),
+    lastKilledVpnProcess: () => ({ pid: MARKER_PID }),
+    readPublishedStatus: () => doc,
+    keepAlivePollGapMs: () => 0, keepAliveResumedAfterGap: () => false,
+    keepAliveOnUserConnect: (s: any) => s,
+    DOMAIN: 0, TAG: 'fixture', BUNDLE_NAME: 'fixture', EXTENSION_ABILITY: 'fixture',
+    hilog: { info: () => {}, warn: () => {}, error: () => {} },
+    event: (_name: string, fields: any) => {
+      records.push(fields); calls.push('auto:' + fields.result);
+    },
+    vpnExtension: { startVpnExtensionAbility: () => {
+      calls.push('platform-start');
+      return rejectStart ? Promise.reject({ code: 16000050 }) : Promise.resolve();
+    } }
+  };
+  const Adapter = new Function('env', 'with (env) { ' + stripTypeScriptTypes(adapterTs) +
+    '; return Adapter; }')(env);
+  function page(): any {
+    clock = T0; doc = null; calls.length = 0; records.length = 0;
+    markerText = core.buildMarker(new Date(T0 - 60000).toISOString(), MARKER_PID, 'vpn', 'open');
+    const p = new Adapter();
+    Object.assign(p, { requestSent: false, stopSent: false, requestId: 'fixture',
+      configured: true, pageVisible: true, bgKeepAliveState: { taskPresent: false },
+      connectFailureClass: '', connectFailureAtMs: 0, actionError: '', disconnectNotice: '',
+      lastUserStopAtMs: 0, lastLogoutAtMs: 0, lastRestartLegAtMs: 0,
+      reconnectState: policy.reconnectInitialState(), reconnectReported: new Set(),
+      lastPollAtMs: 0, pendingResumeReason: '', routeSelectionOpen: false,
+      observedPublishedStatus: false, lastLiveState: '', published: null,
+      appliedStatusStamp: '', diagActionCount: 0,
+      diagEvent: () => calls.push('ui-connect'), extensionGone: () => true,
+      buildWant: () => ({}), clearPendingAction: () => {}, updatePendingAction: () => {},
+      syncKeepAlive: () => {}, diagStatusReadNoDocument: () => {},
+      diagStatusReadApplied: () => {}, refreshConnectFailure: () => {} });
+    return p;
+  }
+  const tick = (p: any, ms: number, status: any): void => {
+    clock = ms; doc = status; p.pollConnectorStatusPass();
+  };
+  const newMarker = (): void => {
+    markerText = core.buildMarker(new Date(T0 + 583).toISOString(), NEW_PID, 'vpn', 'open');
+  };
+  const connected = (updated: number, pid?: number): any =>
+    ({ updated_at_ms: updated, status_revision: 228, state: 'connected', pid: pid });
+  const p = page(); p.runAutoReconnect(false);
+  check('REAL dispatch logs requested before requestStart and platform start, never reconnected',
+    calls.join(',') === 'auto:requested,ui-connect,platform-start' &&
+    p.reconnectState.attemptDispatchedAtMs === T0);
+  check('REAL requestStart retains the manual 7s pending action window',
+    p.pendingActionDeadlineMs === T0 + 7000);
+  newMarker();
+  tick(p, T0 + 1001, connected(T0 - 4747));
+  check('REAL fresh legacy old report leaves the verification window armed',
+    p.reconnectState.verifyingSinceMs === T0 && p.reconnectState.attemptMarkerPid === NEW_PID &&
+    !records.some(r => r.result === 'reconnected'));
+  tick(p, T0 + 2000, connected(T0 + 2000, MARKER_PID));
+  check('REAL fresh report from old pid cannot settle the new attempt',
+    p.reconnectState.verifyingSinceMs === T0 && !records.some(r => r.result === 'reconnected'));
+  tick(p, T0 + 3000, connected(T0 + 3000, NEW_PID));
+  tick(p, T0 + 4000, doc);
+  check('REAL matching pid confirms once, in order after requested and platform start',
+    records.filter(r => r.result === 'reconnected').length === 1 &&
+    calls.indexOf('auto:reconnected') > calls.indexOf('platform-start') &&
+    p.reconnectState.verifyingSinceMs === 0 && p.reconnectState.attemptMarkerPid === 0 &&
+    p.reconnectState.attemptDispatchedAtMs === 0);
+  tick(p, T0 + 5000, connected(T0 + 5000, MARKER_PID));
+  check('REAL ticks after success no longer gate on the attempt identity',
+    p.reconnectState.activeSinceMs === T0 + 3000 &&
+    records.filter(r => r.result === 'reconnected').length === 1);
+
+  for (const pid of [undefined, MARKER_PID]) {
+    const q = page(); q.runAutoReconnect(false); newMarker();
+    const old = connected(T0 - 4747, pid);
+    tick(q, T0 + 1001, old);
+    // Supply a fresh but wrong-pid document at the deadline. Repeating the same
+    // document tests that reader dedup cannot return before verification runs.
+    const wrong = connected(T0 + 29000, MARKER_PID);
+    tick(q, T0 + 29000, wrong); tick(q, T0 + 30000, wrong);
+    check(`REAL old report (${pid === undefined ? 'legacy time' : 'pid'}) times out at 30s and clears identity`,
+      records.some(r => r.result === 'failed' && r.reason === 'no-active-in-30s') &&
+      !records.some(r => r.result === 'reconnected') && q.reconnectState.verifyingSinceMs === 0 &&
+      q.reconnectState.attemptDispatchedAtMs === 0 && q.reconnectState.attemptMarkerPid === 0);
+    tick(q, T0 + 31000, wrong);
+    check('REAL later ticks are ungated after verify-failed',
+      q.reconnectState.activeSinceMs === T0 + 31000);
+  }
+  const legacyPage = page(); legacyPage.runAutoReconnect(false); newMarker();
+  tick(legacyPage, T0 + 1000, connected(T0 - 1000));
+  check('REAL pid-absent document can verify via the time fallback',
+    legacyPage.reconnectState.verifyingSinceMs === 0 &&
+    records.filter(r => r.result === 'reconnected').length === 1);
+  const refused = page(); rejectStart = true; refused.runAutoReconnect(false);
+  await Promise.resolve(); await Promise.resolve(); rejectStart = false;
+  check('REAL platform rejection records requested then failed and clears attempt latches',
+    records.map(r => r.result).join(',') === 'requested,failed' &&
+    refused.reconnectState.attemptDispatchedAtMs === 0 &&
+    refused.reconnectState.attemptMarkerPid === 0);
+  // The real publication exit adds pid without defeating the existing debounce.
+  const vpe = readFileSync(join(ets, 'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
+  const writerTs = 'class Writer {\n' + method(vpe, 'publishStatusForUi') + '\n}';
+  let stored = ''; let writes = 0;
+  const writerEnv = { ...model, ...statusPolicy, Date: { now: () => clock },
+    process: { pid: NEW_PID }, connectorNetworkConfig: () => null, STATUS_POLL_MS: 5000,
+    DOMAIN: 0, TAG: 'fixture', safeError: () => 'fixture', hilog: env.hilog,
+    fs: { OpenMode: { READ_WRITE: 1, CREATE: 2, TRUNC: 4 },
+      openSync: () => ({ fd: 1 }), closeSync: () => {},
+      writeSync: (_fd: number, text: string) => { stored = text; writes++; } } };
+  const Writer = new Function('env', 'with (env) { ' + stripTypeScriptTypes(writerTs) +
+    '; return Writer; }')(writerEnv);
+  function writer(): any {
+    const w = new Writer();
+    Object.assign(w, { context: { filesDir: '/fixture' }, watcherTimer: 1,
+      destroyRequested: false, connectorDeathHandled: false, requestId: 'fixture',
+      lastStatusChangeKey: '', lastStatusPublishMs: 0, lastUiStatusLogAtMs: 0,
+      diagStatusPublish: () => {} });
+    return w;
+  }
+  clock = T0;
+  const status = { state: 'connected', running: true, peer_count: 0, route_count: 0,
+    reconnects: 0, status_revision: 1 };
+  const w = writer(); w.publishStatusForUi(status, 'present');
+  check('REAL publisher serializes numeric process.pid alongside the existing request_id',
+    JSON.parse(stored).pid === NEW_PID && JSON.parse(stored).request_id === 'fixture');
+  clock += 1000; w.publishStatusForUi(status, 'present');
+  check('REAL writer still deduplicates unchanged reports with pid present', writes === 1);
+  const w2 = writer(); w2.publishStatusForUi(status, 'present');
+  check('a new extension instance never deduplicates its first identity publication', writes === 2);
+  const connector = readFileSync(join(ets, 'vpnextensionability', 'NetBirdConnector.ets'), 'utf8');
+  const readerTs = sliceFrom(connector, 'export function readPublishedStatus(',
+    '\n// ---------------------------------------------------------------------------').replace('export ', '');
+  const readStatus = new Function('env', 'with (env) { ' + stripTypeScriptTypes(readerTs) +
+    '; return readPublishedStatus; }')({ Date: { now: () => clock }, STATUS_POLL_MS: 5000,
+    fs: { accessSync: () => true, readTextSync: () => stored } });
+  check('REAL UI reader accepts the new numeric pid field', readStatus('/fixture').pid === NEW_PID);
+  const legacyDoc = JSON.parse(stored); delete legacyDoc.pid; stored = JSON.stringify(legacyDoc);
+  check('REAL UI reader continues parsing a legacy document with no pid',
+    readStatus('/fixture').state === 'connected' && readStatus('/fixture').pid === undefined);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

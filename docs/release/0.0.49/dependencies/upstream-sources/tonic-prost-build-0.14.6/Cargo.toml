@@ -1,0 +1,48 @@
+[workspace]
+members = [
+  "tonic",
+  "tonic-build",
+  "tonic-health",
+  "tonic-protobuf",
+  "tonic-types",
+  "tonic-reflection",
+  "tonic-prost",
+  "tonic-prost-build",
+  "tonic-web",
+  "examples",
+  "codegen",
+  "grpc",
+  "grpc-google",
+  "grpc-protobuf",
+  "grpc-protobuf-build",
+  "xds-client",
+  "tonic-xds",
+  "interop",
+  "tests/disable_comments",
+  "tests/wellknown",
+  "tests/wellknown-compiled",
+  "tests/extern_path/uuid",
+  "tests/extern_path/my_application",
+  "tests/integration_tests",
+  "tests/compression",
+  "tests/compile",
+  "tests/web",
+  "tests/default_stubs",
+  "tests/deprecated_methods",
+]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.88"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+uninlined_format_args = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"

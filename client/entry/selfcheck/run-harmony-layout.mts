@@ -41,13 +41,19 @@
 // status — the IP moved to its own line, and I4's 离线对端 last-seen text is the
 // one field that JOINED the key). The DELIBERATE updates this file needed are
 // marked in place.
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ets = join(here, '..', 'src', 'main', 'ets');
+// 0.0.52: the local API-26 SDK's own symbol table — the SAME default the build
+// script uses (`${DEVECO_SDK_HOME:-/home/worker/harmonyos/command-line-tools/current}`),
+// so a $r('sys.symbol.*') reference can be checked against what the SDK defines.
+const SDK_HOME = process.env.DEVECO_SDK_HOME ?? '/home/worker/harmonyos/command-line-tools/current';
+const SYS_RESOURCE = join(SDK_HOME, 'sdk', 'default', 'openharmony', 'ets', 'build-tools',
+  'ets-loader', 'sysResource.js');
 const dir = mkdtempSync(join(tmpdir(), 'nb-harmony-layout-'));
 const PAGE = readFileSync(join(ets, 'pages', 'Index.ets'), 'utf8');
 let passed = 0;
@@ -214,12 +220,18 @@ try {
   // -------------------------------------------------------------------------
   // 6. the visual scale and the label/value width policy (0.0.37, I2 point 3)
   // -------------------------------------------------------------------------
-  check('type: app 22 > page 20 > section 16 > body 15 >= caption 14 (PC floor)',
-    m.TYPE_APP_TITLE_FP === 22 && m.TYPE_PAGE_TITLE_FP === 20 &&
-    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 15 && m.TYPE_CAPTION_FP === 14);
-  check('type: body is inside the 14–16 body band and the caption meets both floors',
-    m.TYPE_BODY_FP >= 14 && m.TYPE_BODY_FP <= 16 && m.TYPE_CAPTION_FP >= 14 &&
-    m.TYPE_PAGE_TITLE_FP >= 20 && m.TYPE_PAGE_TITLE_FP <= 22);
+  // 0.0.52 DELIBERATE UPDATE: the official scale the owner asked for — large page
+  // title 32, page title 20, section/row label 16, BODY 16 (was 15), caption 14.
+  check('type: large 32 > page 20 = section 16 = body 16 > caption 14 (PC floor)',
+    m.TYPE_LARGE_TITLE_FP === 32 && m.TYPE_APP_TITLE_FP === 22 &&
+    m.TYPE_PAGE_TITLE_FP === 20 &&
+    m.TYPE_SECTION_TITLE_FP === 16 && m.TYPE_BODY_FP === 16 && m.TYPE_CAPTION_FP === 14);
+  check('type: the title hierarchy is large title > page title > body >= caption, and ' +
+    'every size is on the 14 vp PC floor except the 22 fp wordmark',
+    m.TYPE_LARGE_TITLE_FP > m.TYPE_PAGE_TITLE_FP &&
+    m.TYPE_PAGE_TITLE_FP >= m.TYPE_SECTION_TITLE_FP &&
+    m.TYPE_BODY_FP >= m.TYPE_CAPTION_FP && m.TYPE_CAPTION_FP >= 14 &&
+    m.TYPE_LARGE_TITLE_FP === 32 && m.TYPE_PAGE_TITLE_FP === 20);
   check('spacing: the rail paddings are on the 8 vp grid (16 / 16)',
     m.RAIL_PAGE_PADDING_VP === 16 && m.RAIL_CARD_PADDING_VP === 16 &&
     m.RAIL_PAGE_PADDING_VP % 8 === 0 && m.RAIL_CARD_PADDING_VP % 8 === 0);
@@ -234,6 +246,121 @@ try {
   check('label/value: the value column never shrinks as the window grows',
     m.railInfoValueWidthVp(840) <= m.railInfoValueWidthVp(1024) &&
     m.railInfoValueWidthVp(1024) <= m.railInfoValueWidthVp(1440));
+
+  // -------------------------------------------------------------------------
+  // 6b. 0.0.52 — THE OFFICIAL PAGE CHROME (owner brief: 8 vp grid, standard title
+  //     hierarchy, grouped settings list, ≥ 40/48 vp hit areas, 16/24 page margin)
+  // -------------------------------------------------------------------------
+  check('chrome: the page margin is 16 vp narrow / 24 vp wide, on the SAME split ' +
+    'classifier that mounts the wide shell',
+    m.PAGE_PADDING_NARROW_VP === 16 && m.PAGE_PADDING_WIDE_VP === 24 &&
+    m.PAGE_PADDING_NARROW_VP % 8 === 0 && m.PAGE_PADDING_WIDE_VP % 8 === 0 &&
+    m.pagePaddingVp(839) === 16 && m.pagePaddingVp(840) === 24 &&
+    m.pagePaddingVp(4000) === 24 &&
+    m.splitPaneWidthVp(840) > 0 && m.paneLayoutOf(839) === m.PANE_SINGLE &&
+    m.paneLayoutOf(840) === m.PANE_SPLIT);
+  check('chrome: the 对端 / 设置 tab pages carry the ONE 32 fp Bold large title and ' +
+    'the PAGES that occupy the pane take the pagePadding() margin (16 / 24)',
+    PAGE.includes("Text('设置')\n            .fontSize(TYPE_LARGE_TITLE_FP)\n" +
+      '            .fontWeight(FontWeight.Bold)') &&
+    PAGE.includes('private pagePadding(): number {') &&
+    PAGE.includes('return pagePaddingVp(this.widthVp);') &&
+    // 0.0.52: 3 sites — the settings page, the guide pane and the overview pane. The
+    // peer LIST body keeps 16 on both branches on purpose: in the split shell it IS
+    // the 280…480 vp list column, where 24 vp per side would cut the pinned
+    // 28-character fqdn floor (203 → 187 vp). See its call site's comment.
+    (PAGE.match(/\.padding\(this\.pagePadding\(\)\)/g) ?? []).length === 3 &&
+    PAGE.includes('.padding(RAIL_PAGE_PADDING_VP)\n      .backgroundColor(' +
+      "$r('app.color.nb_page_background'))"));
+  check('chrome: the 对端 header is ONE row — large title left, count CHIP right ' +
+    '(14 fp, radius 999, 8/4 padding, info tint, one line)',
+    m.TITLE_CHIP_RADIUS_VP === 999 && m.TITLE_CHIP_PADDING_H_VP === 8 &&
+    m.TITLE_CHIP_PADDING_V_VP === 4 && m.PEER_SEARCH_HEIGHT_VP === 40 &&
+    m.PEER_SEARCH_RADIUS_VP === 20 &&
+    (() => {
+      const header = PAGE.slice(PAGE.indexOf("Text('对端')"),
+        PAGE.indexOf("Search({ value: this.peerQuery"));
+      return header.includes('TYPE_LARGE_TITLE_FP') && header.includes('已连接') &&
+        header.includes('.maxLines(1)') && header.includes('textOverflow') &&
+        header.includes('.borderRadius(TITLE_CHIP_RADIUS_VP)') &&
+        header.includes("$r('app.color.nb_status_info_background')") &&
+        header.includes('.padding({') &&
+        header.includes('TITLE_CHIP_PADDING_H_VP') &&
+        header.includes('TITLE_CHIP_PADDING_V_VP');
+    })());
+  check('chrome: the subpage title bar is ONE builder — 56 vp, 24 fp system-symbol ' +
+    'back glyph in a 40 vp target, 20 fp title, reserved action slot',
+    m.PAGE_TITLE_BAR_HEIGHT_VP === 56 && m.PAGE_BACK_GLYPH_FP === 24 &&
+    m.PAGE_BACK_TARGET_VP >= 40 && m.PAGE_TITLE_BAR_HEIGHT_VP % 8 === 0 &&
+    (PAGE.match(/this\.pageTitleBar\('/g) ?? []).length === 3 &&
+    PAGE.includes("SymbolGlyph($r('sys.symbol.chevron_left'))") &&
+    PAGE.includes("      .width(PAGE_BACK_TARGET_VP)\n      .height(PAGE_BACK_TARGET_VP)") &&
+    PAGE.includes('.height(PAGE_TITLE_BAR_HEIGHT_VP)') &&
+    PAGE.includes('// THE ACTION SLOT'));
+  // The symbol itself has to EXIST in this SDK's sysResource table — the page cannot
+  // reference a resource that the platform does not define.
+  check('chrome: the back glyph is a resource this SDK really defines ' +
+    '(sysResource.symbol.chevron_left)',
+    existsSync(SYS_RESOURCE) &&
+    /symbol:\s*\{[\s\S]*?chevron_left:/.test(readFileSync(SYS_RESOURCE, 'utf8')));
+  check('settings: ONE group container per group (16 vp radius, card fill, 1 vp ' +
+    'stroke), a 14 fp muted group title OUTSIDE it, and inset 1 vp row dividers',
+    m.SETTINGS_GROUP_RADIUS_VP === 16 && m.SETTINGS_GROUP_TITLE_FP === 14 &&
+    m.SETTINGS_GROUP_TITLE_TOP_VP % 8 === 0 &&
+    m.SETTINGS_GROUP_TITLE_BOTTOM_VP % 8 === 0 &&
+    m.SETTINGS_DIVIDER_INSET_VP === m.SETTINGS_ROW_PADDING_VP &&
+    PAGE.includes("sectionTitle(title: string) {") &&
+    PAGE.includes('.fontSize(SETTINGS_GROUP_TITLE_FP)') &&
+    PAGE.includes("$r('app.color.nb_text_muted')") &&
+    PAGE.includes('settingsDivider() {') &&
+    (PAGE.match(/this\.settingsDivider\(\)/g) ?? []).length >= 4 &&
+    (PAGE.match(/\.borderRadius\(SETTINGS_GROUP_RADIUS_VP\)/g) ?? []).length >= 4);
+  check('settings: a row is a 48 vp minimum band with 16 vp side padding, a 16 fp ' +
+    'label, a 14 fp value in the secondary ink and a 14 fp \'›\'',
+    m.SETTINGS_ROW_MIN_HEIGHT_VP >= 48 && m.SETTINGS_ROW_PADDING_VP === 16 &&
+    PAGE.includes('struct SettingsRow {') &&
+    PAGE.includes('.constraintSize({ minHeight: SETTINGS_ROW_MIN_HEIGHT_VP })') &&
+    PAGE.includes('left: SETTINGS_ROW_PADDING_VP, right: SETTINGS_ROW_PADDING_VP') &&
+    (() => {
+      const row = PAGE.slice(PAGE.indexOf('struct SettingsRow {'),
+        PAGE.indexOf('struct PaneEmptyState {'));
+      return row.includes('.fontSize(TYPE_SECTION_TITLE_FP)') &&
+        row.includes('.fontSize(TYPE_CAPTION_FP)') &&
+        row.includes("$r('app.color.nb_text_muted')") &&
+        row.includes("Text('›')");
+    })());
+  check('settings: every preserved function still has its row in the grouped list',
+    (() => {
+      const tab = PAGE.slice(PAGE.indexOf('settingsTab() {'),
+        PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
+      return tab.includes("this.sectionTitle('服务器配置')") &&
+        tab.includes('this.serverConfigCard()') && tab.includes('this.setupFormCard()') &&
+        tab.includes("this.sectionTitle('后台保活（实验）')") &&
+        tab.includes('this.keepAliveCard()') &&
+        tab.includes("this.sectionTitle('诊断日志')") &&
+        tab.includes('this.diagnosticsLogCard()') &&
+        tab.includes("this.sectionTitle('关于')") &&
+        tab.includes("label: '版本'") && tab.includes("label: '版本号'") &&
+        tab.includes("this.sectionTitle('状态与路由')") &&
+        tab.includes("label: '详细状态'") && tab.includes("label: '路由选择'") &&
+        tab.includes("this.sectionTitle('应用')") &&
+        tab.includes("label: '退出应用（断开 VPN）'") &&
+        tab.includes('this.confirmExplicitQuit()');
+    })());
+  check('settings: the batch actions are 14 fp text actions on a caption line, not ' +
+    'full-width buttons',
+    PAGE.includes("Text('全部启用')\n          .fontSize(TYPE_CAPTION_FP)") &&
+    PAGE.includes("Text('全部停用')\n          .fontSize(TYPE_CAPTION_FP)") &&
+    !PAGE.includes("Button('全部启用')") && !PAGE.includes("Button('全部停用')") &&
+    PAGE.includes("$r('app.color.nb_primary')"));
+  check('对端: the search field is the ArkUI Search component (40 vp pill, card ' +
+    'fill, the same width source and the same onChange write)',
+    PAGE.includes("Search({ value: this.peerQuery, placeholder: '搜索对端名称或 IP' })") &&
+    !PAGE.includes("TextInput({ text: this.peerQuery") &&
+    PAGE.includes('.height(PEER_SEARCH_HEIGHT_VP)') &&
+    PAGE.includes('.borderRadius(PEER_SEARCH_RADIUS_VP)') &&
+    PAGE.includes('.width(this.peerSearchWidth())') &&
+    PAGE.includes('this.peerQuery = value;'));
 
   // -------------------------------------------------------------------------
   // 7. the narrow branch is still the narrow branch (textual, on Index.ets)
@@ -464,48 +591,95 @@ try {
     PAGE.includes('this.wideDestination() === PANE_DEST_PEERS'));
 
   // -------------------------------------------------------------------------
-  // 13. 0.0.39 (I4) P0.2 — THE TIERED PEER LIST COLUMN and its per-tier
-  //     reservation of the detail pane (the review's §P0.1 arithmetic)
+  // 13. 0.0.53 — THE OFFICIAL 1:2 SPLIT (replaces I4's per-tier cap table)
   // -------------------------------------------------------------------------
   const pane = (w: number) => m.splitPaneWidthVp(w);
-  check('peer list: the column is a TIER TABLE — one cap per rail tier (360/440/480)',
-    m.PEER_LIST_NAV_BAR_CAP_COMPACT_VP === 360 &&
-    m.PEER_LIST_NAV_BAR_CAP_MEDIUM_VP === 440 &&
-    m.PEER_LIST_NAV_BAR_CAP_ROOMY_VP === 480 &&
-    m.peerListNavBarCapVp(840) === 360 && m.peerListNavBarCapVp(1023) === 360 &&
-    m.peerListNavBarCapVp(1024) === 440 && m.peerListNavBarCapVp(1439) === 440 &&
-    m.peerListNavBarCapVp(1440) === 480 && m.peerListNavBarCapVp(4000) === 480);
+  check('peer list: the column is the official 1:2 — clamp(round(pane / 3), 280, 480)',
+    m.PEER_LIST_PANE_DIVISOR === 3 && m.PEER_LIST_NAV_BAR_MIN_VP === 280 &&
+    m.PEER_LIST_NAV_BAR_MAX_VP === 480 &&
+    // the floor wins at the bottom of the shell: 1:2 of 600 is 200
+    m.peerListNavBarWidthVp(600, 840) === 280 &&
+    // the floor is also the exact 1:2 at a 840 vp content area
+    m.peerListNavBarWidthVp(840, 1120) === 280 &&
+    // and above it the ratio itself answers: 970 / 3 = 323.3
+    m.peerListNavBarWidthVp(970, 1250) === 323 &&
+    // 0.0.53: 1120 / 3 = 373.3 → 373, then the 1 vp snap raises the column to the
+    // wide row form's 374 (the boundary is asserted on its own further down)
+    m.peerListNavBarWidthVp(1120, 1440) === 374 &&
+    m.peerListNavBarWidthVp(1200, 1520) === 400 &&
+    // the cap is the ratio's own maximum, not a tier's
+    m.peerListNavBarWidthVp(1440, 4000) === 480);
   check('peer list: the compact tier reserves 320 for the detail, the rest 360',
     m.PEER_LIST_CONTENT_MIN_COMPACT_VP === 320 && m.MIN_CONTENT_WIDTH_VP === 360 &&
     m.peerContentMinWidthVp(840) === 320 && m.peerContentMinWidthVp(1023) === 320 &&
     m.peerContentMinWidthVp(1024) === 360 && m.peerContentMinWidthVp(1440) === 360);
-  check('peer list: 840 vp splits the 600 vp pane 280 list / 320 detail (not 240/360)',
+  check('peer list: 840 vp splits the 600 vp pane 280 list / 319 detail (not 240/360)',
     pane(840) === 600 && m.peerListNavBarWidthFor(840) === 280 &&
-    m.peerListNavBarWidthFor(840) + m.peerContentMinWidthVp(840) === pane(840));
-  check('peer list: it takes what the pane can spare, capped, at every tier',
-    m.peerListNavBarWidthFor(1023) === 360 && m.peerListNavBarWidthFor(1024) === 384 &&
-    m.peerListNavBarWidthFor(1250) === 440 && m.peerListNavBarWidthFor(1440) === 480 &&
-    m.peerListNavBarWidthFor(4000) === 480);
+    m.peerListNavBarWidthFor(840) + m.peerContentMinWidthVp(840) === pane(840) &&
+    // the recorded deviation from 1:2: this pane would be 200 / 400
+    Math.round(pane(840) / 3) === 200);
+  check('peer list: the column follows the content area at the measured windows',
+    m.peerListNavBarWidthFor(840) === 280 && m.peerListNavBarWidthFor(1023) === 280 &&
+    m.peerListNavBarWidthFor(1024) === 280 && m.peerListNavBarWidthFor(1250) === 323 &&
+    // 0.0.53: 1440's raw third is 373 and the 1 vp snap raises it to 374 (the rail
+    // steps 280 → 320 there, so the content area gives up 39 vp, not 40)
+    m.peerListNavBarWidthFor(1440) === 374 && m.peerListNavBarWidthFor(4000) === 400,
+    `840→${m.peerListNavBarWidthFor(840)} 1024→${m.peerListNavBarWidthFor(1024)} ` +
+      `1250→${m.peerListNavBarWidthFor(1250)} 1440→${m.peerListNavBarWidthFor(1440)} ` +
+      `4000→${m.peerListNavBarWidthFor(4000)}`);
+  check('peer list: the content area the ratio measures is the INDENT-CAPPED pane',
+    m.peerSplitPaneWidthVp(1440) === 1120 && m.peerSplitPaneWidthVp(1520) === 1200 &&
+    m.peerSplitPaneWidthVp(2560) === 1200 && m.peerSplitPaneWidthVp(4000) === 1200 &&
+    m.peerSplitPaneWidthVp(1250) === 970);
   check('peer list: THE INVARIANT — column + the tier\'s reservation fits the pane, always',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         const bar: number = m.peerListNavBarWidthFor(w);
-        if (bar < m.NAV_BAR_WIDTH_VP) { return false; }
-        if (bar + m.peerContentMinWidthVp(w) > m.splitPaneWidthVp(w)) { return false; }
+        if (bar < m.PEER_LIST_NAV_BAR_MIN_VP) { return false; }
+        if (bar > m.PEER_LIST_NAV_BAR_MAX_VP) { return false; }
+        if (bar + m.peerContentMinWidthVp(w) > m.peerSplitPaneWidthVp(w)) { return false; }
         if (m.splitPaneWidthVp(w) < m.NAV_AUTO_SPLIT_VP) { return false; }
       }
       return true;
     })());
-  check('peer list: the column never shrinks as the window grows',
+  // 0.0.53 DELIBERATE UPDATE: "the column never shrinks as the window grows" cannot
+  // hold for a 1:2 rule, because the RAIL steps 40 vp at 1440: the content area drops
+  // 1120 ← 1159 and its column drops 374 ← 386 (373 before the 1 vp snap). The
+  // property that IS the rule is asserted instead and it is stronger (exact at every
+  // window), plus "no shrink inside a rail tier" — the one step-down is the rail's own
+  // step, and it is bounded.
+  check('peer list: the column is EXACTLY the 1:2 clamp plus the 1 vp snap at EVERY window',
     (() => {
-      let previous = m.peerListNavBarWidthFor(m.HARMONY_BP_LG_VP - 1);
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
-        const bar = m.peerListNavBarWidthFor(w);
-        if (bar < previous) { return false; }
-        previous = bar;
+        const content: number = m.peerSplitPaneWidthVp(w);
+        const third: number = Math.round(content / m.PEER_LIST_PANE_DIVISOR);
+        let want: number = third < m.PEER_LIST_NAV_BAR_MIN_VP
+          ? m.PEER_LIST_NAV_BAR_MIN_VP : third;
+        if (want > m.PEER_LIST_NAV_BAR_MAX_VP) { want = m.PEER_LIST_NAV_BAR_MAX_VP; }
+        // 0.0.53: the 1 vp snap — a clamped 1:2 column in [360, 374) is raised to 374
+        // so the row's density cannot flip for a few vp of window drag. Stated here
+        // independently of the implementation function.
+        if (want >= m.PEER_LIST_WIDE_FORM_MIN_VP - m.PEER_LIST_FORM_SNAP_BAND_VP &&
+          want < m.PEER_LIST_WIDE_FORM_MIN_VP) {
+          want = m.PEER_LIST_WIDE_FORM_MIN_VP;
+        }
+        const room: number = content - m.peerContentMinWidthVp(w);
+        if (want > room) { want = room; }
+        if (m.peerListNavBarWidthFor(w) !== want) { return false; }
       }
       return true;
     })());
+  check('peer list: the column never shrinks INSIDE a rail tier (the one step-down is the 1440 rail step)',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP + 1; w <= 4000; w += 1) {
+        if (m.railTierOf(w) !== m.railTierOf(w - 1)) { continue; }
+        if (m.peerListNavBarWidthFor(w) < m.peerListNavBarWidthFor(w - 1)) { return false; }
+      }
+      const drop: number = m.peerListNavBarWidthFor(1439) - m.peerListNavBarWidthFor(1440);
+      return drop >= 0 && drop <= Math.ceil((m.RAIL_WIDTH_ROOMY_VP - m.RAIL_WIDTH_MEDIUM_VP) /
+        m.PEER_LIST_PANE_DIVISOR) + 1;
+    })(),
+    `1440 step: ${m.peerListNavBarWidthFor(1439)} → ${m.peerListNavBarWidthFor(1440)}`);
   check('peer list: a nonsense pane/window width answers the framework default, never NaN',
     m.peerListNavBarWidthVp(Number.NaN, Number.NaN) === 240 &&
     m.peerListNavBarWidthVp(0, 0) === 240 && m.peerListNavBarWidthFor(Number.NaN) === 240 &&
@@ -555,10 +729,55 @@ try {
       }
       return true;
     })());
-  check('peer row: the compact tier CONDENSES line 1 (chip + status ride line 2)',
-    m.peerRowCondensed(840) && m.peerRowCondensed(1023) && !m.peerRowCondensed(1024) &&
-    !m.peerRowCondensed(1440) && !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
-    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1024) === 98);
+  // 0.0.53 DELIBERATE UPDATE: the row's FORM follows the COLUMN now (the 1:2 split
+  // gives 280…374 vp across 840…1440 vp, where the wide form's 98 vp meta column +
+  // 21 vp of copy marks cannot keep the name's 196 vp). The threshold is the same
+  // name-floor arithmetic, written out here so a chrome change cannot silently move it.
+  check('peer row: the row CONDENSES from the column\'s own budget, not the rail tier',
+    m.PEER_LIST_WIDE_FORM_MIN_VP === m.PEER_ROW_NAME_MIN_WIDTH_VP + m.PEER_ROW_META_WIDE_VP +
+      m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP + 2 * m.PEER_ROW_LIST_PADDING_VP +
+      m.PEER_ROW_SELECT_BAR_VP + 2 * m.RAIL_PAGE_PADDING_VP &&
+    m.PEER_LIST_WIDE_FORM_MIN_VP === 374 &&
+    m.peerRowCondensed(840) && m.peerRowCondensed(1023) && m.peerRowCondensed(1024) &&
+    m.peerRowCondensed(1250) &&
+    // 1439 vp is the medium rail's last window: its column is 386 and the WIDE form is
+    // back. 0.0.53: 1440 is no longer a one-window condensation — its 373 vp column is
+    // snapped to 374 (see the snap check below), so it is wide like its neighbours.
+    !m.peerRowCondensed(1439) && !m.peerRowCondensed(1440) && !m.peerRowCondensed(1441) &&
+    !m.peerRowCondensed(4000) &&
+    !m.peerRowCondensed(600) && !m.peerRowCondensed(320) &&
+    m.peerRowMetaWidthVp(840) === 18 && m.peerRowMetaWidthVp(1440) === 98 &&
+    m.peerRowMetaWidthVp(1441) === 98);
+  // 0.0.53 — THE 1 vp SNAP'S OWN DEFECT AND BOUNDARY. Dragging a window across 1440
+  // flipped the list's density for exactly one window width: the rail steps 280 → 320
+  // (the content area gives up 39 vp) so the 1:2 column went 386 → 373 → 374, and 373
+  // is one vp under the wide form's 374. The snap closes [360, 374) by raising the
+  // column to 374 — DENSITY only; the 1:2 rule and its clamps are untouched.
+  check('peer list: the 1 vp snap — 1438…1442 are ALL wide, and no column is 373',
+    // the boundary itself, stated as a table (359 stays, the 360…373 band is raised)
+    m.PEER_LIST_FORM_SNAP_BAND_VP === m.PEER_LIST_WIDE_FORM_MIN_VP - 360 &&
+    m.peerListSnapToWideFormVp(359) === 359 &&
+    m.peerListSnapToWideFormVp(360) === 374 &&
+    m.peerListSnapToWideFormVp(361) === 374 &&
+    m.peerListSnapToWideFormVp(373) === 374 &&
+    m.peerListSnapToWideFormVp(374) === 374 &&
+    m.peerListSnapToWideFormVp(375) === 375 &&
+    Number.isNaN(m.peerListSnapToWideFormVp(Number.NaN)) &&
+    // the window that exposed it is now wide, at the wide form's exact threshold
+    m.peerListNavBarWidthFor(1440) === 374 && !m.peerRowCondensed(1440) &&
+    (() => {
+      for (let w = 1438; w <= 1442; w += 1) {
+        if (m.peerRowCondensed(w)) { return false; }
+        if (m.peerListNavBarWidthFor(w) === 373) { return false; }
+        if (m.peerRowMetaWidthVp(w) !== m.PEER_ROW_META_WIDE_VP) { return false; }
+      }
+      // and the form still changes exactly AT the threshold: 360…373 never condense,
+      // 359 does (the band is a snap, not a wider wide-form region)
+      return !m.peerRowCondensed(1400) && !m.peerRowCondensed(1359) &&
+        m.peerRowCondensed(1358) && m.peerListNavBarWidthFor(1358) === 359;
+    })(),
+    `1438…1442 columns: ${[1438, 1439, 1440, 1441, 1442]
+      .map((w) => m.peerListNavBarWidthFor(w)).join(' / ')}`);
   check('peer row: THE 28-CHARACTER FQDN FITS AT EVERY WINDOW OF THE SHELL',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
@@ -567,6 +786,14 @@ try {
       return true;
     })(),
     `min at 840 = ${m.peerRowNameWidthFor(840)} floor = ${m.PEER_ROW_NAME_MIN_WIDTH_VP}`);
+  check('peer row: THE IP NEVER WRAPS at every window of the shell (its own column)',
+    (() => {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
+        if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
+      }
+      return true;
+    })(),
+    `min at 840 = ${m.peerRowIpWidthFor(840)} floor = ${m.PEER_ROW_IP_MIN_WIDTH_VP}`);
   // 0.0.45 (I10) — THE NARROW BRANCH'S BUDGET IS THE PAGE, NOT THE RAIL COLUMN. I8/I9
   // only READ these widths in the selfcheck (the rows' text was `.layoutWeight(1)`, so
   // the runtime ellipsis width was whatever the row gave it); I10 makes the text
@@ -612,22 +839,31 @@ try {
   // the slot together (peerRowCopyTakeVp — the text is content-sized, so the 5 vp
   // that puts the mark after the glyphs is spent from the same budget). It is still
   // 0 at 840, where the tier has no mark at all, so the compact tier is unchanged.
-  check('peer row: the name column at every tier bottom and the measured I3 window',
+  // 0.0.53 DELIBERATE UPDATE: the columns are the 1:2 ones now (280 / 280 / 323 / 374)
+  // and the FORM is the column's own answer, so each window is decomposed with ITS
+  // form's chrome — the property is unchanged (name = text − meta − copy marks).
+  // 1440's 374 is the snapped column (373 before), which is why it is wide like 1441.
+  check('peer row: the name column at every measured window, each in its own form',
     m.peerRowNameWidthFor(840) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
       m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(840) &&
-    m.peerRowNameWidthFor(1024) === 384 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1024) &&
-    m.peerRowNameWidthFor(1250) === 440 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1250) &&
-    m.peerRowNameWidthFor(1440) === 480 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
-      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1440),
+    m.peerRowNameWidthFor(1024) === 280 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(1024) &&
+    m.peerRowNameWidthFor(1250) === 323 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_COMPACT_VP - m.peerRowCopyTakeVp(1250) &&
+    m.peerRowNameWidthFor(1440) === 374 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1440) &&
+    m.peerRowNameWidthFor(1441) === 374 - 2 * 16 - 2 * 12 - m.PEER_ROW_SELECT_BAR_VP -
+      m.PEER_ROW_META_WIDE_VP - m.peerRowCopyTakeVp(1441),
     `840→${m.peerRowNameWidthFor(840)} 1024→${m.peerRowNameWidthFor(1024)} ` +
-    `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)}`);
-  check('peer row: the compact line 2 still holds the IP, the chip AND the status text',
+    `1250→${m.peerRowNameWidthFor(1250)} 1440→${m.peerRowNameWidthFor(1440)} ` +
+    `1441→${m.peerRowNameWidthFor(1441)}`);
+  check('peer row: line 2 still holds the IP, the chip, the status text and its own mark',
     (() => {
-      for (let w = m.HARMONY_BP_LG_VP; w <= 1023; w += 1) {
+      for (let w = m.HARMONY_BP_LG_VP; w <= 1440; w += 1) {
+        if (!m.peerRowCondensed(w)) { continue; }
         const text: number = m.peerRowTextWidthVp(m.peerListNavBarWidthFor(w));
-        if (text < m.PEER_ROW_IP_MIN_WIDTH_VP + m.PEER_ROW_L2_META_COMPACT_VP) { return false; }
+        if (text < m.PEER_ROW_IP_MIN_WIDTH_VP + m.PEER_ROW_L2_META_COMPACT_VP +
+          m.peerRowCopyTakeVp(w)) { return false; }
       }
       return true;
     })());
@@ -966,23 +1202,36 @@ try {
         !card.includes("Button('更改配置')\n        .fontSize(TYPE_BODY_FP)\n" +
           ".maxFontScale(TYPE_SCALE_MAX_ROW)\n        .height(40)\n        .width('100%')");
     })());
-  check('D: 注销 lives INSIDE the server card, behind a 1 vp divider (no orphan red row)',
+  check('D: 注销 lives INSIDE the server group, behind the one inset 1 vp divider ' +
+    '(no orphan red row)',
     (() => {
       const card = PAGE.slice(PAGE.indexOf('serverConfigCard() {'),
         PAGE.indexOf('// 诊断日志 (settings tab'));
       const tab = PAGE.slice(PAGE.indexOf('settingsTab() {'),
         PAGE.indexOf('// ---- 路由选择 (设置 → 路由选择'));
-      return card.includes('this.logoutAction()') && card.includes('.height(1)') &&
+      // 0.0.52 DELIBERATE UPDATE: the divider is the shared settingsDivider() builder
+      // now (the same inset hairline every settings group uses), so the 1 vp is
+      // pinned there and the card is pinned to CALL it before the destructive row.
+      const divider = PAGE.slice(PAGE.indexOf('settingsDivider() {'),
+        PAGE.indexOf('// 0.0.35 状态点重绘 (device report 2026-10-14)'));
+      return card.includes('this.logoutAction()') &&
+        card.includes('this.settingsDivider()') &&
+        card.indexOf('this.settingsDivider()') < card.indexOf('this.logoutAction()') &&
+        divider.includes('.height(1)') &&
+        divider.includes('SETTINGS_DIVIDER_INSET_VP') &&
         !tab.includes('this.logoutAction()');
     })());
-  check('D: the 关于 rows put the VALUE at the row\'s end (valueEnd: true)',
+  check('D: the 关于 rows put the VALUE at the row\'s end (the settings row\'s value ' +
+    'sits right-aligned)',
     PAGE.includes('@Prop valueEnd: boolean = false;') &&
     PAGE.includes('textAlign(this.valueEnd ? TextAlign.End : TextAlign.Start)') &&
-    // 0.0.44 (I9): the peer detail pane's four section call sites now put their value
-    // at the row's end too (the official client's row shape), so the flag has six
-    // users: the 关于 card's two read-only rows and the pane's four sections.
-    (PAGE.match(/valueEnd: true/g) ?? []).length === 6 &&
-    PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',"));
+    // 0.0.52 DELIBERATE UPDATE: the 关于 rows are SettingsRow children now, so the
+    // DetailRow `valueEnd: true` count drops 6 → 4 (the peer detail pane's four
+    // sections). The 关于 values are still at the row's end — SettingsRow's value
+    // Text is End-aligned and capped, pinned by the settings-row check above.
+    (PAGE.match(/valueEnd: true/g) ?? []).length === 4 &&
+    PAGE.includes("label: '版本',") && PAGE.includes("label: '版本号',") &&
+    PAGE.includes('.textAlign(TextAlign.End)'));
   // 0.0.46 (I11) DELIBERATE UPDATE: this check used to require at least ONE numeric
   // font literal in the settings surface (the three '›' chevrons' bare `18`) and then
   // held it above the 14 vp PC floor. Those literals are TYPE_CHEVRON_FP now, so the
@@ -1217,20 +1466,28 @@ try {
     // deselected
     PAGE.includes('(peer: UiPeerEntry) => peerRowKey(peer, this.peerRowSelected(peer))'));
 
-  // §5 — THE DISCONNECTED WORKSPACE. The title block is the SAME bytes as the
-  // connected list's, so "the page starts in the same place" is checkable.
-  check('I5 §5: the guide pane opens with the SAME 对端 header the list uses',
+  // §5 — THE DISCONNECTED WORKSPACE. The title block carries the SAME 对端 title
+  // typography as the connected list's, so "the page starts in the same place" is
+  // checkable.
+  // 0.0.52 DELIBERATE UPDATE: the header is the 32 fp large title on a Row (the list
+  // adds its count chip on the right); the guide keeps the same title + the one
+  // caption line. So the equality is over the TITLE TYPOGRAPHY, and only the list
+  // carries the chip.
+  check('I5 §5: the guide pane opens with the SAME 对端 large title the list uses',
     (() => {
-      const header = ["Text('对端')", '.fontSize(TYPE_PAGE_TITLE_FP)',
-        '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))",
-        ".width('100%')"].join('\n            ');
-      // exactly TWO occurrences: the peer list's header and the guide's.
-      const hits = PAGE.split(header).length - 1;
+      const title = ["Text('对端')", '.fontSize(TYPE_LARGE_TITLE_FP)',
+        '.fontWeight(FontWeight.Bold)', ".fontColor($r('app.color.nb_text_primary'))"];
       const guide = PAGE.slice(PAGE.indexOf('wideGuidePane() {'),
         PAGE.indexOf('connectionOverviewPane() {'));
-      return hits === 2 && guide.includes("Text('对端')") &&
+      const list = PAGE.slice(PAGE.indexOf('peerListBody() {'),
+        PAGE.indexOf('// ---- 设置'));
+      return title.every((line) => guide.includes(line) && list.includes(line)) &&
+        guide.includes("Text('对端')") &&
+        // the chip is the LIST's (a count of a list); the guide has no list to count
+        list.includes('TITLE_CHIP_RADIUS_VP') &&
+        !guide.includes('TITLE_CHIP_RADIUS_VP') &&
         guide.indexOf("Text('对端')") < guide.indexOf('GUIDE_EMPTY_MAX_WIDTH_VP') &&
-        guide.includes('.margin({ top: 8 })');
+        guide.includes('.margin({ top: 8 })') && list.includes('.margin({ top: 8 })');
     })());
   check('I5 §5: the empty-state block is BORDERLESS, width-capped and 72 vp under the title',
     m.GUIDE_EMPTY_MAX_WIDTH_VP === 480 && m.GUIDE_BLOCK_TOP_GAP_VP === 72 &&
@@ -1513,17 +1770,26 @@ try {
   //   * the field's INNER text axis is the row text's own start — the reserved selection
   //     marker plus the shared content padding, DERIVED by peerRowTextStartVp(), which is
   //     also exactly what peerRowTextWidthVp spends on the row's left.
+  // 0.0.52 DELIBERATE UPDATE: the field is the ArkUI Search component (40 vp pill)
+  // instead of a TextInput. Search owns its leading icon and its own inner text inset,
+  // so the old hand-written `.padding(PEER_SEARCH_TEXT_INSET_VP …)` is GONE — the
+  // guarantee this check protects is unchanged and still pinned as two sources:
+  // the BOX (`width('100%')` of the same page-padded Column as the card) and the
+  // module's row-axis constant staying derived (it still describes where the row text
+  // starts, and the Search bar's own inset is documented against it).
   check('I13: the search field takes the list card\'s own box (100% of the page-padded ' +
-    'column, never a width from the column table) and pads its text onto the row axis',
+    'column, never a width from the column table) on the Search component',
     m.PEER_SEARCH_TEXT_INSET_VP === m.peerRowTextStartVp() &&
     m.PEER_SEARCH_TEXT_INSET_VP === m.PEER_ROW_SELECT_BAR_VP + m.PEER_ROW_CONTENT_PADDING_VP &&
     // the inset is the row's two constants DERIVED, not the literal 15 vp
     LAYOUT.includes(
       'export const PEER_SEARCH_TEXT_INSET_VP: number = peerRowTextStartVp();') &&
-    // the field's own two edges are those constants; its width is the shared-box helper
+    // the field's width is the shared-box helper, and Search's own 40 vp pill radius
+    // is the round's constant (not a literal at the call site)
     PAGE.includes('.width(this.peerSearchWidth())') &&
-    PAGE.includes('.padding({\n              left: PEER_SEARCH_TEXT_INSET_VP, ' +
-      'right: PEER_ROW_CONTENT_PADDING_VP\n            })') &&
+    PAGE.includes('.height(PEER_SEARCH_HEIGHT_VP)') &&
+    PAGE.includes('.borderRadius(PEER_SEARCH_RADIUS_VP)') &&
+    m.PEER_SEARCH_HEIGHT_VP === 40 && m.PEER_SEARCH_RADIUS_VP === 20 &&
     /private peerSearchWidth\(\): Length \{\n    return '100%';\n  \}/.test(PAGE) &&
     (() => {
       const body = PAGE.slice(PAGE.indexOf('peerListBody() {'),
@@ -1641,22 +1907,33 @@ try {
     `text(840)=${m.peerRowTextWidthVp(m.peerListNavBarWidthFor(840))}`);
 
   // ---- the I8 copy slot's geometry (the policy itself is run-copy-affordance) --
-  check('I8 §3: the copy slot is tier-gated, and the IP keeps its one-line floor',
+  // 0.0.53 DELIBERATE UPDATE: the gate is the COLUMN's own budget now (the mark is
+  // reserved from a 294 vp column up), not the rail tier. At 1024 the 1:2 column is
+  // 280, where the mark's 21 vp would cut the name to 182 — so the 1250/1440 PC
+  // columns keep their marks and 840…1119 do not have them.
+  check('I8 §3: the copy slot is COLUMN-gated, and the IP keeps its one-line floor',
     (() => {
       for (let w = m.HARMONY_BP_LG_VP; w <= 4000; w += 1) {
         if (m.peerRowNameWidthFor(w) < m.PEER_ROW_NAME_MIN_WIDTH_VP) { return false; }
         if (m.peerRowIpWidthFor(w) < m.PEER_ROW_IP_MIN_WIDTH_VP) { return false; }
       }
       return m.peerRowCopyVisible(840) === false && m.peerRowCopyVisible(1023) === false &&
-        m.peerRowCopyVisible(1024) === true && m.peerRowCopyVisible(1440) === true &&
+        m.peerRowCopyVisible(1024) === false && m.peerRowCopyVisible(1250) === true &&
+        m.peerRowCopyVisible(1440) === true && m.peerRowCopyVisible(4000) === true &&
+        m.PEER_LIST_COPY_SLOT_MIN_VP === m.PEER_ROW_NAME_MIN_WIDTH_VP +
+          m.PEER_ROW_META_COMPACT_VP + m.COPY_ICON_GAP_VP + m.PEER_ROW_COPY_SLOT_VP +
+          2 * m.PEER_ROW_LIST_PADDING_VP + m.PEER_ROW_SELECT_BAR_VP +
+          2 * m.RAIL_PAGE_PADDING_VP &&
+        m.PEER_LIST_COPY_SLOT_MIN_VP === 294 &&
         // the phone / tablet branch has no copy slot in its rows at all
         m.peerRowCopyVisible(600) === false && m.peerRowCopyVisible(320) === false &&
-        m.peerRowCopySlotVp(1024) === m.PEER_ROW_COPY_SLOT_VP &&
+        m.peerRowCopySlotVp(1250) === m.PEER_ROW_COPY_SLOT_VP &&
         m.PEER_ROW_COPY_SLOT_VP === 16 && m.PEER_ROW_COPY_GLYPH_VP === 16 &&
         m.PEER_ROW_COPY_TOUCH_VP === 40 && m.PEER_ROW_COPY_TOUCH_VP >= 40 &&
         m.PEER_ROW_COPY_TOUCH_VP > m.PEER_ROW_COPY_GLYPH_VP;
     })(),
-    `IP floor min: 840→${m.peerRowIpWidthFor(840)} 1024→${m.peerRowIpWidthFor(1024)}`);
+    `IP floor min: 840→${m.peerRowIpWidthFor(840)} 1024→${m.peerRowIpWidthFor(1024)} ` +
+      `1250→${m.peerRowIpWidthFor(1250)}`);
   // The 0.0.43 device frame caught the FIRST version of this: the slot was created
   // only for the hovered/selected row, so a hidden-then-created node SHORTENED the
   // row (measured 74 vp against its neighbours' 64 — 96 px vs 83 px pitch at
@@ -1688,6 +1965,82 @@ try {
     // padding now (full-bleed fill, padded text).
     PAGE.includes('.padding({\n        left: PEER_ROW_CONTENT_PADDING_VP, ' +
       'right: PEER_ROW_CONTENT_PADDING_VP,\n        top: 12, bottom: 12\n      })'));
+  // -------------------------------------------------------------------------
+  // 21. 0.0.53 — KEYBOARD FOCUS, THE SUBPAGE TRANSITION and the P0 EMPTY-STATE SCALE
+  // -------------------------------------------------------------------------
+  // §B: a focusable row must PAINT its focus. Three surfaces are in scope (the 设置
+  // row, the peer row, both rail destination rows) and each needs the same three
+  // things: an onFocus that records it, an onBlur that clears it only for itself, and
+  // an attribute expression that reads the state. The check is structural because the
+  // paint itself is ArkUI's — what the host can pin is that the wiring exists and that
+  // no surface was left `focusable` with nothing to show for it.
+  check('B: every focusable row records focus and paints a visible feedback',
+    (PAGE.match(/\.onFocus\(\(\): void => \{/g) ?? []).length === 4 &&
+    (PAGE.match(/\.onBlur\(\(\): void => \{/g) ?? []).length === 4 &&
+    // the 设置 row: a @State of its own + the selected-row tint + the primary ring
+    PAGE.includes('@State focused: boolean = false;') &&
+    PAGE.includes('? $r(\'app.color.nb_row_selected_background\') : Color.Transparent)') &&
+    PAGE.includes('color: this.focused ? $r(\'app.color.nb_primary\') : Color.Transparent') &&
+    PAGE.includes('width: FOCUS_RING_WIDTH_VP,') &&
+    // the peer row: keyed by public key, tinted by the same "you are here" surface,
+    // and NOT allowed to paint the 3 vp selection marker (I6 §2 above)
+    PAGE.includes('@State focusedPeerKey: string = \'\';') &&
+    PAGE.includes('private peerRowFocused(peer: UiPeerEntry): boolean {') &&
+    PAGE.includes('this.focusedPeerKey = peer.pub_key;') &&
+    PAGE.includes('      : this.peerRowFocused(peer)') &&
+    // the rail rows: their destination number, and the primary stroke on focus
+    PAGE.includes('@State focusedDestination: number = -1;') &&
+    (PAGE.match(/this\.focusedDestination === PANE_DEST_PEERS/g) ?? []).length === 3 &&
+    (PAGE.match(/this\.focusedDestination === PANE_DEST_SETTINGS/g) ?? []).length === 3 &&
+    // the rows keep the activation they had (Enter / Space), i.e. focus is additive
+    PAGE.includes('private isActivationKey(event: KeyEvent): boolean') &&
+    (PAGE.match(/if \(this\.isActivationKey\(event\)\) \{/g) ?? []).length >= 3);
+
+  // §C: ONE transition, 250 ms, the friction curve, an 8 vp rise — and it lives on the
+  // CONDITIONAL blocks only. The count is pinned so "it animates everywhere" and "it
+  // animates nowhere" are both failures.
+  check('C: the subpage transition is 250 ms / friction / 8 vp, defined ONCE',
+    m.PANE_TRANSITION_MS === 250 && m.PANE_TRANSITION_TRANSLATE_VP === 8 &&
+    PAGE.includes('duration: PANE_TRANSITION_MS, curve: Curve.Friction') &&
+    PAGE.includes('TransitionEffect.OPACITY.animation(param)') &&
+    PAGE.includes('TransitionEffect.translate({ y: PANE_TRANSITION_TRANSLATE_VP })') &&
+    (PAGE.match(/function paneTransition\(\): TransitionEffect \{/g) ?? []).length === 1);
+  check('C: it is applied to the conditional subpages and empty states, nowhere else',
+    // peer detail + peer list + 2 empty states + 设置 landing + its title + the two
+    // settings subpages + the overview/guide panes + the 2 destination panes = 12
+    (PAGE.match(/\.transition\(paneTransition\(\)\)/g) ?? []).length === 12 &&
+    // a transition on a mounted-for-the-whole-session node would animate data ticks:
+    // in CODE (not in the two doc comments that name the attribute) the only transition
+    // is the shared one
+    (() => {
+      const code: string = PAGE.replace(/\/\/[^\n]*/g, '');
+      const calls: string[] = code.match(/\.transition\([^\n]*\)/g) ?? [];
+      return calls.length === 12 &&
+        calls.every((call: string): boolean =>
+          call.trim() === '.transition(paneTransition())') &&
+        !code.includes('.transition(TransitionEffect');
+    })());
+
+  // §D: the empty/error block's P0 scale, stated as the three roles it renders.
+  check('D: PaneEmptyState carries the P0 scale — 20 / 16 / 14, 24 vp, 8-multiple gap',
+    m.TYPE_PAGE_TITLE_FP === 20 && m.TYPE_BODY_FP === 16 && m.TYPE_CAPTION_FP === 14 &&
+    (() => {
+      const block = PAGE.slice(PAGE.indexOf('struct PaneEmptyState {'),
+        PAGE.indexOf('// One in-flight start and stop request at a time'));
+      return block.length > 0 &&
+        block.includes('Column({ space: 16 }) {') &&
+        // the title keeps the page-title role, the body line is the 16 fp body, and
+        // the single action is the 14 fp caption role
+        block.includes('Text(this.title)\n        .fontSize(TYPE_PAGE_TITLE_FP)') &&
+        block.includes('Text(this.message)\n        .fontSize(TYPE_BODY_FP)') &&
+        block.includes('Button(this.actionLabel)\n          .fontSize(TYPE_CAPTION_FP)') &&
+        block.includes('.padding(24)') &&
+        // one action at most, and the verdict dot + the title + one sentence stay
+        (block.match(/Button\(/g) ?? []).length === 1 &&
+        block.includes('Circle({ width: 12, height: 12 })') &&
+        // the scale's gap is a multiple of 8 (16), never the old 12
+        !block.includes('Column({ space: 12 })');
+    })());
 } catch (error) {
   failed++;
   console.log(`FAIL harness — ${(error as Error).message}`);

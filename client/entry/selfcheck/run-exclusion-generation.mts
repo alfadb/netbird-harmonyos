@@ -289,6 +289,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // the REAL extension now imports by value — zero imports, no erased type
   // crossing the value import, staged byte-identically, no shim.
   'NetBirdStatusPolicy',
+  // 0.0.54 data-plane watchdog: the pure policy the REAL extension imports by
+  // value — zero imports and no erased types, so no shim.
+  'NetBirdDataPlanePolicy',
   // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdUiModel',
@@ -315,8 +318,10 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // (plan parse + bearer classification + direction verdict + target choice)
   // and the ring-dump pure module the REAL extension imports.
   'NetBirdN2CdPlan',
+  'NetBirdN2Evidence',
   'NetBirdN2Ring'];
 const SHIM_TYPES: Record<string, string[]> = {
+  NetBirdN2Evidence: ['N2EvidenceDecision', 'N2EvidenceOptions'],
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
@@ -625,7 +630,10 @@ try {
     "export const QUIT_REASON_SETTINGS = 'settings-quit';\n" +
     "export const QUIT_REASON_SYSTEM = 'system-quit';\n");
 
-  const mod = await import(pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href) as
+  const vpeUrl = pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href;
+  const mod = await import(vpeUrl + '?build=debug&n2=real') as
+    Record<string, unknown>;
+  const releaseVpe = await import(vpeUrl + '?build=release&n2=real') as
     Record<string, unknown>;
   const cfg = await import(pathToFileURL(join(dir, 'NetBirdVpnConfig.ts')).href) as
     Record<string, unknown>;
@@ -1240,7 +1248,13 @@ try {
   // by the RESOLVED path, so the two processes meet on ONE file — exactly the
   // cross-process filesDir mechanism the device already validated for the
   // credentials.
-  const entryMod = await import(pathToFileURL(join(dir, 'EntryAbility.ts')).href) as
+  // C0: fixed generated-profile stubs, isolated by module URL (no mutable
+  // global DEBUG switch). The exact same byte-identical class runs both modes.
+  const releaseEntryMod = await import(
+    pathToFileURL(join(dir, 'EntryAbility.ts')).href + '?build=release') as
+    Record<string, unknown>;
+  const entryMod = await import(
+    pathToFileURL(join(dir, 'EntryAbility.ts')).href + '?build=debug') as
     Record<string, unknown>;
   const ARM_PAYLOAD = '{"posctl_port":41000,"probe_wait_ms":900,' +
     '"peer_b2a_probe_id":"N2H-posctl-fixture"}';
@@ -1256,6 +1270,88 @@ try {
     G['__NB_FS_WRITE_ERROR'] = {};
     G['__NB_ARM_OPTS'] = undefined;
   };
+
+  // Every injected file, including all six mutually exclusive request channels.
+  const injectedFiles: Array<[string, string, string]> = [
+    ['netbird_config', 'netbird-device-config.json', '{"fixture":"replacement"}'],
+    ['netbird_setup_key', 'netbird-setup-key', 'synthetic-setup-key'],
+    ['protectDeviation', 'netbird-protect-deviation', 'route-exclusion'],
+    ['n2h_arm_options', ARM_TICKET_NAME, ARM_PAYLOAD],
+    ['n2_stimulus', 'netbird-n2-stimulus', '{"fixture":"stimulus"}'],
+    ['n2_control', 'netbird-n2-control', '{"fixture":"control"}'],
+    ['n2_a_event', 'netbird-n2-a-event', '{"fixture":"a-event"}'],
+    ['n2_cd_plan', 'netbird-n2-cd-plan', '{"fixture":"cd-plan"}'],
+    ['n2_ring_dump', 'netbird-n2-ring-dump', '{"fixture":"ring-dump"}'],
+    ['n2_ring_ack', 'netbird-n2-ring-ack', '{"fixture":"ring-ack"}']
+  ];
+  const allInjection = Object.fromEntries(injectedFiles.map(([key, , value]) => [key, value]));
+  const releaseWants: Array<[string, Record<string, unknown> | undefined]> = [
+    ['no parameters', undefined],
+    ['all parameters', allInjection],
+    ...injectedFiles.map(([key, , value]): [string, Record<string, unknown>] =>
+      [key, { [key]: value }])
+  ];
+  for (const seeded of [true, false]) {
+    for (const lifecycle of ['onCreate', 'onNewWant']) {
+      for (const [label, parameters] of releaseWants) {
+        resetFs();
+        if (seeded) {
+          for (const [, name] of injectedFiles) {
+            seedFile(`${FIXTURE_FILESDIR}/${name}`, `original:${name}:λ\n`);
+          }
+        }
+        const before = JSON.stringify(G['__NB_FS']);
+        G['__NB_FS_MUTATIONS'] = [];
+        const entry = new (releaseEntryMod['default'] as new () => Record<string, unknown>)();
+        entry['context'] = { filesDir: FIXTURE_FILESDIR };
+        // Observe the real last lifecycle step after the gate, without replacing
+        // its behaviour. This also proves parameter-less callbacks return normally.
+        let completed = false;
+        const show = entry['showHiddenWindow'] as (reason: string) => void;
+        entry['showHiddenWindow'] = (reason: string): void => {
+          show.call(entry, reason);
+          completed = reason === lifecycle;
+        };
+        resetLog();
+        const want = parameters === undefined ? { bundleName: 'cn.alfadb.netbird' } :
+          { bundleName: 'cn.alfadb.netbird', parameters };
+        (entry[lifecycle] as (w: unknown, l: unknown) => void)(want, {});
+        check(`C0 release ${lifecycle} ${label} (${seeded ? 'existing' : 'empty'} files): ` +
+          'unchanged bytes, no writes/deletes, lifecycle completed',
+          completed && JSON.stringify(G['__NB_FS']) === before &&
+          (G['__NB_FS_MUTATIONS'] as string[]).length === 0,
+          JSON.stringify({ completed, mutations: G['__NB_FS_MUTATIONS'] }));
+      }
+    }
+  }
+  G['__NB_FS_MUTATIONS'] = undefined;
+  resetFs();
+  // Debug onNewWant retains the original credential/arm write path. The full
+  // pre-existing C and request-channel groups below keep driving debug onCreate.
+  const debugWarmEntry = newEntry();
+  (debugWarmEntry['onNewWant'] as (w: unknown, l: unknown) => void)({
+    bundleName: 'cn.alfadb.netbird', parameters: {
+      netbird_config: allInjection['netbird_config'],
+      netbird_setup_key: allInjection['netbird_setup_key'],
+      protectDeviation: 'route-exclusion', n2h_arm_options: ARM_PAYLOAD
+    }
+  }, {});
+  check('C0 debug onNewWant still writes valid config, setup key, deviation and arm',
+    fileOf(`${FIXTURE_FILESDIR}/netbird-device-config.json`) === allInjection['netbird_config'] &&
+    fileOf(`${FIXTURE_FILESDIR}/netbird-setup-key`) === 'synthetic-setup-key\n' &&
+    fileOf(`${FIXTURE_FILESDIR}/netbird-protect-deviation`) === 'route-exclusion\n' &&
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD, 'synthetic fixture writes');
+  // Re-drive release AFTER debug import/use to catch shared mutable profile state.
+  const releaseWarmEntry = new (releaseEntryMod['default'] as new () => Record<string, unknown>)();
+  releaseWarmEntry['context'] = { filesDir: FIXTURE_FILESDIR };
+  const afterDebug = JSON.stringify(G['__NB_FS']);
+  G['__NB_FS_MUTATIONS'] = [];
+  (releaseWarmEntry['onNewWant'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: allInjection }, {});
+  check('C0 release remains closed after debug class use (module cache isolation)',
+    JSON.stringify(G['__NB_FS']) === afterDebug &&
+    (G['__NB_FS_MUTATIONS'] as string[]).length === 0, 'fixed per-module DEBUG');
+  G['__NB_FS_MUTATIONS'] = undefined;
 
   // C1: the explicit non-secret want lands byte-verbatim in filesDir, logged
   // as file name + byte count, payload never printed. The count is the payload's
@@ -4257,6 +4353,61 @@ try {
     await driveRecreate(ability, netcfgText);
     return (G['__NB_CREATED_CONFIGS'] ?? []) as Record<string, unknown>[];
   }
+
+  // Release/debug use separate immutable BuildProfile modules and the REAL
+  // N2 parser/transform; both VPN submission legs run through the REAL class.
+  const legacyN2 = { trusted_self: true, capture_32: ['198.51.100.88'],
+    outer_destinations: ['udp/198.51.100.88:53'] };
+  for (const [mode, module] of [['debug', mod], ['release', releaseVpe]] as const) {
+    for (const [kind, payload] of [['valid', legacyN2], ['invalid', { trusted_self: false }],
+      ['absent', undefined]] as const) {
+      const ticket = JSON.stringify({ n2_evidence: payload });
+      setSwitchTicket(ticket);
+      const gated = freshAbility(module, FIXTURE_FILESDIR);
+      resetLog();
+      const initial = await driveInitialLeg(gated, NETCFG_0021);
+      const enabled = mode === 'debug' && kind === 'valid';
+      const rejected = mode === 'debug' && kind === 'invalid';
+      check(`N2G ${mode} ${kind} samples expected evidence state`,
+        (gated['n2Evidence'] !== undefined) === enabled &&
+        ((gated['n2EvidenceError'] as string).length > 0) === rejected);
+      check(`N2G ${mode} ${kind} preserves legacy ticket`,
+        (G['__NB_FS'] as Record<string, string>)[ARM_TICKET_PATH] === ticket);
+      if (rejected) {
+        check('N2G debug invalid still refuses startup', initial.length === 0);
+      } else {
+        const recreated = await driveRecreateCapture(gated, NETCFG_0021);
+        for (const [leg, submissions] of [['initial', initial], ['recreate', recreated]] as const) {
+          const submitted = submissions[0];
+          check(`N2G ${mode} ${kind} ${leg} keeps expected application scope`,
+            submissions.length === 1 && (enabled ?
+              deepEq(submitted?.trustedApplications, [SELF_BUNDLE]) :
+              !('trustedApplications' in (submitted ?? {}))) &&
+            !('blockedApplications' in (submitted ?? {})));
+          check(`N2G ${mode} ${kind} ${leg} keeps expected business DNS`,
+            enabled ? submitted !== undefined && !('dnsAddresses' in submitted) :
+              deepEq(submitted?.dnsAddresses, ['9.9.9.9']));
+        }
+      }
+      (gated['stopStatusAndNetcfgWatcher'] as () => void)();
+      (gated['n2RingStopStats'] as () => void)();
+    }
+  }
+  // Re-sampling clears any previous in-memory arm before the release gate.
+  setSwitchTicket(JSON.stringify({ n2_evidence: legacyN2, diag_protect_process_net: true }));
+  const releaseResample = freshAbility(releaseVpe, FIXTURE_FILESDIR);
+  releaseResample['n2Evidence'] = { capture32: ['198.51.100.88'] };
+  releaseResample['n2EvidenceError'] = 'old-error';
+  (releaseResample['readDiagSwitches'] as () => void)();
+  check('N2G release resample clears previous evidence and error',
+    releaseResample['n2Evidence'] === undefined && releaseResample['n2EvidenceError'] === '');
+  check('N2G release preserves independent process-protect diagnostic switch',
+    releaseResample['diagProtectProcessNet'] === true);
+  releaseResample['protectDeviationRouteExclusion'] = true;
+  (releaseResample['readDiagSwitches'] as () => void)();
+  check('N2G release does not change ordinary protectDeviation state',
+    releaseResample['protectDeviationRouteExclusion'] === true);
+  setSwitchTicket(undefined);
 
   // Local resolver contract: drive BOTH real submission legs with the new
   // schema, including management-DNS disabled with the runtime still ready.

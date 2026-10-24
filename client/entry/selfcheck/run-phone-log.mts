@@ -521,6 +521,9 @@ try {
     ['vpn_net_recovery_failed', ['stage', 'result']],
     ['vpn_core_dead', ['reason', 'result']],
     ['vpn_start_failed', ['stage', 'reason']],
+    // Fix A: at most three management DNS aborts per startup, retaining the
+    // attempt ordinal and numeric platform code without a raw error message.
+    ['vpn_connector_aborted', ['stage', 'detail', 'count', 'code', 'reason']],
     ['phone_log_status', ['stage', 'state', 'detail']],
     // 2026-10-08 memory-pressure observation (bounded enum token only)
     ['vpn_memory_level', ['stage', 'state']],
@@ -532,6 +535,14 @@ try {
     // 2026-10-13 device report §D: the effective tunnel MTU and its provenance
     // (default vs network-map), once per config build.
     ['vpn_tunnel_mtu', ['stage', 'mtu', 'source']],
+    // 0.0.50 recovery leg: the awaited step's outcome (ok/timeout, one record
+    // per step) and the retry's silent early-return reason (once per epoch).
+    ['vpn_recovery_stage', ['stage', 'result']],
+    ['vpn_recovery_skip', ['reason']],
+    // 0.0.54 data-plane watchdog (PC 2026-10-21 capture): `connected` with the
+    // data plane gone (signal unregistered / no WG session) — the reason token
+    // and how many seconds the stale run had lasted before the recovery started.
+    ['vpn_dataplane_stale', ['reason', 'age']],
     // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the extension's
     // publication stamp + the core's edge revision + the two peer counts the F5
     // label change moves — one record per REAL write (the debounce above folds
@@ -878,8 +889,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 19 reviewed names / 24 helper calls',
-    milestones.length === 19 && extText.split('this.diagMilestone(').length === 25);
+  check('the wired milestone surface is exactly the 23 reviewed names / 28 helper calls',
+    milestones.length === 23 && extText.split('this.diagMilestone(').length === 29);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));
