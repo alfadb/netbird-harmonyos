@@ -71,7 +71,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Pinned upstream reference commit this module's protocol facts come from.
-pub const UPSTREAM_COMMIT: &str = "791401060d2b95e5f51e3439c0649729132f571e";
+pub const UPSTREAM_COMMIT: &str = "7e791d3e2972ddb763bb0e5c3bff4f9e14f70033";
 
 /// `GET` — list peers. Upstream-confirmed (openapi.yml `/api/peers`).
 pub const ENDPOINT_PEERS: &str = "/api/peers";

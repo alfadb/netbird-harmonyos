@@ -49,6 +49,18 @@ E8 前 API23 initial live 已于 2026-08-06 消费并登记为 `EV-E3-PHYS1API23
 - [OpenHarmony/HarmonyOS 平台与发行策略](docs/platform-strategy.md)
 - [Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](docs/tailscale-ohos-netbird-port-audit.md)
 
+## 上游参考仓
+
+上游 [netbirdio/netbird](https://github.com/netbirdio/netbird.git) 作为 Git submodule 位于 `refs/netbird`，用于协议与实现参考；它不是 HAP 构建输入。主仓客户端的 `client/core/build.rs` 编译主仓 `client/core/proto/` 下的协议文件，不直接依赖该参考仓。
+
+从本仓库根目录初始化参考仓：
+
+```bash
+git submodule update --init -- refs/netbird
+```
+
+新 clone 也可使用 `git clone --recurse-submodules`。固定 commit 由主仓 gitlink 管理，当前 pin 为 NetBird tag `v0.81.4`（commit `7e791d3e2972ddb763bb0e5c3bff4f9e14f70033`，2026-10-24）。主仓 `client/core/proto/` 下的两个 `.proto` 均为该 tag 的逐字副本、sha256 与上游一致；来源与许可记录以 [proto 来源说明](client/core/proto/README.md) 为准。
+
 ## 上游资源
 
 - [NetBird 官网](https://netbird.io/)

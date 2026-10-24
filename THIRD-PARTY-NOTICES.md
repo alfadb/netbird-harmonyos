@@ -34,9 +34,9 @@
 
 ## 引入的上游源文件（N3-2，2026-09-13；N4a 增补 2026-09）
 
-| 文件 | 来源（上游 commit `791401060d2b95e5f51e3439c0649729132f571e`） | 许可 | 引入目的 |
+| 文件 | 来源（上游 tag `v0.81.4`，commit `7e791d3e2972ddb763bb0e5c3bff4f9e14f70033`） | 许可 | 引入目的 |
 | --- | --- | --- | --- |
-| `client/core/proto/management.proto` | netbirdio/netbird `shared/management/proto/management.proto`（逐字复制，sha256 `9d54ca25ecc65076d8b371bb0c5c1e15e1566ab8eb66d52d50a68889a352e9f5` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（上游根 LICENSE 声明仅顶层 `management/`、`signal/`、`relay/`、`combined/` 为 AGPLv3；本文件在 `shared/` 下，按登记记录 `仓B/records/upstream-bump-79140106-20260913.json` 的目录映射为 BSD-3-Clause） | NetBird 真实注册/登录走 gRPC `ManagementService/Login`（上游无 REST setup-key 注册端点）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，protox + tonic-prost-build，免 protoc、不依赖网络）。详见 `client/core/proto/README.md` |
+| `client/core/proto/management.proto` | netbirdio/netbird `shared/management/proto/management.proto`（从 tag v0.81.4 逐字复制，sha256 `8916e1256cc32c586f2a8618cd1d2a0dcf79d8f736df3d8ebc45cb32cbb3a207` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（上游根 LICENSE 声明仅顶层 `management/`、`signal/`、`relay/`、`combined/` 为 AGPLv3；本文件在 `shared/` 下，不在该排除列表内，按上游根 LICENSE 的目录映射为 BSD-3-Clause） | NetBird 真实注册/登录走 gRPC `ManagementService/Login`（上游无 REST setup-key 注册端点）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，protox + tonic-prost-build，免 protoc、不依赖网络）。详见 `client/core/proto/README.md` |
 | `client/core/proto/signalexchange.proto` | netbirdio/netbird `shared/signal/proto/signalexchange.proto`（N4a 逐字复制，sha256 `9374413168551f7ded6c009dda2bfaa55e111bf138f2fe61780752a05c566ab9` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（同上目录映射：本文件在 `shared/` 下，非顶层 AGPLv3 四目录） | NetBird signal 服务通道（peer 发现/候选交换）：`SignalExchange/Send` + `SignalExchange/ConnectStream`（bidi 流）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，同上离线管线）。协议侦察与行号证据见 `docs/n3-signal-notes.md`、`client/core/proto/README.md` |
 
 ## 直接依赖（2026-09-13 增量，N3-2 gRPC/TLS 栈）

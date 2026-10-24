@@ -118,7 +118,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::Status;
 
 /// Pinned upstream reference commit this module's protocol facts come from.
-pub const UPSTREAM_COMMIT: &str = "791401060d2b95e5f51e3439c0649729132f571e";
+pub const UPSTREAM_COMMIT: &str = "7e791d3e2972ddb763bb0e5c3bff4f9e14f70033";
 
 /// Generated protobuf + tonic stubs for `management.proto`
 /// (`$OUT_DIR/management.rs` — messages and client/server code in one
@@ -497,10 +497,9 @@ impl ManagementGrpcClient {
     /// unrelated signed-in account. `false` is the ordinary login/register
     /// flow (`client/internal/auth/auth.go` GetOAuthFlow).
     ///
-    /// The `sessionExtend` parameter is the ONE fact here that post-dates
-    /// [`UPSTREAM_COMMIT`]: it is taken from commit
-    /// `67c2041` (`proto/README.md` records the appended proto field and the
-    /// second sha256). Everything else on this call is the pin.
+    /// The `sessionExtend` parameter is provided natively by the pin
+    /// (v0.81.4, [`UPSTREAM_COMMIT`]); `proto/README.md` records the
+    /// byte-identical copy and its sha256.
     pub async fn get_pkce_authorization_flow(
         &mut self,
         session_extend: bool,
