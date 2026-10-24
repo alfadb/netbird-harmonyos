@@ -138,13 +138,16 @@ const GHOST_CREDS: &str = "ghostghostghost:ABCDEFGHIJKLMNOPQRSTUVWXYZghost";
 // ---------------------------------------------------------------------------
 
 /// One in-flight signal frame, exactly the fields the real channel preserves
-/// (`EncryptedMessage.key/remoteKey` + `Body{type,payload}`).
+/// (`EncryptedMessage.key/remoteKey` + `Body{type,payload,sessionId}`).
 #[derive(Debug, Clone, PartialEq)]
 struct Frame {
     from: String,
     to: String,
     kind: PeerSignalKind,
     payload: String,
+    /// `Body.sessionId` (5 raw bytes) — OFFER/ANSWER only, like upstream
+    /// `signaler.signalOfferAnswer`; CANDIDATE frames carry `None`.
+    session_id: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -181,12 +184,14 @@ impl SignalExchange for MockSignalEndpoint {
         kind: PeerSignalKind,
         payload: &str,
         _port: u32,
+        session_id: Option<&[u8]>,
     ) -> Result<(), netbird_core::management::ManagementError> {
         self.bus.push(Frame {
             from: self.me.to_string(),
             to: to_key.to_string(),
             kind,
             payload: payload.to_string(),
+            session_id: session_id.map(<[u8]>::to_vec),
         });
         Ok(())
     }
@@ -460,10 +465,14 @@ fn deliver(bus: &Arc<SignalBus>, now: u64, a: &mut TestOrch, mut b: Option<&mut 
         // record for wire-shape assertions (only deliverable directions)
         bus.seen.lock().expect("seen").push(f.clone());
         if f.to == a.me {
-            a.orch.handle_signal(&f.from, f.kind, &f.payload, now).expect("A recv");
+            a.orch
+                .handle_signal_with_session_id(&f.from, f.kind, &f.payload, f.session_id.as_deref(), now)
+                .expect("A recv");
         } else if let Some(b) = b.as_deref_mut() {
             if f.to == b.me {
-                b.orch.handle_signal(&f.from, f.kind, &f.payload, now).expect("B recv");
+                b.orch
+                    .handle_signal_with_session_id(&f.from, f.kind, &f.payload, f.session_id.as_deref(), now)
+                    .expect("B recv");
             }
         }
         // else: dropped (ghost peer)
@@ -615,6 +624,102 @@ fn dual_peer_signal_exchange_reaches_connected_and_lands_wg_endpoints() {
     assert_eq!(b.socks.taken(), 1, "B: the adopted gather socket");
 }
 
+/// 会话身份（上游 PR #7814 / v0.81.0）：我方两实例互连后，本端主动重启
+/// **不再靠凭证变化**告诉对端——`local_creds` 是 per-peer 终身的
+/// （`worker_ice.go:91-97`），重启的线上信号是 `Body.sessionId` 换新
+/// （`worker_ice.go:117-121`）。双 orch 连到 Connected 后让 A 走真实本地
+/// 重启入口（`restart_for_network_change` → `drop_session`），断言：
+/// 1. A 的下一帧 OFFER 换 session id，payload（ufrag:pwd）一字未变；
+/// 2. B 按新 id 重建（重新 trickle 自己的本地候选），且 B 自己的 id 不变
+///    （跟随远端重启不换本机 ID）。
+#[test]
+fn local_restart_is_signaled_by_a_new_session_id_not_by_credential_change() {
+    let bus = Arc::new(SignalBus::default());
+    let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
+    let mut b = TestOrch::new(KEY_B, &[KEY_A], 0x2222, bus.clone());
+    b.orch.set_initiator(KEY_A, false);
+
+    let mut now = 1000u64;
+    let converged = pump_until(&bus, &mut a, &mut b, &mut now, 30_000, |a, b| {
+        a.status_of(KEY_B).state == PeerIceState::Connected
+            && b.status_of(KEY_A).state == PeerIceState::Connected
+    });
+    assert!(converged, "both orchestrators must reach Connected first");
+
+    let first_offer = bus
+        .seen()
+        .into_iter()
+        .find(|f| f.from == KEY_A && f.kind == PeerSignalKind::Offer)
+        .expect("A's initial OFFER");
+    let a_id = first_offer.session_id.clone().expect("our OFFER advertises Body.sessionId");
+    assert_eq!(a_id.len(), 5, "per-peer ICE session ID is 5 raw bytes (session_id.go:9-21)");
+    let a_creds = first_offer.payload.clone();
+    let b_id = bus
+        .seen()
+        .into_iter()
+        .find(|f| f.from == KEY_B && f.kind == PeerSignalKind::Answer)
+        .and_then(|f| f.session_id)
+        .expect("B's ANSWER advertises Body.sessionId");
+    let b_cands_before = candidate_frames(&bus, KEY_B).len();
+    assert!(b_cands_before > 0, "B trickled its candidates before the restart");
+
+    // Local restart on A (real production entry point: drop_session + guard
+    // reset to +800 ms). A's credentials stay the same by design.
+    a.orch.restart_for_network_change(now);
+
+    let observed = Arc::new(Mutex::new(None::<Frame>));
+    let probe = observed.clone();
+    let bus_for_cond = bus.clone();
+    let a_id_for_cond = a_id.clone();
+    let deadline = now + 20_000;
+    let ok = pump_until(&bus, &mut a, &mut b, &mut now, deadline, move |a, b| {
+        let seen = bus_for_cond.seen();
+        for f in seen.iter().rev() {
+            if f.from == KEY_A && f.kind == PeerSignalKind::Offer {
+                if f.session_id.as_deref() != Some(a_id_for_cond.as_slice()) {
+                    *probe.lock().expect("probe") = Some(f.clone());
+                }
+                break;
+            }
+        }
+        a.status_of(KEY_B).state == PeerIceState::Connected
+            && b.status_of(KEY_A).state == PeerIceState::Connected
+            && probe.lock().expect("probe").is_some()
+    });
+    assert!(ok, "A must re-offer with a new id and both sides must reconnect in the deadline");
+
+    let new_offer = observed.lock().expect("probe").clone().expect("an OFFER with the new id");
+    assert_eq!(new_offer.session_id.as_ref().map(Vec::len), Some(5), "still a 5-byte id");
+    assert_ne!(
+        new_offer.session_id.as_deref(),
+        Some(a_id.as_slice()),
+        "a local restart renews the advertised session id"
+    );
+    assert_eq!(
+        new_offer.payload, a_creds,
+        "the restart signal is the session id: the OFFER payload is the SAME ufrag:pwd"
+    );
+
+    // B followed the remote restart: it rebuilt (fresh candidates re-trickled)
+    // without changing its own advertised id.
+    let b_cands_after = candidate_frames(&bus, KEY_B).len();
+    assert!(
+        b_cands_after > b_cands_before,
+        "B rebuilt on the new remote id and re-advertised its candidates ({b_cands_before} → {b_cands_after})"
+    );
+    let b_answer_after = bus
+        .seen()
+        .into_iter()
+        .rev()
+        .find(|f| f.from == KEY_B && f.kind == PeerSignalKind::Answer)
+        .expect("B answers the restarted A");
+    assert_eq!(
+        b_answer_after.session_id.as_deref(),
+        Some(b_id.as_slice()),
+        "following a REMOTE restart must keep B's own advertised id"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // STAGE 2 (official-alignment audit §2.7): ONE mux per connector, MANY peers
 // ---------------------------------------------------------------------------
@@ -632,7 +737,13 @@ fn step_many(bus: &Arc<SignalBus>, now: u64, orchs: &mut [&mut TestOrch]) {
     for f in frames {
         for o in orchs.iter_mut() {
             if o.orch.peer_keys().iter().any(|k| k == &f.from) {
-                let _ = o.orch.handle_signal(&f.from, f.kind, &f.payload, now);
+                let _ = o.orch.handle_signal_with_session_id(
+                    &f.from,
+                    f.kind,
+                    &f.payload,
+                    f.session_id.as_deref(),
+                    now,
+                );
             }
         }
     }

@@ -132,6 +132,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
         // WG over relay: OUR advertised relay address rides the OFFER
         // (signalexchange.proto field 8; upstream handshaker.go:224-242)
         Some("rels://a.example:28443"),
+        None,
     );
     let wire = client_a.encrypt_message(&offer).expect("seal");
     assert_eq!(wire.key, keys_a.public_key_base64());
@@ -158,6 +159,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
         51_821,
         // each side advertises ITS OWN relay (B's is deliberately different)
         Some("rel://b.example:28443"),
+        None,
     );
     client_b.send(&answer).await.expect("send answer (unary)");
     let env_a = recv(&mut reg_a.inbound).await;
@@ -174,6 +176,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
             body::Type::Candidate,
             "candidate:udp:127.0.0.1:51820",
             0,
+            None,
             None,
         ))
         .await
@@ -317,6 +320,7 @@ async fn every_reconnect_takes_a_fresh_protected_socket_and_exhaustion_fails_clo
         body::Type::Candidate,
         "post-reconnect",
         0,
+        None,
         None,
     );
     client.send(&m).await.expect("send on re-registered channel");

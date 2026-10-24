@@ -308,6 +308,12 @@ pub struct SignalMock {
     /// (fail-closed registration test; upstream always sends it,
     /// signal.go:117).
     pub omit_registered_header: Arc<AtomicBool>,
+    /// Knob: hang the FIRST `ConnectStream` registration response forever
+    /// (`std::future::pending`) — the shape of a server (or middlebox)
+    /// that accepts the stream but never sends the confirm header
+    /// (registration-timeout test; upstream PR #8175). Consumed by that
+    /// first stream: later streams register normally.
+    pub hang_first_registration: Arc<AtomicBool>,
     /// Knob: flip a byte in every forwarded `body` (envelope authentication
     /// must fail client-side WITHOUT killing the stream).
     pub corrupt_forwarded_bodies: Arc<AtomicBool>,
@@ -324,6 +330,10 @@ pub struct SignalMock {
     /// Frames delivered through the unary `Send` RPC — the ONLY path the
     /// real server forwards (signal.go:95-104).
     unary_sends: Arc<AtomicU64>,
+    /// Streams whose registration response was hung by
+    /// [`Self::hang_first_registration`] (the timeout test asserts exactly
+    /// one).
+    hung_registrations: Arc<AtomicU64>,
     /// Self-addressed frames (`key == remote_key`): the receive watchdog's
     /// liveness probe (`sendReceiveProbe`), counted by KIND of address so a
     /// test can name the probe even while other peers are sending.
@@ -341,10 +351,12 @@ impl Default for SignalMock {
             deny_registration: Arc::new(AtomicBool::new(false)),
             fail_registration_unavailable: Arc::new(AtomicBool::new(false)),
             omit_registered_header: Arc::new(AtomicBool::new(false)),
+            hang_first_registration: Arc::new(AtomicBool::new(false)),
             corrupt_forwarded_bodies: Arc::new(AtomicBool::new(false)),
             drop_self_heartbeat: Arc::new(AtomicBool::new(false)),
             stream_frames_seen: Arc::new(AtomicU64::new(0)),
             unary_sends: Arc::new(AtomicU64::new(0)),
+            hung_registrations: Arc::new(AtomicU64::new(0)),
             self_addressed: Arc::new(AtomicU64::new(0)),
             sink: Arc::new(Mutex::new(None)),
         }
@@ -371,6 +383,12 @@ impl SignalMock {
     /// remote_key`): the receive watchdog's heartbeat probe.
     pub fn self_addressed_sends(&self) -> u64 {
         self.self_addressed.load(Ordering::Acquire)
+    }
+
+    /// Streams whose registration response was hung by
+    /// [`Self::hang_first_registration`].
+    pub fn hung_registrations(&self) -> u64 {
+        self.hung_registrations.load(Ordering::Acquire)
     }
 
     fn record_if_sink(&self, env: &EncryptedMessage) {
@@ -459,6 +477,14 @@ impl SignalExchange for SignalMock {
                 )));
             }
         };
+        // A stream that never confirms registration is NOT a successful
+        // registration: hang it BEFORE the success record (`seen_ids`), so
+        // the timeout test can tell the hung attempt from the real one.
+        if self.hang_first_registration.swap(false, Ordering::SeqCst) {
+            self.hung_registrations.fetch_add(1, Ordering::AcqRel);
+            // accepted stream, confirm header never sent: hold the RPC open
+            std::future::pending::<()>().await;
+        }
         self.seen_ids.lock().expect("seen_ids").push(id.clone());
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<EncryptedMessage, Status>>(64);

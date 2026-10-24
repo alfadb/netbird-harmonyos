@@ -808,7 +808,7 @@ async fn transport_break_reconnects_re_registers_and_re_takes_protected_fd() {
     let cand = Candidate::host_candidate([127, 0, 0, 1], b_port);
     let dup = cand.marshal();
     b.exchange
-        .send(&key_a, PeerSignalKind::Candidate, &dup, 0)
+        .send(&key_a, PeerSignalKind::Candidate, &dup, 0, None)
         .expect("post-reconnect send must be accepted (registered)");
     wait_for("A received the post-reconnect candidate", || {
         a.events.lock().expect("events").iter().any(

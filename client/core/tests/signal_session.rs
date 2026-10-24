@@ -25,9 +25,10 @@ use std::time::Duration;
 
 use netbird_core::backoff::ExponentialBackoff;
 use netbird_core::envelope::EnvelopeKeyPair;
+use netbird_core::grpc::GrpcTransport;
 use netbird_core::management::ManagementError;
 use netbird_core::signal::proto::body;
-use netbird_core::signal::{SignalLoopEvent, SignalSession};
+use netbird_core::signal::{SignalClient, SignalLoopEvent, SignalSession};
 
 use signal_mock::{
     connect_client, socket_source, spawn_signal_mock, SignalMock, TestTransport,
@@ -138,6 +139,7 @@ async fn session_receives_breaks_reconnects_and_receives_again() {
             "ice-candidate-1",
             0,
             None,
+            None,
         ))
         .await
         .expect("B sends candidate");
@@ -178,6 +180,72 @@ async fn session_receives_breaks_reconnects_and_receives_again() {
     assert!(
         !recs.lock().expect("recs").iter().any(|r| matches!(r, Rec::Malformed(_))),
         "clean exchange must not report malformed frames"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// A Signal server (or middlebox) that accepts the `ConnectStream` but never
+/// sends the `x-wiretrustee-peer-registered` confirm header must NOT hang
+/// registration forever (upstream PR #8175 `defaultRegistrationTimeout`): the
+/// registration WAIT is bounded, surfaces as a non-Auth `Broken`, and the
+/// session re-registers through the existing backoff path.
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_wait_is_bounded_and_reconnects() {
+    let mock = SignalMock::default();
+    mock.hang_first_registration.store(true, Ordering::SeqCst);
+    let (addr, _counter) = spawn_signal_mock(mock.clone()).await;
+    let keys = EnvelopeKeyPair::generate().expect("keys");
+    // 200 ms registration bound (production takes it from the connector's
+    // `DEFAULT_REQUEST_TIMEOUT` = 10 s). `connect_client` pins the 5 s
+    // defaults, so this case calls the one real constructor directly.
+    let client = SignalClient::connect_with_socket_source(
+        &format!("http://{addr}"),
+        GrpcTransport::Plaintext,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        keys.clone(),
+        socket_source(2),
+        addr,
+    )
+    .await
+    .expect("protected signal connect");
+    let mut session = SignalSession::new(client).with_policy(
+        quick_policy(None),
+        FixedRng::filled(64, 0.5),
+        Box::new(netbird_core::backoff::MonotonicClock),
+    );
+
+    let recs = Arc::new(std::sync::Mutex::new(Vec::<Rec>::new()));
+    let loop_recs = recs.clone();
+    let handle = tokio::spawn(async move {
+        let _ = session.run_events(move |ev| loop_recs.lock().expect("recs").push(record(ev))).await;
+    });
+
+    // The mock's hang is UNBOUNDED, so an unbounded register wait shows up as
+    // "no Registered within 5 s" rather than as a hung test run.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !recs.lock().expect("recs").iter().any(|r| r == &Rec::Registered) {
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "deadline waiting for Registered after the registration timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let events = recs.lock().expect("recs").clone();
+    let broken = events.iter().filter(|r| matches!(r, Rec::Broken(_))).count();
+    assert_eq!(broken, 1, "the hung registration wait broke exactly once: {events:?}");
+    assert!(
+        matches!(events.first(), Some(Rec::Broken(message)) if message.contains("timed out")),
+        "the break is the non-Auth Timeout class, recorded before the re-register: {events:?}"
+    );
+    assert_eq!(mock.hung_registrations(), 1, "exactly one registration response was hung");
+    assert_eq!(
+        mock.registered_ids(),
+        vec![keys.public_key_base64()],
+        "only the real (second) registration was recorded"
     );
 
     handle.abort();
@@ -267,6 +335,7 @@ async fn malformed_frame_is_surfaced_and_stream_stays_up() {
             "corrupted-payload",
             0,
             None,
+            None,
         ))
         .await
         .expect("B sends corrupted candidate");
@@ -284,6 +353,7 @@ async fn malformed_frame_is_surfaced_and_stream_stays_up() {
             body::Type::Candidate,
             "clean-payload",
             0,
+            None,
             None,
         ))
         .await
@@ -586,6 +656,7 @@ async fn a_received_frame_restarts_the_watchdog_silence_window() {
             body::Type::Candidate,
             "reset-candidate",
             0,
+            None,
             None,
         ))
         .await

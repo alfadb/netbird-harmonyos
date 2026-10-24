@@ -668,6 +668,11 @@ impl PeerSignalKind {
 /// 交给 [`PeerIceOrchestrator::handle_signal`]。`to_key` 是目的 peer 的
 /// base64 WG 公钥（`EncryptedMessage.remoteKey` 语义）；`payload` 对
 /// OFFER/ANSWER 是 `"ufrag:pwd"`，对 CANDIDATE 是 `candidate.Marshal()`。
+///
+/// `session_id` 是本 peer 的本地 ICE 会话 ID（5 字节，`Body.sessionId`）：
+/// 上游只把它放进 OFFER/ANSWER（`signaler.go:50-68`），CANDIDATE 传
+/// `None`。它是「本端主动重启了 agent」的线上信号，也是远端判断要不要
+/// 重建 agent 的唯一依据（`worker_ice.go:100-157`）。
 pub trait SignalExchange: Send + Sync {
     fn send(
         &self,
@@ -675,6 +680,7 @@ pub trait SignalExchange: Send + Sync {
         kind: PeerSignalKind,
         payload: &str,
         wg_listen_port: u32,
+        session_id: Option<&[u8]>,
     ) -> Result<(), ManagementError>;
 }
 
@@ -700,6 +706,7 @@ impl SignalExchange for LoggingSignalExchange {
         kind: PeerSignalKind,
         _payload: &str,
         _wg_listen_port: u32,
+        _session_id: Option<&[u8]>,
     ) -> Result<(), ManagementError> {
         self.sent.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         crate::hilog::emit(&format!(
@@ -805,6 +812,7 @@ impl SignalExchange for RealSignalExchange {
         kind: PeerSignalKind,
         payload: &str,
         wg_listen_port: u32,
+        session_id: Option<&[u8]>,
     ) -> Result<(), ManagementError> {
         if !self.is_registered() {
             self.refused.fetch_add(1, Ordering::AcqRel);
@@ -819,6 +827,12 @@ impl SignalExchange for RealSignalExchange {
             PeerSignalKind::Offer | PeerSignalKind::Answer => self.relay_address(),
             PeerSignalKind::Candidate => None,
         };
+        // 会话 ID 与中继地址同域：OFFER/ANSWER 带本 peer 的 ID（上游
+        // signaler.signalOfferAnswer 的 SessionID 参数），CANDIDATE 不带。
+        let session_id = match kind {
+            PeerSignalKind::Offer | PeerSignalKind::Answer => session_id.map(<[u8]>::to_vec),
+            PeerSignalKind::Candidate => None,
+        };
         self.tx
             .send(SignalOutgoing {
                 remote_key: to_key.to_string(),
@@ -826,6 +840,7 @@ impl SignalExchange for RealSignalExchange {
                 payload: payload.to_string(),
                 wg_listen_port,
                 relay_server_address: relay_address,
+                session_id,
             })
             .map_err(|_| {
                 ManagementError::Network("signal-link-closed (worker gone)".into())
@@ -964,6 +979,30 @@ pub fn parse_ufrag_pwd(payload: &str) -> Result<IceCredentials, ManagementError>
     let creds = IceCredentials { ufrag: ufrag.to_string(), pwd: pwd.to_string() };
     creds.validate().map_err(|_| bad())?;
     Ok(creds)
+}
+
+/// 上游 `NewICESessionID`（`session_id.go:12-21`）的同形生成：5 字节 OS
+/// 随机数。随机源复用 crate 里**已有**的 `crypto_box::aead::OsRng`
+/// （`rand_core` 经 crypto_box 再导出，离线闭包内，无新依赖；同
+/// [`crate::backoff::OsRandom`] 与 `protected_dns` 的用法）。
+fn generate_session_id() -> [u8; 5] {
+    use crypto_box::aead::rand_core::RngCore;
+    let mut id = [0u8; 5];
+    crypto_box::aead::OsRng.fill_bytes(&mut id);
+    id
+}
+
+/// 收帧侧 `Body.sessionId`（原始字节）→ 5 字节 ID。上游
+/// `convertToOfferAnswer`（`engine.go:2949-2957`）对长度 ≠ 5 的值只 warn
+/// 并当作 nil（旧客户端），本端同样按「远端未带 ID」处理，走凭证判据。
+fn parse_remote_session_id(raw: Option<&[u8]>) -> Option<[u8; 5]> {
+    let raw = raw?;
+    if raw.len() != 5 {
+        return None;
+    }
+    let mut id = [0u8; 5];
+    id.copy_from_slice(raw);
+    Some(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,6 +1375,18 @@ struct PeerConn {
     /// 每次 `reCreateAgent` 都传同一对凭证（`worker_ice.go:220-226`），
     /// 所以重发 OFFER/ANSWER 与重建 agent 都不改变对外凭证。
     local_creds: Option<IceCredentials>,
+    /// 本 peer 的**本地 ICE 会话 ID**（上游 `WorkerICE.sessionID`，5 字节
+    /// 随机；`worker_ice.go:73`、`session_id.go:12-21`）。首次建会话时生成，
+    /// 只在本端主动拆会话（`drop_session`，即上游 `closeAgent`）时换新
+    /// （`worker_ice.go:369-383` `renewSessionID`）；跟随远端重启而重建
+    /// **不换**（`worker_ice.go:117-121`：改了只在下一帧 OFFER 暴露，双方
+    /// 反复重建）。随 OFFER/ANSWER 的 `Body.sessionId` 广告。
+    local_session_id: Option<[u8; 5]>,
+    /// 已记录的**远端**会话 ID（上游 `WorkerICE.remoteSessionID`，
+    /// `worker_ice.go:50`）：只在「已有会话 + 远端带了 ID + 与记录不同」
+    /// 时重建（`worker_ice.go:100-157`）；拆会话时清空
+    /// （`abandonNegotiation`，`:388-397`）。
+    remote_session_id: Option<[u8; 5]>,
     /// 发起策略（默认 true = 主动发 OFFER，controlling 起始；false = 纯
     /// 应答方，等对端 OFFER）。glare（双方都发起）由 tie-breaker 收敛。
     initiator: bool,
@@ -1410,6 +1461,8 @@ impl PeerConn {
             state: PeerIceState::Idle,
             session: None,
             local_creds: None,
+            local_session_id: None,
+            remote_session_id: None,
             initiator: true,
             locals_signaled: 0,
             remote_creds: None,
@@ -2106,11 +2159,33 @@ impl PeerIceOrchestrator {
     /// 收到一帧解密后的 signal 消息（`from_key` = 发送方 WG 公钥，
     /// `engine.go:2039-2042` 的绑定语义；负载已被
     /// [`crate::signal::SignalClient::decrypt_envelope`] 打开）。
+    ///
+    /// 无 `Body.sessionId` 的旧形态入口（老对端、以及既有单测）：等价于
+    /// [`Self::handle_signal_with_session_id`] 传 `None`，走凭证变化判据。
     pub fn handle_signal(
         &mut self,
         from_key: &str,
         kind: PeerSignalKind,
         payload: &str,
+        now_ms: u64,
+    ) -> Result<(), ManagementError> {
+        self.handle_signal_with_session_id(from_key, kind, payload, None, now_ms)
+    }
+
+    /// 带远端 ICE 会话 ID 的 receipt（connector 路由生产路径；
+    /// `remote_session_id` = `Body.sessionId`，5 字节，缺失 = 老对端）。
+    ///
+    /// 判据（上游 `WorkerICE.OnNewOffer`，`worker_ice.go:100-157`）：
+    /// - 已有会话 + 远端**带了 ID** 且与记录的远端 ID 不同 → 重建一次；
+    /// - 已有会话 + 远端 ID 相同 → 不重建；
+    /// - 已有会话 + 远端**不带 ID** → 保留本端的远端凭证变化判据（见
+    ///   Offer 分支注释：有意偏离上游的 skip 语义）。
+    pub fn handle_signal_with_session_id(
+        &mut self,
+        from_key: &str,
+        kind: PeerSignalKind,
+        payload: &str,
+        remote_session_id: Option<&[u8]>,
         now_ms: u64,
     ) -> Result<(), ManagementError> {
         // STAGE 0: this call is a pass of its own — its wall clock feeds the
@@ -2126,25 +2201,41 @@ impl PeerIceOrchestrator {
         match kind {
             PeerSignalKind::Offer => {
                 let creds = parse_ufrag_pwd(payload)?;
-                // 已有会话时收到 Offer：官方 `WorkerICE.OnNewOffer`
-                //（worker_ice.go:100-157）只按 **session id** 决定是否重建
-                // agent；重建时本地凭证不变（`localUfrag/localPwd` 是 per-peer
-                // 的），只是 `reCreateAgent` + 重新 dial + 重新收集。本端没有
-                // 线上 session id（本仓 signal 帧不带 `Body.sessionId`），用
-                // **远端凭证变化**作等价判据：凭证同样 per-peer 稳定后，它只
-                // 在「对端换了实现/换了 peer worker」时触发；本端 Disconnected
-                // 时已按上游 closeAgent 语义拆掉会话（见 `drain_events`），
-                // 天然落入下面的全新应答路径。Failed 会话已在事件处理中拆掉
-                //（session=None），同理。
-                let renegotiate = self.peers[idx].session.is_some()
+                let remote_sid = parse_remote_session_id(remote_session_id);
+                // 已有会话时收到 Offer：上游 `WorkerICE.OnNewOffer`
+                //（worker_ice.go:100-157）的判据，逐条：
+                //
+                // ① 远端带 ID 且与**已记录**的远端 ID 不同 → 重建一次；
+                //    本机 ID 不变（worker_ice.go:117-121：跟随即远端重启时
+                //    改本机 ID 只会在下一帧 OFFER 暴露，双方反复重建），
+                //    远端 ID 记录更新（`!had_session` 分支统一写入）。
+                // ② 远端带 ID 且与记录相同 → 不重建；重复 Offer 照旧回
+                //    ANSWER（上游 handshaker.go:136 无条件 sendAnswer）。
+                // ③ 远端**不带** ID（旧版本客户端）→ **保留本仓的凭证变化
+                //    判据**（Connected + remote_creds 变了）。这是**有意偏离**
+                //    上游「已有 agent + 无 ID → 直接 return」的 skip 语义
+                //    （worker_ice.go:105-109）：那套语义要求对端也发 ID，而
+                //    旧版本永远不发；与旧版本混部时凭证变化是唯一可用的重启
+                //    信号，去掉它就会对着旧对端永远不重建。
+                // ④ 尚未记录远端 ID 而收到带 ID 的帧 = 首次学到：采纳、不重建。
+                //    本仓会话在发起时就已建立（上游的 agent 要等 offer/answer
+                //    才诞生），若把「记录为空」当成「不同」，每一轮首次
+                //    ANSWER/OFFER 都会白重建一次。
+                let recorded_remote_sid = self.peers[idx].remote_session_id;
+                let id_changed = remote_sid
+                    .is_some_and(|sid| recorded_remote_sid.is_some_and(|r| r != sid));
+                let legacy_creds_changed = remote_sid.is_none()
                     && self.peers[idx].state == PeerIceState::Connected
                     && self.peers[idx].remote_creds.as_ref() != Some(&creds);
+                let renegotiate = self.peers[idx].session.is_some()
+                    && (id_changed || legacy_creds_changed);
                 if renegotiate {
                     let peer = &mut self.peers[idx];
                     peer.session = None;
                     // 在跑的收集属于**旧**协商：丢接收端 = 丢掉旧一轮的候选
                     // （worker 自己收尾并关闭它的 dup socket），绝不让旧候选
-                    // 落进新会话。本地凭证不在此列：它终身复用。
+                    // 落进新会话。本地凭证不在此列：它终身复用；本机会话 ID
+                    // 也不换——这是「跟随即远端重启」，不是本地重启。
                     peer.gather = None;
                     peer.locals_done = false;
                     peer.started = false;
@@ -2169,6 +2260,9 @@ impl PeerIceOrchestrator {
                         peer.remote_creds = Some(creds);
                         peer.state = PeerIceState::Gathering;
                         peer.answer_owed = true;
+                        // 记录本帧的远端身份：新会话/重建后的远端身份就是它
+                        // （无 ID 的旧对端记录 `None`，走凭证判据）。
+                        peer.remote_session_id = remote_sid;
                     }
                     match self.start_locals(idx, now_ms, pass_start_ms, "answer") {
                         // host 候选当拍就位（`Gathered`）或 srflx 仍在 worker 上
@@ -2209,6 +2303,12 @@ impl PeerIceOrchestrator {
                     // ③对端换了凭证 → 采纳新凭证；官方 worker 重启 agent 时
                     //   本地凭证（localUfrag/localPwd）不变，我方同理保持本地
                     //   凭证/候选/端口，重发本地候选让对端新 agent 配对。
+                    //
+                    // 会话 ID：走到这里说明「记录为空（首次学到）或与记录相同」，
+                    // 不重建（判据 ②/④）。首次学到就记下来，供后续帧比较。
+                    if remote_sid.is_some() && self.peers[idx].remote_session_id.is_none() {
+                        self.peers[idx].remote_session_id = remote_sid;
+                    }
                     let same_creds =
                         self.peers[idx].remote_creds.as_ref() == Some(&creds);
                     if !same_creds {
@@ -2267,6 +2367,27 @@ impl PeerIceOrchestrator {
             }
             PeerSignalKind::Answer => {
                 let creds = parse_ufrag_pwd(payload)?;
+                let remote_sid = parse_remote_session_id(remote_session_id);
+                // ANSWER 同样经过上游 `OnNewOffer`（handshaker.go:140-156 →
+                // conn.go:260 的 iceListener），所以「远端带 ID 且与记录不同
+                // → 重建」这一条对 ANSWER 也成立；但只有**已记录过**远端 ID
+                // 时才拆——本仓会话在发起时即建立（上游 agent 要等这一帧才
+                // 诞生），首次 ANSWER 是采纳，不是重建。拆会话跟随即远端重启：
+                // 本机 ID 不换（worker_ice.go:117-121）。
+                let id_changed = remote_sid.is_some_and(|sid| {
+                    self.peers[idx].remote_session_id.is_some_and(|r| r != sid)
+                });
+                if id_changed && self.peers[idx].session.is_some() {
+                    let peer = &mut self.peers[idx];
+                    peer.session = None;
+                    peer.gather = None;
+                    peer.locals_done = false;
+                    peer.started = false;
+                    peer.remote_cands_seen = 0;
+                    peer.pending_remote.clear();
+                    peer.session_at_ms = 0;
+                    peer.last_health_ms = 0;
+                }
                 if self.peers[idx].session.is_none() {
                     // 无会话的 ANSWER = 对端应答了**已被拆掉**的那次 OFFER
                     // （拆会话与 ANSWER 到达只差半拍）。
@@ -2297,6 +2418,7 @@ impl PeerIceOrchestrator {
                         peer.remote_creds = Some(creds);
                         peer.state = PeerIceState::Gathering;
                         peer.answer_owed = false;
+                        peer.remote_session_id = remote_sid;
                     }
                     match self.start_locals(idx, now_ms, pass_start_ms, "answer-late") {
                         Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
@@ -2313,6 +2435,11 @@ impl PeerIceOrchestrator {
                     }
                     let _ = self.pump_gather(idx, now_ms, pass_start_ms);
                 } else {
+                    // 不重建：记录首次学到的远端 ID（后续帧据此判断重启），
+                    // 并采纳本帧的远端凭证。
+                    if remote_sid.is_some() && self.peers[idx].remote_session_id.is_none() {
+                        self.peers[idx].remote_session_id = remote_sid;
+                    }
                     let peer = &mut self.peers[idx];
                     peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
                     peer.remote_creds = Some(creds);
@@ -2966,6 +3093,10 @@ impl PeerIceOrchestrator {
     /// `WorkerICE.localUfrag/localPwd` 在 worker 构造时生成一次
     /// （`worker_ice.go:91-97`），`reCreateAgent` 每次都用它
     /// （`worker_ice.go:220-226`）。
+    ///
+    /// 会话 ID 不同：`local_session_id` 首次生成后**只在本地拆会话时换新**
+    /// （[`Self::drop_session`]），重建会话本身不动它——跟随即远端重启时
+    /// 换 ID 会让双方反复重建（`worker_ice.go:117-121`）。
     fn ensure_session(
         &mut self,
         idx: usize,
@@ -2974,6 +3105,9 @@ impl PeerIceOrchestrator {
     ) -> Result<(), ManagementError> {
         if self.peers[idx].session.is_some() {
             return Ok(());
+        }
+        if self.peers[idx].local_session_id.is_none() {
+            self.peers[idx].local_session_id = Some(generate_session_id());
         }
         let creds = match self.peers[idx].local_creds.clone() {
             Some(c) => c,
@@ -3213,16 +3347,29 @@ impl PeerIceOrchestrator {
     /// `SendOffer` 的 `ErrSignalIsNotReady` 会把这一跳的 OFFER 直接丢掉
     /// （`handshaker.go:207-209`），本架构显式失败并把帧留在队列里，重发
     /// 由 guard 的下一跳负责）。
+    ///
+    /// OFFER/ANSWER 带本 peer 的本地会话 ID（`Body.sessionId`，上游
+    /// `signaler.signalOfferAnswer` 的 SessionID 参数）；CANDIDATE 不带。
     fn flush_outbox(&mut self, idx: usize) -> Result<(), ManagementError> {
         loop {
-            let (kind, payload, key) = {
+            let (kind, payload, key, session_id) = {
                 let peer = &mut self.peers[idx];
                 match peer.outbox.front() {
-                    Some((k, p)) => (*k, p.clone(), peer.key.clone()),
+                    Some((k, p)) => (
+                        *k,
+                        p.clone(),
+                        peer.key.clone(),
+                        match k {
+                            PeerSignalKind::Offer | PeerSignalKind::Answer => {
+                                peer.local_session_id.map(|id| id.to_vec())
+                            }
+                            PeerSignalKind::Candidate => None,
+                        },
+                    ),
                     None => return Ok(()),
                 }
             };
-            self.signal.send(&key, kind, &payload, 0)?;
+            self.signal.send(&key, kind, &payload, 0, session_id.as_deref())?;
             self.peers[idx].outbox.pop_front();
         }
     }
@@ -3423,6 +3570,11 @@ impl PeerIceOrchestrator {
     /// （`:591-600`）。**本地凭证不在拆除范围**：`localUfrag/localPwd` 是 per-peer
     /// 的（`worker_ice.go:91-97`），会话重建后照旧广播同一对。
     ///
+    /// **本地会话 ID 换新**：这是本端主动拆 agent 的唯一收口（上游
+    /// `closeAgent` → `renewSessionID`，`worker_ice.go:354-383`）——下一次
+    /// 出站 OFFER/ANSWER 带新 ID，对端据此重建；远端会话 ID 记录同时清空
+    /// （上游 `abandonNegotiation`，`:388-397`）。
+    ///
     /// `state` 由调用方给出：路径死了（Disconnected）还是谈判失败了（Failed）——
     /// 两者对 `summary()/status()` 都意味着不可达，但观测面上不同。
     /// `reason` 只进日志（公开诊断材料）。
@@ -3439,6 +3591,10 @@ impl PeerIceOrchestrator {
         // 免得它的候选落进下一次协商。
         peer.gather = None;
         peer.remote_creds = None;
+        // 本地重启：换本机会话 ID（对端下一帧就看出这是新会话），清远端 ID
+        // 记录（旧会话的远端身份作废）。
+        peer.local_session_id = Some(generate_session_id());
+        peer.remote_session_id = None;
         peer.locals_done = false;
         peer.started = false;
         peer.remote_cands_seen = 0;
@@ -3667,7 +3823,7 @@ mod tests {
         exchange.set_relay_address(Some("rels://relay.example:28443".into()));
 
         for kind in [PeerSignalKind::Offer, PeerSignalKind::Answer] {
-            exchange.send("REMOTEKEY", kind, "ufrag:pwd", 51_820).expect("queued");
+            exchange.send("REMOTEKEY", kind, "ufrag:pwd", 51_820, None).expect("queued");
             let out = rx.try_recv().expect("frame queued");
             assert_eq!(out.remote_key, "REMOTEKEY");
             assert_eq!(out.payload, "ufrag:pwd");
@@ -3680,10 +3836,26 @@ mod tests {
         }
         // candidate stays field-free (upstream candidate bodies never carry it)
         exchange
-            .send("REMOTEKEY", PeerSignalKind::Candidate, "cand", 0)
+            .send("REMOTEKEY", PeerSignalKind::Candidate, "cand", 0, None)
             .expect("queued");
         let out = rx.try_recv().expect("frame queued");
         assert_eq!(out.relay_server_address, None, "candidate must stay field-free");
+
+        // 会话 ID 与 relay 地址同域：OFFER/ANSWER 原样进 `SignalOutgoing`
+        // （随后由 build_message 写进 `Body.sessionId`），CANDIDATE 一律不带。
+        let sid: [u8; 5] = [1, 2, 3, 4, 5];
+        for kind in [PeerSignalKind::Offer, PeerSignalKind::Answer] {
+            exchange
+                .send("REMOTEKEY", kind, "ufrag:pwd", 51_820, Some(&sid[..]))
+                .expect("queued");
+            let out = rx.try_recv().expect("frame queued");
+            assert_eq!(out.session_id, Some(sid.to_vec()), "{kind:?} carries the session id");
+        }
+        exchange
+            .send("REMOTEKEY", PeerSignalKind::Candidate, "cand", 0, Some(&sid[..]))
+            .expect("queued");
+        let out = rx.try_recv().expect("frame queued");
+        assert_eq!(out.session_id, None, "candidate never carries a session id");
     }
 
     /// 回归：未广告（slot 为 `None`，含清除后）所有出帧不带中继字段——
@@ -3694,18 +3866,18 @@ mod tests {
         exchange.registered.store(true, Ordering::Release);
         assert_eq!(exchange.relay_address(), None, "fresh exchange: nothing advertised");
 
-        exchange.send("R", PeerSignalKind::Offer, "u:p", 1).expect("queued");
+        exchange.send("R", PeerSignalKind::Offer, "u:p", 1, None).expect("queued");
         assert_eq!(rx.try_recv().expect("frame").relay_server_address, None);
 
         // advertise, then management stops advertising → back to field-free
         exchange.set_relay_address(Some("rel://a.example:1".into()));
-        exchange.send("R", PeerSignalKind::Answer, "u:p", 1).expect("queued");
+        exchange.send("R", PeerSignalKind::Answer, "u:p", 1, None).expect("queued");
         assert_eq!(
             rx.try_recv().expect("frame").relay_server_address,
             Some("rel://a.example:1".into())
         );
         exchange.set_relay_address(None);
-        exchange.send("R", PeerSignalKind::Offer, "u:p", 1).expect("queued");
+        exchange.send("R", PeerSignalKind::Offer, "u:p", 1, None).expect("queued");
         assert_eq!(rx.try_recv().expect("frame").relay_server_address, None);
     }
 
@@ -3782,6 +3954,7 @@ mod tests {
                 kind: PeerSignalKind,
                 payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 self.frames
                     .lock()
@@ -3907,6 +4080,7 @@ mod tests {
                 kind: PeerSignalKind,
                 payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 self.frames
                     .lock()
@@ -4149,6 +4323,7 @@ mod tests {
                 kind: PeerSignalKind,
                 payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 self.frames
                     .lock()
@@ -4240,6 +4415,7 @@ mod tests {
                 kind: PeerSignalKind,
                 payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 self.frames
                     .lock()
@@ -4316,6 +4492,7 @@ mod tests {
                 kind: PeerSignalKind,
                 payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 self.frames
                     .lock()
@@ -5613,6 +5790,7 @@ mod tests {
             kind: PeerSignalKind,
             payload: &str,
             _port: u32,
+            _session_id: Option<&[u8]>,
         ) -> Result<(), ManagementError> {
             self.frames
                 .lock()
@@ -6039,6 +6217,260 @@ mod tests {
                     && *payload == format!("{}:{}", creds.ufrag, creds.pwd)),
             "the fresh negotiation signals an OFFER with the stable credentials"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // per-peer ICE 会话身份（上游 PR #7814 / v0.81.0，worker_ice.go:100-157）
+    // -------------------------------------------------------------------
+
+    /// 记录出帧会话 ID 的 signal seam：`SignalExchange::send` 收到的
+    /// `session_id` 就是 OFFER/ANSWER 的 `Body.sessionId` 输入（由
+    /// `signal::SignalClient::build_message` 写进 Body，见 signal.rs 用例）。
+    #[derive(Default)]
+    struct SessionIdLog {
+        frames: Mutex<Vec<(PeerSignalKind, Option<Vec<u8>>)>>,
+    }
+
+    impl SignalExchange for SessionIdLog {
+        fn send(
+            &self,
+            _to_key: &str,
+            kind: PeerSignalKind,
+            _payload: &str,
+            _port: u32,
+            session_id: Option<&[u8]>,
+        ) -> Result<(), ManagementError> {
+            self.frames
+                .lock()
+                .expect("frames")
+                .push((kind, session_id.map(<[u8]>::to_vec)));
+            Ok(())
+        }
+    }
+
+    impl SessionIdLog {
+        fn ids(&self, kind: PeerSignalKind) -> Vec<Option<Vec<u8>>> {
+            self.frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, id)| id.clone())
+                .collect()
+        }
+
+        fn last(&self, kind: PeerSignalKind) -> Option<Option<Vec<u8>>> {
+            self.ids(kind).pop()
+        }
+    }
+
+    /// 单接口 + 4 枚受保护 socket + 会话 ID 记录 seam 的编排器（一个 peer）。
+    fn session_id_orch(peer: &str) -> (PeerIceOrchestrator, Arc<SessionIdLog>) {
+        let socks =
+            Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..4 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let signal = Arc::new(SessionIdLog::default());
+        let mut orch = test_orch(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        seed_guard(&mut orch);
+        orch.set_peers(&[peer.to_string()]);
+        orch.set_signal_ready(true);
+        (orch, signal)
+    }
+
+    /// 上游 `worker_ice.go:100-157` 的判据主支：远端带了**不同的** session
+    /// id → 重建一次，**本机 ID 不变**，记录的远端 ID 更新；同一 ID 再来
+    /// → 零重建。本仓的会话在发起时即建（上游 agent 要等 offer/answer），
+    /// 所以「首次学到远端 ID」是采纳，不是重建（见 `remote_session_id`
+    /// 的记录条件）。
+    #[test]
+    fn remote_session_id_change_rebuilds_once_and_keeps_the_local_id() {
+        let (mut orch, signal) = session_id_orch("PPPPpeer");
+        const T0: u64 = 1_000;
+        orch.run_once(T0).expect("initiate");
+        let local = orch.peers[0].local_session_id.expect("local session id generated");
+        let first_offer_id = signal.last(PeerSignalKind::Offer).expect("one OFFER");
+        assert_eq!(first_offer_id, Some(local.to_vec()), "OFFER advertises the local session id");
+        assert!(
+            signal.ids(PeerSignalKind::Candidate).iter().all(Option::is_none),
+            "CANDIDATE frames never carry a session id (upstream signaler.go:32-38)"
+        );
+
+        // 远端 ANSWER 首次带 ID：**采纳**（session 已有，但远端 ID 尚未记录）。
+        let sid1: [u8; 5] = [7, 7, 7, 7, 7];
+        let answer_creds = "wxyz:0123456789012345678901";
+        orch.handle_signal_with_session_id(
+            "PPPPpeer",
+            PeerSignalKind::Answer,
+            answer_creds,
+            Some(&sid1[..]),
+            1_100,
+        )
+        .expect("answer with session id");
+        assert_eq!(orch.peers[0].remote_session_id, Some(sid1));
+        assert_eq!(
+            orch.peers[0].session_at_ms, T0,
+            "learning the first remote session id is adoption, not a rebuild"
+        );
+
+        // 远端 OFFER 带**新的** ID：重建恰好一次，本机 ID 不变。
+        let sid2: [u8; 5] = [9, 9, 9, 9, 9];
+        let offer_creds = "abcd:0123456789012345678901";
+        orch.handle_signal_with_session_id(
+            "PPPPpeer",
+            PeerSignalKind::Offer,
+            offer_creds,
+            Some(&sid2[..]),
+            2_000,
+        )
+        .expect("offer with a new session id");
+        assert_eq!(
+            orch.peers[0].session_at_ms, 2_000,
+            "a changed remote session id rebuilds the session"
+        );
+        assert_eq!(
+            orch.peers[0].local_session_id,
+            Some(local),
+            "following a REMOTE restart must keep OUR advertised id (worker_ice.go:117-121)"
+        );
+        assert_eq!(orch.peers[0].remote_session_id, Some(sid2), "the record follows the remote id");
+
+        // 同一个新 ID 再来：零重建。
+        orch.handle_signal_with_session_id(
+            "PPPPpeer",
+            PeerSignalKind::Offer,
+            offer_creds,
+            Some(&sid2[..]),
+            3_000,
+        )
+        .expect("duplicate offer with the same session id");
+        assert_eq!(
+            orch.peers[0].session_at_ms, 2_000,
+            "the same remote session id never rebuilds"
+        );
+        assert_eq!(orch.peers[0].local_session_id, Some(local));
+    }
+
+    /// 同一远端 ID 重复投递（Offer 与 Answer 都算）→ 零重建；本机 ID 也不换。
+    #[test]
+    fn same_remote_session_id_repeated_delivery_is_not_a_restart() {
+        let (mut orch, _signal) = session_id_orch("PPPPpeer");
+        const T0: u64 = 1_000;
+        orch.run_once(T0).expect("initiate");
+        let local = orch.peers[0].local_session_id.expect("local id");
+        let sid: [u8; 5] = [1, 2, 3, 4, 5];
+        let creds = "abcd:0123456789012345678901";
+
+        for t in [1_100u64, 1_200] {
+            orch.handle_signal_with_session_id(
+                "PPPPpeer",
+                PeerSignalKind::Offer,
+                creds,
+                Some(&sid[..]),
+                t,
+            )
+            .expect("offer");
+            orch.handle_signal_with_session_id(
+                "PPPPpeer",
+                PeerSignalKind::Answer,
+                creds,
+                Some(&sid[..]),
+                t,
+            )
+            .expect("answer");
+            assert_eq!(orch.peers[0].session_at_ms, T0, "same id at t={t}: no rebuild");
+        }
+        assert_eq!(orch.peers[0].remote_session_id, Some(sid));
+        assert_eq!(orch.peers[0].local_session_id, Some(local));
+    }
+
+    /// **有意偏离上游**（`worker_ice.go:105-109`：已有 agent + 远端无 ID →
+    /// 直接 return）：远端不带 ID（旧版本客户端）时保留本仓的**凭证变化**
+    /// 判据——与旧版本混部时这是唯一可用的重启信号。带 ID 的路径不受影响
+    /// （上面的用例钉住）。
+    #[test]
+    fn legacy_remote_without_session_id_keeps_the_credential_change_criterion() {
+        let (mut orch, _signal) = session_id_orch("PPPPpeer");
+        const T0: u64 = 1_000;
+        orch.run_once(T0).expect("initiate");
+        let local = orch.peers[0].local_session_id.expect("local id");
+        // 旧版对端先回一个无 ID 的 ANSWER（远端凭证就位），再把状态设成
+        // Connected——这正是旧判据的触发形状。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1_050)
+            .expect("answer");
+        orch.peers[0].state = PeerIceState::Connected; // white-box: legacy 判据要求 Connected
+
+        // 同凭证 + 无 ID → 不重建
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678901", 1_100)
+            .expect("same-creds legacy offer");
+        assert_eq!(orch.peers[0].session_at_ms, T0, "no credential change → no rebuild");
+        assert_eq!(orch.peers[0].remote_session_id, None, "a legacy peer records no session id");
+
+        // 新凭证 + 无 ID（旧版对端重启）→ 仍按旧判据重建；本机 ID 不变。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "abcd:0123456789012345678901", 2_000)
+            .expect("changed-creds legacy offer");
+        assert_eq!(
+            orch.peers[0].session_at_ms, 2_000,
+            "legacy backward compatibility: a credential change still rebuilds"
+        );
+        assert_eq!(orch.peers[0].local_session_id, Some(local), "local id survives");
+        assert_eq!(orch.peers[0].remote_session_id, None, "still no remote id to record");
+    }
+
+    /// 本地重启点（`drop_session`，上游 `closeAgent` → `renewSessionID`）：
+    /// 本地 ID 换新，下一帧出站 OFFER 携带新值；远端态（含远端 ID）清空。
+    #[test]
+    fn local_drop_session_renews_the_id_and_the_next_offer_advertises_it() {
+        let (mut orch, signal) = session_id_orch("PPPPpeer");
+        const T0: u64 = 1_000;
+        orch.run_once(T0).expect("initiate");
+        let old_id = orch.peers[0].local_session_id.expect("local id");
+        assert_eq!(
+            signal.last(PeerSignalKind::Offer).expect("offer"),
+            Some(old_id.to_vec())
+        );
+        // 先记录一个远端 ID，验证拆会话清远端态、且不换本机 ID 的“跟随”语义
+        // 与“本地重启”区分开。
+        let sid: [u8; 5] = [3, 3, 3, 3, 3];
+        orch.handle_signal_with_session_id(
+            "PPPPpeer",
+            PeerSignalKind::Answer,
+            "wxyz:0123456789012345678901",
+            Some(&sid[..]),
+            1_100,
+        )
+        .expect("answer");
+        assert_eq!(orch.peers[0].remote_session_id, Some(sid));
+
+        orch.drop_session(0, PeerIceState::Failed, "test-local-restart");
+        let new_id = orch.peers[0].local_session_id.expect("renewed id");
+        assert_ne!(old_id, new_id, "a local teardown renews the session id");
+        assert_eq!(orch.peers[0].remote_session_id, None, "the remote id is remote state");
+
+        // guard 的下一跳（T0+3 s，GuardRng(0.5)）重新发起 → OFFER 带新 ID。
+        orch.run_once(4_000).expect("guard hop re-initiates");
+        let offers = signal.ids(PeerSignalKind::Offer);
+        assert_eq!(
+            offers.last().expect("a fresh OFFER"),
+            &Some(new_id.to_vec()),
+            "the first OFFER after a local restart advertises the NEW id"
+        );
+        assert_eq!(orch.peers[0].local_session_id, Some(new_id));
     }
 
     // -------------------------------------------------------------------
@@ -6498,6 +6930,7 @@ mod tests {
                 _kind: PeerSignalKind,
                 _payload: &str,
                 _port: u32,
+                _session_id: Option<&[u8]>,
             ) -> Result<(), ManagementError> {
                 Err(ManagementError::Network("signal-stream-not-registered".into()))
             }

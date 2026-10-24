@@ -529,10 +529,22 @@ impl SignalClient {
             })?;
         request.metadata_mut().insert(HEADER_ID, value);
 
-        let response = self
-            .stub
-            .connect_stream(request)
+        // The registration WAIT is bounded by the client-wide request
+        // timeout (`DEFAULT_REQUEST_TIMEOUT` = 10 s in production; upstream
+        // PR #8175 `defaultRegistrationTimeout`): a server (or middlebox)
+        // that accepts the ConnectStream but never sends the confirm header
+        // must not hang registration forever. This is a TIMER ON THE WAIT,
+        // not a deadline on the stream: on expiry the pending response
+        // future is dropped (which cancels that unconfirmed stream), while
+        // a REGISTERED stream keeps living under no deadline at all — this
+        // is why `Endpoint::timeout()` / a request-metadata deadline (both
+        // of which would kill the long-lived stream) are NOT used here.
+        // `Timeout` is deliberately non-Auth, so `run_events` sends the
+        // session down Broken → backoff → re-register (see the error
+        // classification in `run_events_with_outbox_ref`).
+        let response = tokio::time::timeout(self.request_timeout, self.stub.connect_stream(request))
             .await
+            .map_err(|_| ManagementError::Timeout)?
             .map_err(map_grpc_status)?;
         let registered = response.metadata().get(HEADER_REGISTERED).ok_or_else(|| {
             ManagementError::Parse(
@@ -590,8 +602,13 @@ impl SignalClient {
 
     /// Build a plaintext (not yet sealed) `Message` — the
     /// `MarshalCredential` shape (client.go:74-97) minus the fields this
-    /// client does not produce yet (rosenpass, features, mode, sessionId):
-    /// set explicitly on the returned `body` if ever needed.
+    /// client does not produce yet (rosenpass, features, mode): set
+    /// explicitly on the returned `body` if ever needed.
+    ///
+    /// `session_id` is OUR per-peer ICE session ID (5 raw random bytes,
+    /// `Body.sessionId` field 10 of signalexchange.proto). Upstream stamps
+    /// it into OFFER and ANSWER only (`signaler.go:50-68`; CANDIDATE bodies
+    /// never carry it) — every other caller passes `None`.
     ///
     /// `relay_server_address` is OUR relay server URL (`Body` field 8,
     /// `relayServerAddress`, signalexchange.proto L66-67) — upstream stamps
@@ -616,6 +633,7 @@ impl SignalClient {
         payload: impl Into<String>,
         wg_listen_port: u32,
         relay_server_address: Option<&str>,
+        session_id: Option<&[u8]>,
     ) -> proto::Message {
         proto::Message {
             key: self.keys.public_key_base64(),
@@ -626,6 +644,7 @@ impl SignalClient {
                 wg_listen_port,
                 net_bird_version: SIGNAL_CLIENT_VERSION.to_string(),
                 relay_server_address: relay_server_address.map(str::to_string),
+                session_id: session_id.map(<[u8]>::to_vec),
                 ..Default::default()
             }),
         }
@@ -659,6 +678,7 @@ impl SignalClient {
             proto::body::Type::Heartbeat,
             "",
             0,
+            None,
             None,
         );
         self.send(&msg).await
@@ -697,6 +717,10 @@ pub struct SignalOutgoing {
     /// `None` = field absent (CANDIDATE/HEARTBEAT never carry it upstream;
     /// no-relay deployments stay field-free).
     pub relay_server_address: Option<String>,
+    /// OUR per-peer ICE session ID (`Body.sessionId`, field 10) for
+    /// OFFER/ANSWER; `None` for CANDIDATE/HEARTBEAT (upstream
+    /// `signaler.go:50-68` only stamps offer/answer).
+    pub session_id: Option<Vec<u8>>,
 }
 
 /// Long-lived signal session with upstream-shaped reconnect: register the
@@ -835,6 +859,7 @@ impl SignalSession {
             out.payload.as_str(),
             out.wg_listen_port,
             out.relay_server_address.as_deref(),
+            out.session_id.as_deref(),
         );
         self.client.send(&msg).await
     }
@@ -1221,6 +1246,7 @@ mod tests {
             "ufrag:pwd",
             51_820,
             None,
+            None,
         );
         assert_eq!(msg.key, c.keys.public_key_base64());
         assert_eq!(msg.remote_key, "REMOTEKEY");
@@ -1245,6 +1271,7 @@ mod tests {
                 "ufrag:pwd",
                 51_820,
                 Some("rels://relay.example:28443"),
+                None,
             );
             assert_eq!(msg.key, c.keys.public_key_base64());
             assert_eq!(msg.remote_key, "REMOTEKEY");
@@ -1278,6 +1305,7 @@ mod tests {
             "ufrag:pwd",
             51_820,
             None,
+            None,
         );
         let body = msg.body.as_ref().expect("body");
         assert_eq!(body.relay_server_address, None);
@@ -1297,6 +1325,7 @@ mod tests {
             "ufragA:pwdA",
             51_820,
             Some("rels://relay.example:28443"),
+            None,
         );
         let wire = alice.encrypt_message(&msg).unwrap();
         let opened = bob.decrypt_envelope(&wire).unwrap();
@@ -1305,6 +1334,49 @@ mod tests {
         assert_eq!(
             opened.relay_server_address.as_deref(),
             Some("rels://relay.example:28443")
+        );
+    }
+
+    /// per-peer ICE 会话身份（上游 PR #7814 / v0.81.0）：`Body.sessionId`
+    /// （字段 10）原样写进明文，经真实信封往返后读侧仍可见；CANDIDATE
+    /// 不带（上游 `signaler.go:50-68`）。
+    #[tokio::test]
+    async fn build_message_carries_session_id_and_it_survives_the_envelope() {
+        let alice = client();
+        let bob = client();
+        let sid: [u8; 5] = [9, 8, 7, 6, 5];
+        let offer = alice.build_message(
+            &bob.keys.public_key_base64(),
+            proto::body::Type::Offer,
+            "ufragA:pwdA",
+            51_820,
+            None,
+            Some(&sid[..]),
+        );
+        assert_eq!(
+            offer.body.as_ref().expect("body").session_id.as_deref(),
+            Some(&sid[..]),
+            "Body.sessionId is written verbatim"
+        );
+        let wire = alice.encrypt_message(&offer).unwrap();
+        let opened = bob.decrypt_envelope(&wire).unwrap();
+        assert_eq!(
+            opened.session_id.as_deref(),
+            Some(&sid[..]),
+            "Body.sessionId survives the envelope round-trip"
+        );
+
+        let cand = alice.build_message(
+            &bob.keys.public_key_base64(),
+            proto::body::Type::Candidate,
+            "candidate-1",
+            0,
+            None,
+            None,
+        );
+        assert!(
+            cand.body.as_ref().expect("body").session_id.is_none(),
+            "CANDIDATE never carries a session id (upstream signaler.go:32-38)"
         );
     }
 
@@ -1317,6 +1389,7 @@ mod tests {
             proto::body::Type::Candidate,
             "candidate-1",
             0,
+            None,
             None,
         );
         let wire = alice.encrypt_message(&msg).unwrap();
@@ -1345,6 +1418,7 @@ mod tests {
             proto::body::Type::Offer,
             "u:p",
             0,
+            None,
             None,
         );
         let wire = alice.encrypt_message(&msg).unwrap();
@@ -1386,7 +1460,7 @@ mod tests {
             c.encrypt_message(&empty),
             Err(ManagementError::Request { status: 0, .. })
         ));
-        let msg = c.build_message("not-base64!!!", proto::body::Type::Offer, "", 0, None);
+        let msg = c.build_message("not-base64!!!", proto::body::Type::Offer, "", 0, None, None);
         assert!(matches!(
             c.encrypt_message(&msg),
             Err(ManagementError::Parse(_))

@@ -987,6 +987,7 @@ impl SignalExchange for MockSignalEndpoint {
         kind: PeerSignalKind,
         payload: &str,
         _port: u32,
+        _session_id: Option<&[u8]>,
     ) -> Result<(), netbird_core::management::ManagementError> {
         self.bus.push(Frame {
             from: self.me.clone(),

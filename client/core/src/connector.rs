@@ -4102,6 +4102,15 @@ impl RelayCarrier {
     /// invalid state and drops, or (b) commits BEFORE the invalidator — whose
     /// detach, under the same lock, then removes the lane. Either way a
     /// removed/stopped/swapped carrier is never resurrected by a late open.
+    /// The lane's OWN relay client reaching the terminal `Dead`
+    /// (`client.stop()` — management revoking the relay / teardown) is the
+    /// same kind of invalidation: the pump's terminal exit
+    /// ([`RelayCarrier::finish_transport_unavailable`]) detaches every lane
+    /// and returns, so a commit AFTER it would leave an orphan lane no sweep
+    /// or watchdog could find (`carrier_attached` stuck true). Only `Dead`
+    /// is rejected — `Disconnected`/`Dialing`/`Handshaking`/
+    /// `Authenticating`/`Reconnecting` are transient, and a lane opened
+    /// during a transient outage is legitimate.
     /// `via` (the canonical relay URL the lane rides) is stored WITH the
     /// lane: the attached table is the stale-lane reconcile input (a lane
     /// on the wrong server is detached and re-opened) and the foreign
@@ -4118,6 +4127,10 @@ impl RelayCarrier {
         let still_wanted =
             *lifecycle
                 && self.client_is_live(&client)
+                // TERMINAL: the pump that owned this client may already have
+                // run `detach_all()` and returned — a lane committed now
+                // would never be swept.
+                && client.state() != crate::relay_client::RelayState::Dead
                 && self
                     .peers
                     .lock()
@@ -4512,6 +4525,29 @@ impl RelayCarrier {
             self.retire_foreign(&url, entry, "teardown");
         }
     }
+
+    /// ONE fail-closed finish for a pump exit that leaves NO usable relay
+    /// transport (client slot cleared / terminal `Dead` / `recv` drained):
+    /// publish the shared transport down, take every lane off the WG seam
+    /// ([`RelayCarrier::detach_all`] — lane table, the device's per-key
+    /// carrier and the per-peer ICE reset in one choke point) and abort every
+    /// outstanding lane open so nothing attaches after this point.
+    ///
+    /// The lane table is the ONLY carrier lifetime the WG seam has (no TTL /
+    /// lease in `wg_device.rs`, no watchdog reaps it): a lane that outlives
+    /// its relay client keeps `carrier_attached(key)` true, so the ICE guard
+    /// keeps treating relay as a usable path for that peer (`PartiallyConnected`
+    /// instead of the aggressive `Disconnected` re-offer).
+    ///
+    /// Locking: the pump's exit paths hold no carrier lock, so
+    /// [`RelayCarrier::detach_all`] taking `lifecycle` itself (and the WG
+    /// seam's `detach_carrier` running outside it) cannot deadlock — the exact
+    /// order of the transient-outage arm (`lifecycle` → bridge leaf).
+    fn finish_transport_unavailable(&self) {
+        self.relay_plane.set_transport_up(false);
+        self.detach_all();
+        self.abort_pending_lanes();
+    }
 }
 
 /// The production pump loop: lane opens are FANNED OUT as managed per-peer
@@ -4520,28 +4556,33 @@ impl RelayCarrier {
 /// OFFER/ANSWER asked for (upstream `WorkerRelay.OnNewOffer`,
 /// worker_relay.go:44-90); inbound frames are pumped between passes. Exits
 /// when the client stops (recv drained to `None`) or the state machine
-/// reaches `Dead` — teardown additionally aborts this task.
+/// reaches `Dead` — EVERY exit fails closed (transport down + every lane
+/// detached + pending opens aborted), because a lane must never outlive the
+/// client that pumps it; teardown additionally aborts this task.
 async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
     loop {
-        let Some(client) = carrier
+        // Clone the handle in its own statement: the exit paths below call
+        // `detach_all` (which takes `lifecycle`), so no `client` guard may be
+        // alive there (`attach_client` takes `lifecycle` → `client`).
+        let client = carrier
             .client
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        else {
-            carrier.relay_plane.set_transport_up(false);
+            .clone();
+        let Some(client) = client else {
+            // No client at all — same fail-closed finish as `Dead`.
+            carrier.finish_transport_unavailable();
             carrier.relay_plane.set_relay_available(false);
-            carrier.abort_pending_lanes();
             return;
         };
         match client.state() {
             crate::relay_client::RelayState::Dead => {
                 // Permanently stopped (management revoked the relay / teardown):
-                // the local relay service is gone — unlike a transient outage,
-                // which leaves `relay_available` true.
-                carrier.relay_plane.set_transport_up(false);
+                // the lane dies with the client and the local relay service is
+                // gone — unlike a transient outage, which leaves
+                // `relay_available` true.
+                carrier.finish_transport_unavailable();
                 carrier.relay_plane.set_relay_available(false);
-                carrier.abort_pending_lanes();
                 return;
             }
             crate::relay_client::RelayState::Ready => {
@@ -4574,10 +4615,15 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
                     }
                 }
             } => {
-                carrier.abort_pending_lanes();
                 if !kept {
+                    // The inbound queue drained: the worker exited to the
+                    // terminal `Dead` without the state check above observing
+                    // it. Same fail-closed finish — the client that pumped
+                    // these lanes is gone.
+                    carrier.finish_transport_unavailable();
                     return;
                 }
+                carrier.abort_pending_lanes();
             }
             _ = tokio::time::sleep(core::time::Duration::from_millis(500)) => {
                 // periodic re-check: requested lanes to open / presence edges /
@@ -6031,7 +6077,13 @@ fn route_signal_message(
         }
     ));
     let mut guard = orch.lock_poison();
-    if let Err(e) = guard.handle_signal(&m.from_key, kind, &m.payload, now) {
+    if let Err(e) = guard.handle_signal_with_session_id(
+        &m.from_key,
+        kind,
+        &m.payload,
+        m.session_id.as_deref(),
+        now,
+    ) {
         if kind == PeerSignalKind::Candidate {
             let fields: Vec<&str> = m.payload.split_whitespace().take(9).collect();
             let candidate_type = match fields.get(7).copied() {
@@ -15136,6 +15188,213 @@ mod tests {
             !link.relay_available(),
             "teardown leaves no local relay service behind"
         );
+    }
+
+    /// 终态收尾（缺陷回归）：home relay 客户端进入终态（`stop()` ⇒
+    /// `RelayState::Dead`，管理面撤销 relay 的同一状态）时，pump 的**每一条**
+    /// 退出路径都必须把 WG seam 上的**每一条** lane 卸掉、把共享传输发布为
+    /// down，并把每个 peer 的 relay 断连报给 ICE 平面。
+    ///
+    /// 漏掉其中之一就是本次缺陷：lane 在 `wg_device` 里没有 TTL/lease，只有
+    /// 显式 detach 才消失，于是 `carrier_attached(key)` 仍为 true → guard 仍
+    /// 把 relay 当可用路径 → ICE 未连上的 peer 判 `PartiallyConnected`（预算
+    /// 耗尽转每小时）而不是 `Disconnected`（激进退避）；`peer_relays` 仍列出
+    /// 不存在的 lane；`take_relay_disconnects()` 为空（没有任何 per-peer 复位）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_pump_terminal_exit_detaches_every_lane_and_reports_it() {
+        let (server, wg, carrier, link, client) = relay_guard_fixture().await;
+        let pub_a = relay_lane_key(0xA1);
+        let pub_b = relay_lane_key(0xB2);
+        let _remote_a = relay_remote(
+            &server,
+            &PeerId::from_wg_pubkey_string(&pub_a),
+            &relay_fabricated_token(1_800_003_600),
+        )
+        .await;
+        let _remote_b = relay_remote(
+            &server,
+            &PeerId::from_wg_pubkey_string(&pub_b),
+            &relay_fabricated_token(1_800_003_600),
+        )
+        .await;
+        carrier.set_peers(&[pub_a.clone(), pub_b.clone()]);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+        carrier.note_remote_relay_support(&pub_a, true);
+        carrier.note_remote_relay_support(&pub_b, true);
+        carrier.request_lane(&pub_a);
+        carrier.request_lane(&pub_b);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.lane_count() == 2).await,
+            "both requested lanes must attach (stats={:?})",
+            carrier.stats()
+        );
+        assert!(wg.carrier_attached(&pub_a) && wg.carrier_attached(&pub_b));
+        assert!(link.transport_up(), "a Ready client keeps the shared transport published up");
+
+        // 终态：管理面撤销 / teardown 走同一条 `stop()` → worker 退出到 `Dead`。
+        client.stop();
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || client.state() == RelayState::Dead).await,
+            "the stopped relay client must reach Dead"
+        );
+
+        // ≤2 s 内四条同时成立：lane 表空、两个 key 的 WG 承载都卸掉、共享
+        // 传输发布为 down、两个 key 的 relay 断连都被报出。`take_relay_disconnects`
+        // 是排空的，所以跨轮次累计（生产者在 seam detach 循环之后立刻批量
+        // 发布，累计只是避免踩那一瞬间）。
+        let mut reported: Vec<String> = Vec::new();
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || {
+                reported.extend(link.take_relay_disconnects());
+                carrier.lane_count() == 0
+                    && !wg.carrier_attached(&pub_a)
+                    && !wg.carrier_attached(&pub_b)
+                    && !link.transport_up()
+                    && reported.len() >= 2
+            })
+            .await,
+            "the terminal pump exit must fail closed (lanes={} a={} b={} transport_up={} \
+             reported={reported:?} stats={:?})",
+            carrier.lane_count(),
+            wg.carrier_attached(&pub_a),
+            wg.carrier_attached(&pub_b),
+            link.transport_up(),
+            carrier.stats()
+        );
+        let mut expected = vec![pub_a.clone(), pub_b.clone()];
+        reported.sort();
+        expected.sort();
+        assert_eq!(reported, expected, "each attached peer gets its per-peer relay reset");
+        carrier.shutdown();
+    }
+
+    /// 终态窗口（缺陷回归）：一条 lane 的 `open_conn().await` 已经飞出去，pump
+    /// 在终态退出时 `detach_all()` 干净收尾，然后这条 open 才拿到 lifecycle
+    /// 完成提交——提交点必须发现该 lane 所属的 client 已经 `Dead` 并丢弃。
+    ///
+    /// 漏掉这一条就是孤儿 lane：pump 已经 return、carrier 没有 TTL/看门狗，
+    /// 这条 lane 会一直挂在 WG seam 上（`carrier_attached(key)` 持续 true →
+    /// guard 仍把 relay 当可用路径），直到下次 `attach_client` 或 teardown。
+    ///
+    /// 这里直接调提交点（测试可见入口）：pump 在 fixture 里**没有**启动，所以
+    /// 唯一可能清理/拒绝这次提交的就是 `commit_lane_open` 自己；`Dead` 之后
+    /// client 槽仍持有该 handle、peer 仍在映射里——只有终态能拒绝它。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_lane_open_resolving_after_the_client_went_dead_is_dropped() {
+        let (_server, wg, carrier, _link, client) = relay_guard_fixture().await;
+        let pub_key = relay_lane_key(0xA1);
+        let pid = PeerId::from_wg_pubkey_string(&pub_key);
+        carrier.set_peers(&[pub_key.clone()]);
+        // The lane's `via`, captured while the client is still live — exactly
+        // what `ensure_lane` resolved before its await.
+        let via = client.stats().current_url.expect("a Ready client has a live relay URL");
+
+        // Premise: nothing is attached, no open is in flight.
+        assert_eq!(carrier.lane_count(), 0);
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "premise: no pending open before the late commit"
+        );
+
+        // Terminal: `stop()` drives the worker to `Dead` (management revoking
+        // the relay and teardown take the same path).
+        client.stop();
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || client.state() == RelayState::Dead).await,
+            "the stopped relay client must reach Dead"
+        );
+        assert!(carrier.has_client(&client), "premise: the dead handle is still armed");
+        assert_eq!(
+            carrier.peers.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            1,
+            "premise: the peer is still mapped (only the TERMINAL state may reject)"
+        );
+
+        // The lane open resolves only NOW (after the terminal detach_all).
+        let committed = carrier.commit_lane_open(&pub_key, pid, client.clone(), via);
+        assert!(
+            !committed && carrier.lane_count() == 0 && !wg.carrier_attached(&pub_key),
+            "a lane commit resolving after the client reached Dead must be dropped \
+             (committed={committed} lanes={} attached={} stats={:?})",
+            carrier.lane_count(),
+            wg.carrier_attached(&pub_key),
+            carrier.stats()
+        );
+        assert_eq!(carrier.lane_count(), 0, "no lane may survive on a Dead client");
+        assert!(
+            !wg.carrier_attached(&pub_key),
+            "the WG seam must not hold a lane for a Dead client"
+        );
+        assert!(
+            carrier.attached.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "the attached table must not gain a half-open entry"
+        );
+        assert!(carrier.peer_relays().is_empty(), "no lane may be reported to the ICE plane");
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "the refused commit must not leave a pending open behind"
+        );
+        assert!(
+            carrier.lane_requests.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "the refused commit must not leave a lane request behind"
+        );
+        assert_eq!(carrier.stats().lanes_open_ok, 0, "the refused commit is not a successful open");
+        assert_eq!(carrier.stats().attach_ok, 0, "the refused commit must not attach");
+
+        carrier.shutdown();
+    }
+
+    /// 非终态**不**拒绝（语义保守性）：client 停在瞬时掉线的 `Reconnecting`
+    /// 时，迟到的 lane open 提交照常被接受——只有终态 `Dead` 才丢。这里用
+    /// 冻结 VirtualClock 上的过期 token hold 得到**稳定**的 `Reconnecting`
+    /// （worker 在 token gate 上 fail-closed 停住，且不会自行前进到 Ready）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lane_commit_while_the_relay_client_reconnects_is_still_accepted() {
+        let server = RelayTestServer::start(TestServerConfig::default())
+            .await
+            .expect("fake relay server");
+        let unix_base: u64 = 1_800_000_000;
+        let clock = std::sync::Arc::new(crate::relay_client::VirtualClock::new(unix_base));
+        let client = crate::relay_client::RelayClient::start(
+            crate::relay_client::RelayClientConfig::new(
+                &[format!("rel://127.0.0.1:{}", server.addr().port())],
+                &relay_lane_key(0xC3),
+                relay_fabricated_token(unix_base - 1),
+            )
+            .expect("relay config")
+            .with_clock(clock)
+            .with_dialer(std::sync::Arc::new(crate::relay_client::TcpDialer)),
+        )
+        .expect("relay client starts");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || client.state() == RelayState::Reconnecting)
+                .await,
+            "an expired token parks the client in the Reconnecting hold (state={:?})",
+            client.state()
+        );
+        let wg = std::sync::Arc::new(GuardSeamWg::default());
+        let carrier =
+            RelayCarrier::new(wg.clone() as std::sync::Arc<dyn WgPeerApplier>);
+        carrier.attach_client(client.clone());
+        let pub_key = relay_lane_key(0xA1);
+        carrier.set_peers(&[pub_key.clone()]);
+        let via = format!("rel://127.0.0.1:{}", server.addr().port());
+
+        assert_eq!(client.state(), RelayState::Reconnecting, "premise: still non-terminal");
+        assert!(
+            carrier.commit_lane_open(
+                &pub_key,
+                PeerId::from_wg_pubkey_string(&pub_key),
+                client.clone(),
+                via
+            ),
+            "a transiently disconnected (Reconnecting) client must NOT reject the commit"
+        );
+        assert_eq!(carrier.lane_count(), 1, "the lane commits during a transient outage");
+        assert!(wg.carrier_attached(&pub_key), "the WG seam holds the lane");
+
+        carrier.shutdown();
+        client.stop();
     }
 
     /// ALIGN guard（0.0.28）锁序压力：relay 平面的生命周期转换（客户端换端
