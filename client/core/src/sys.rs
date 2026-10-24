@@ -346,3 +346,23 @@ pub fn so_bindtodevice(fd: c_int) -> Result<String, c_int> {
         .map(|b| b as char)
         .collect())
 }
+
+/// Host-test only: serializes the tests whose assertions depend on EXCLUSIVE
+/// ownership of a HIGH descriptor NUMBER.
+///
+/// Descriptor numbers are process-global, and `F_DUPFD_CLOEXEC` returns the
+/// lowest free number at/above the requested floor. Two tests that both move a
+/// socket to the same high tier can therefore hand the same NUMBER to each
+/// other between one test's close and its post-close EBADF probe. This crate
+/// has exactly two such tests — `host_sockets::tests::fd_bag_closes_every_kept_fd`
+/// and
+/// `ice_mux::tests::dropping_the_last_mux_closes_its_own_fd_exactly_once_and_leaves_the_socket`
+/// — and both use the same tier list `[1<<20, 1<<18, 1<<16, 1<<14]`. Ordinary
+/// `open`/`socket`/`dup` allocations take the lowest free number (far below
+/// those tiers) and cannot collide, so serializing only these two windows
+/// removes the race without touching any production fd path.
+#[cfg(test)]
+pub(crate) fn high_fd_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}

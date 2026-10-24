@@ -1047,8 +1047,22 @@ fn wake_poll_drain_and_drop_lifetime() {
         "queued output must rearm wake"
     );
     assert!(!h.take_packets(128).is_empty());
-    h.drain_wake();
-    assert_eq!(unsafe { libc::poll(&mut fd, 1, 0) }, 0);
+    // `drain_wake` deliberately re-signals when the runtime worker holds the
+    // output-queue lock during the drain (it cannot know the queue is empty), so
+    // ONE drain can leave a spurious readable wake. The invariant this test
+    // pins is eventual quiescence with no output left, not a zero-byte pipe at
+    // one instant: drain until the pipe stays empty. (Observed as a parallel
+    // flake at 200 wg_dns_seam runs: one drain raced the worker's lock.)
+    let mut readable = 1;
+    for _ in 0..1000 {
+        h.drain_wake();
+        readable = unsafe { libc::poll(&mut fd, 1, 0) };
+        if readable == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(readable, 0, "wake must quiesce once no output remains");
     drop(r);
     assert!(!h.stats().running);
     assert!(unsafe { libc::fcntl(h.wake_fd(), libc::F_GETFD) } >= 0);

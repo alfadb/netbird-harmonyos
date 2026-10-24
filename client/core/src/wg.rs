@@ -126,7 +126,26 @@ impl Tunnel {
         if ptr.is_null() {
             return None;
         }
+        #[cfg(test)]
+        Self::restore_test_panic_hook();
         Some(Tunnel { ptr: ptr as *mut core::ffi::c_void, name })
+    }
+
+    /// boringtun's FFI installs a PROCESS-GLOBAL panic→SIGSEGV hook the first
+    /// time a tunnel is created (boringtun-0.7.1 `ffi/mod.rs` `PANIC_HOOK`:
+    /// `panic::set_hook(|_| raise(SIGSEGV))`). Under the host lib-test harness
+    /// that hook hides every later assertion failure — the test is reported
+    /// `FAILED` with no message (measured here), and on a toolchain whose
+    /// SIGSEGV handler re-raises it kills the whole lib binary as an
+    /// unexplained signal 11. Re-install a printing hook immediately after the
+    /// first tunnel exists (boringtun's install is a `Once`, so this stays for
+    /// the rest of the process). Test-only: the device build never calls this.
+    #[cfg(test)]
+    fn restore_test_panic_hook() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            std::panic::set_hook(Box::new(|info| eprintln!("\nTEST PANIC: {info}")));
+        });
     }
 
     pub(crate) fn write(&self, src: &[u8], dst: &mut [u8]) -> (i32, usize) {

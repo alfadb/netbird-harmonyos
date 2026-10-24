@@ -1475,6 +1475,12 @@ mod tests {
 
     #[test]
     fn dropping_the_last_mux_closes_its_own_fd_exactly_once_and_leaves_the_socket() {
+        // The host_sockets fd-bag test moves its sockets to the SAME high tier
+        // below; without this shared lock its `F_DUPFD_CLOEXEC` can take the
+        // very number this test just closed, and the EBADF probe sees an open
+        // fd (that is the observed parallel flake). The lock covers both
+        // high-fd windows; ordinary allocations stay far below the tier.
+        let _high_fd = crate::sys::high_fd_test_lock();
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let raw = std::os::fd::IntoRawFd::into_raw_fd(sock); // the mux takes it over
         // Move the socket OUT of the concurrent-allocator range (the same fix
@@ -1482,7 +1488,8 @@ mod tests {
         // numbers are handed out lowest-free-first, so a number opened here can
         // be recycled by a parallel test between the mux's drop and the EBADF
         // probe — that is the observed flake. A high number is never handed out
-        // by those tests, so the post-drop probe is race-free.
+        // by those tests, so the post-drop probe is race-free (the two high-fd
+        // tests additionally serialize on `high_fd_test_lock`).
         let high = [1 << 20, 1 << 18, 1 << 16, 1 << 14]
             .into_iter()
             .find_map(|floor| {

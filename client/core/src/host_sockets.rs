@@ -2022,6 +2022,12 @@ mod tests {
 
     #[test]
     fn fd_bag_closes_every_kept_fd() {
+        // The high tier this test moves its sockets to is also used by
+        // ice_mux's high-fd test; without the shared lock the two can hand the
+        // same NUMBER to each other between a close and the EBADF assertion
+        // (reproduced as a lib-run failure at the `fcntl(a)` below before this
+        // lock existed). Ordinary allocators stay far below the tier.
+        let _high_fd = crate::sys::high_fd_test_lock();
         // Cross-test fd-reuse race (same class as wg_device's DEAD_FD):
         // fd numbers are handed out lowest-free-first from the process-global
         // table, so the freshly-opened numbers below sit exactly in the range
