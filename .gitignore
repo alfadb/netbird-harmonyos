@@ -45,3 +45,17 @@ __pycache__/
 
 # Python pytest cache
 .pytest_cache/
+
+# Local working directories that must never be committed:
+# - artifacts/ holds release-built HAPs (signed/unsigned), device dumps and
+#   evidence logs; the release records reference these paths but the binaries
+#   and logs are reproduced per release, not versioned.
+# - .worktrees/ and .wt/ are the git worktrees for rel/0.0.NN release lines.
+# - .upstream-eval/ was the upstream bump research scratch area; its committed
+#   reports live in docs/upstream/ and its raw JSON in artifacts/upstream-eval-*.
+/artifacts/
+/.worktrees/
+/.wt/
+/.upstream-eval/
+/.tmp-*/
+/*-build.log
