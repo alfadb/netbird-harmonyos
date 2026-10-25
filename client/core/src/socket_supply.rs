@@ -120,6 +120,13 @@ struct State {
 pub struct SocketSupply {
     state: Mutex<State>,
     dns_servers: Mutex<Vec<Ipv4Addr>>,
+    /// OBSERVATION-ONLY network generation (3-D, code plan §3.2 D): advanced by
+    /// every reported physical-network change (the connector calls
+    /// [`Self::cancel_pending_for_network_change`] on that exact path). Read by
+    /// the protected-DNS EPERM evidence so a capture can tell whether a refusal
+    /// was bound to a generation change; NEVER read by a decision — the EPERM
+    /// no-retry rule and the whole fallback chain are untouched.
+    network_generation: AtomicU64,
     /// N2(c) (0.0.34, protected-DNS outage REPORT.md §5): the LAST address this
     /// supply successfully resolved for a host. It belongs to the supply — the
     /// resolution context — rather than to the process, so it dies with the
@@ -168,6 +175,16 @@ impl SocketSupply {
     /// How many hosts have a last-known-good address (observability/tests).
     pub fn last_known_addresses(&self) -> usize {
         self.last_good.lock().expect("last good").len()
+    }
+
+    /// 3-D: the supply's network generation (observation only). It starts at 0
+    /// and advances by one for every reported physical-network change — the
+    /// same call that cancels the in-flight protect requests
+    /// ([`Self::cancel_pending_for_network_change`]). The protected-DNS EPERM
+    /// evidence records it so a capture can answer "was this EPERM bound to a
+    /// generation change?"; no decision consults it.
+    pub fn generation(&self) -> u64 {
+        self.network_generation.load(Ordering::Relaxed)
     }
 
     pub async fn request(&self, purpose: Purpose) -> Result<OwnedFd, SocketSeamError> {
@@ -255,6 +272,10 @@ impl SocketSupply {
     }
 
     pub fn cancel_pending_for_network_change(&self) {
+        // 3-D (observation only): this is the connector's physical-network-change
+        // path, so it is also where the evidence generation advances. The
+        // cancellation semantics below are unchanged.
+        self.network_generation.fetch_add(1, Ordering::Relaxed);
         let mut state = self.state.lock().expect("socket supply");
         state.queue.clear();
         for (_, pending) in state.pending.drain() {

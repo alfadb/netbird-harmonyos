@@ -285,6 +285,61 @@ pub(crate) async fn resolve_on_port(host: &str, supply: &Arc<SocketSupply>, port
     resolve_chain(host, supply, &servers, os_getaddrinfo).await
 }
 
+/// 3-D (code plan `analysis-20261025-codeplan` §3.2 D): the facts of ONE
+/// refused protected attempt that the structured EPERM record carries. Purely
+/// evidence — it is collected during stage 1/2 and printed by the chain, never
+/// read by a decision (EPERM still does not retry).
+struct EpermAttempt {
+    /// 1 = the primary protected pass, 2 = the single transient retry.
+    stage: u8,
+    /// 1-based index in the server list of that stage ("尝试序号").
+    attempt: usize,
+    server: SocketAddrV4,
+    /// The socket supply's network generation AT THE MOMENT of the refusal
+    /// ([`SocketSupply::generation`]) — this is the fact that lets a capture
+    /// correlate the EPERM with network-generation changes.
+    generation: u64,
+    /// The full syscall token incl. the original errno text
+    /// (`dns:send-failed errno=1 (Operation not permitted (os error 1))`).
+    detail: String,
+}
+
+/// 3-D: ONE structured EPERM evidence line. A stable, additive token
+/// (`protected-dns: eperm`) beside the existing per-server result lines: the
+/// latter count the refusals, this one binds each refusal to the network
+/// generation and the attempt that produced it. Pure formatting (the in-crate
+/// test and `tests/obs_contracts.rs` pin the exact field set).
+pub fn eperm_line(
+    host: &str,
+    stage: u8,
+    attempt: usize,
+    server: SocketAddrV4,
+    generation: u64,
+    detail: &str,
+) -> String {
+    format!(
+        "protected-dns: eperm host={host} stage={stage} attempt={attempt} server={server} \
+         errno=1 generation={generation} result={detail}"
+    )
+}
+
+/// 3-D: append (and drain) the EPERM facts collected by ONE protected pass as
+/// structured records. Called immediately after each pass, so an EPERM on an
+/// earlier server is still recorded when a later server failed differently or a
+/// later stage answered the lookup.
+fn push_eperm_lines(lines: &mut Vec<String>, host: &str, eperms: &mut Vec<EpermAttempt>) {
+    for fact in eperms.drain(..) {
+        lines.push(eperm_line(
+            host,
+            fact.stage,
+            fact.attempt,
+            fact.server,
+            fact.generation,
+            &fact.detail,
+        ));
+    }
+}
+
 /// N2 (REPORT.md §5): the fallback chain around one protected lookup. Every
 /// caller goes through it, so no single refused (or silent) lookup can leave a
 /// caller — the management dial, the relay dial, the STUN gather — without an
@@ -328,10 +383,14 @@ pub(crate) async fn resolve_chain_traced(
     let started = Instant::now();
     let mut lines: Vec<String> = Vec::new();
     let elapsed = |started: &Instant| started.elapsed().as_millis();
+    // 3-D: EPERM facts collected by the protected passes (evidence only).
+    let mut eperms: Vec<EpermAttempt> = Vec::new();
 
     // Stage 1 — the protected path. Unchanged shape: one fresh protected socket
     // and one query per server, in the order the shell fed them.
-    let mut last = match resolve_on_servers(host, supply, servers).await {
+    let stage_one = resolve_on_servers_traced(host, supply, servers, 1, &mut eperms).await;
+    push_eperm_lines(&mut lines, host, &mut eperms);
+    let mut last = match stage_one {
         Ok(ip) => {
             supply.remember_address(host, ip);
             return (Ok(ip), lines);
@@ -346,7 +405,9 @@ pub(crate) async fn resolve_chain_traced(
 
     // Stage 2 (N2a) — one retry, transient failures only, never for EPERM.
     if is_transient(&last) && !is_permission_denied(&last) {
-        match resolve_on_servers(host, supply, servers).await {
+        let retry = resolve_on_servers_traced(host, supply, servers, 2, &mut eperms).await;
+        push_eperm_lines(&mut lines, host, &mut eperms);
+        match retry {
             Ok(ip) => {
                 supply.remember_address(host, ip);
                 lines.push(format!(
@@ -370,10 +431,19 @@ pub(crate) async fn resolve_chain_traced(
     // (see `retry_skip_line_once`) records that the skip ran; the protected
     // leg's own result line still carries `errno=1`, which is where the count
     // comes from.
+    //
+    // 3-D (code plan §3.2 D, evidence only): the structured `protected-dns:
+    // eperm` records were already appended right after each protected pass (see
+    // `push_eperm_lines`), so an EPERM on an earlier server survives even when a
+    // LATER server failed differently or another stage answered. Only the
+    // once-per-process skip line stays gated exactly as before; the
+    // retry/degrade decision is unchanged.
     if is_transient(&last) && is_permission_denied(&last) && retry_skip_line_once() {
         lines.push(format!(
-            "protected-dns: retry-skipped host={host} reason={last} elapsed_ms={}",
-            elapsed(&started)));
+            "protected-dns: retry-skipped host={host} reason={last} elapsed_ms={} generation={}",
+            elapsed(&started),
+            supply.generation()
+        ));
     }
 
     // Stage 3 (N2b) — the OS/system resolver.
@@ -502,7 +572,26 @@ fn emit_dns_facts(host: &str, addr: SocketAddrV4, query_id: u16, request_fd: i32
     }
 }
 
+/// Test-facing convenience wrapper: the same lookup without collecting the 3-D
+/// EPERM facts. Production always goes through [`resolve_on_servers_traced`].
+#[cfg(test)]
 async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[SocketAddrV4]) -> io::Result<Ipv4Addr> {
+    resolve_on_servers_traced(host, supply, servers, 1, &mut Vec::new()).await
+}
+
+/// The same lookup as `resolve_on_servers`, plus the 3-D EPERM evidence
+/// collection: every refused attempt whose token is EPERM is recorded
+/// (stage/attempt/server/generation) in `eperm`, in attempt order. The lookup
+/// itself — one fresh protected socket and one query per server, the error it
+/// returns, the timing — is IDENTICAL to the pre-3-D shape: this only reads
+/// facts that already exist, no decision consults them.
+async fn resolve_on_servers_traced(
+    host: &str,
+    supply: &Arc<SocketSupply>,
+    servers: &[SocketAddrV4],
+    stage: u8,
+    eperm: &mut Vec<EpermAttempt>,
+) -> io::Result<Ipv4Addr> {
     if servers.is_empty() {
         // Report it like every other outcome of this function: the pre-F3
         // shape returned before the result line, so "the shell fed us an
@@ -514,7 +603,7 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
         return Err(io::Error::other("dns:no-physical-server"));
     }
     let mut last = io::Error::other("dns:no-answer");
-    for &addr in servers {
+    for (index, &addr) in servers.iter().enumerate() {
         let started = Instant::now();
         let mut id = [0u8; 2];
         crypto_box::aead::OsRng.fill_bytes(&mut id);
@@ -562,6 +651,18 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
             }
             Err(err) => {
                 crate::hilog::emit(&format!("protected-dns: id={request_id} host={host} fd={request_fd} server={addr} elapsed_ms={} result={err}", started.elapsed().as_millis()));
+                // 3-D: capture the refusal's evidence facts BEFORE the error is
+                // moved on. Only EPERM earns a record (the class this change is
+                // about); the generation is read at the refusal instant.
+                if is_permission_denied(&err) {
+                    eperm.push(EpermAttempt {
+                        stage,
+                        attempt: index + 1,
+                        server: addr,
+                        generation: supply.generation(),
+                        detail: err.to_string(),
+                    });
+                }
                 last = err;
             }
         }
@@ -870,6 +971,61 @@ mod tests {
         assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
         assert!(lines.iter().all(|l| !l.contains("source=protected-retry")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("source=os-resolver ip=198.51.100.7")), "{lines:?}");
+        // 3-D: the EPERM path also carries the structured evidence record.
+        assert!(
+            lines.iter().any(|l| l.contains("protected-dns: eperm host=os-fallback.test stage=1 attempt=1 server=")
+                && l.contains("errno=1 generation=0")),
+            "{lines:?}"
+        );
+        force_eperm(false);
+    }
+
+    /// 3-D (code plan §3.2 D): every refused protected attempt leaves ONE
+    /// structured EPERM record carrying the socket-supply generation and the
+    /// server/attempt sequence, so a capture can answer "was this refusal
+    /// bound to a network-generation change?". Evidence only: the attempt
+    /// count stays one per server (no retry).
+    #[tokio::test]
+    async fn eperm_evidence_reports_every_refused_attempt_with_the_network_generation() {
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        // One reported physical-network change: the evidence generation is 1.
+        supply.cancel_pending_for_network_change();
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let servers = [
+            unreached(),
+            SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 99), DNS_PORT),
+        ];
+        let (outcome, lines) =
+            resolve_chain_traced("eperm-gen.test", &supply, &servers, os_failing).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 2, "each server is tried once, EPERM is never retried");
+        assert!(outcome.is_err(), "no stage can answer");
+        let records: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("protected-dns: eperm "))
+            .collect();
+        assert_eq!(records.len(), 2, "one record per refused server attempt: {lines:?}");
+        assert!(
+            records[0].contains("host=eperm-gen.test stage=1 attempt=1 server=")
+                && records[0].contains("errno=1 generation=1"),
+            "{}",
+            records[0]
+        );
+        assert!(
+            records[1].contains("stage=1 attempt=2 server=192.0.2.99:53")
+                && records[1].contains("generation=1"),
+            "{}",
+            records[1]
+        );
+        // The once-per-process skip line carries the same generation when it is
+        // this process's first EPERM (other tests in this binary may have run
+        // it already, hence the conditional).
+        if let Some(skip) = lines.iter().find(|l| l.contains("retry-skipped")) {
+            assert!(skip.contains("generation=1"), "{skip}");
+        }
         force_eperm(false);
     }
 

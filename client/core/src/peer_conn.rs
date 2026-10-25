@@ -1189,6 +1189,20 @@ pub(crate) fn peer_short(key: &str) -> String {
     key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
 }
 
+/// 2-B（`analysis-20261025-codeplan` §2.3 选项 B）：**纯分类**——这个 peer 当前
+/// 是否处在「启动瞬态 warm-up」窗口：relay 承载已挂、ICE 尚未选中、且该 peer
+/// 自建立以来**从未**落配过直连 endpoint。三项缺一不可：
+///
+/// - 只按「attach 时 endpoint 为空」判定会把 relay 掉线重挂（真回退）误标成
+///   启动瞬态，所以第三项用 `PeerConn::last_applied_endpoint`（跨会话保留、
+///   只有落配成功才写）；
+/// - 零行为变更：调用方（`guard_tick`）只据此打一行分类日志，attach 时机、
+///   连接流程、guard 预算都不看这个值。`pub` 是为了让 `tests/` 用纯函数钉住
+///   三分支语义。
+pub fn carrier_warmup(carrier_attached: bool, ice_connected: bool, ever_direct: bool) -> bool {
+    carrier_attached && !ice_connected && !ever_direct
+}
+
 /// 0.0.26 gap 4：[`IceEvent::SelectedPair`] 的落盘证据行，唯一构造点（单测
 /// 钉住格式）。`endpoint_changed=false` = 这次提名选中的远端地址与**上一次
 /// 落配成功**的地址相同（物理网络换代后重新走同一条对端路径，真机 0.0.25
@@ -1448,6 +1462,10 @@ struct PeerConn {
     /// [`PeerIceFacts`]。`None` = 尚未观测过（首个快照只建立基线，不是边沿：
     /// peer 的出现本身由 `set_peers`/网络图那一侧负责）。
     edge_facts: Option<PeerIceFacts>,
+    /// 2-B（`analysis-20261025-codeplan` §2.3 选项 B，**纯观测**）：本 peer 的
+    /// 启动瞬态 warm-up 分类行是否已经打过（每 peer 一次）。只影响那条日志，
+    /// 不参与任何连接/超时/转发判定。
+    warmup_logged: bool,
 }
 
 impl PeerConn {
@@ -1487,6 +1505,7 @@ impl PeerConn {
             last_health_ms: 0,
             gather: None,
             edge_facts: None,
+            warmup_logged: false,
         }
     }
 
@@ -2830,6 +2849,25 @@ impl PeerIceOrchestrator {
         // 上游 `relayConnected`（`conn.go:851`）。承载的挂/卸是 WG seam 的事实，
         // 无论有没有接上 relay 平面都要读。
         let carrier_attached = self.wg.carrier_attached(&self.peers[idx].key);
+        // 2-B（`analysis-20261025-codeplan` §2.3 选项 B，**纯观测**）：把
+        // 「启动瞬态走 relay」与「真回退」在日志里分开。条件 =
+        // [`carrier_warmup`]：承载已挂 ∧ ICE 尚未选中 ∧ 该 peer 从未落配过直连
+        // endpoint（`last_applied_endpoint` 跨会话保留，所以 relay 掉线重挂不会
+        // 被误标）。每 peer 只打一次；下面的分类/预算/发起流程一字不改。
+        if !self.peers[idx].warmup_logged
+            && carrier_warmup(
+                carrier_attached,
+                connected,
+                self.peers[idx].last_applied_endpoint.is_some(),
+            )
+        {
+            self.peers[idx].warmup_logged = true;
+            crate::hilog::emit(&format!(
+                "N5c_ICE|carrier-warmup|peer={}|state={}|never-direct=1",
+                peer_short(&self.peers[idx].key),
+                self.peers[idx].state.as_str()
+            ));
+        }
         // 上游 `peerUsesRelay` / `relayTransportConnected`（`conn.go:849,852`）。
         // `peerUsesRelay` 的第一项是「本 peer 的承载真的挂上了」（挂上就必然
         // 用 relay），第二项是 [`RelayPlaneLink::peer_uses_relay`]——上游

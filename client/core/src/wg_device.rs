@@ -1043,6 +1043,18 @@ pub fn direct_to_carrier_line(pub_key_b64: &str) -> String {
     )
 }
 
+/// `N13_WG|direct->carrier|no-ice-endpoint|initial=1|peer=<公钥前8位>` —— R1
+/// （`analysis-20261025-upstream-compare` §4.4）：本会话**从未**有过直连
+/// endpoint（首次 attach 即走 carrier）时，`direct->carrier` 边打这个变体，
+/// 与「直连真的掉过」的回退边分开统计。**纯观测**：dispatch 的判定与转发
+/// 完全不变，`initial=1` 是唯一新增字段（前缀与普通边同源，既有解析不变）。
+pub fn direct_to_carrier_initial_line(pub_key_b64: &str) -> String {
+    format!(
+        "N13_WG|direct->carrier|no-ice-endpoint|initial=1|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
 /// Whether ONE boringtun stats reading is a handshake **strictly later than the
 /// policy expiry instant** of the peer's session (`established_ms +
 /// session_max_ms`) —— the only reading that may re-establish an expired
@@ -1220,6 +1232,12 @@ struct WgPeer {
     /// N13-D2: the bearer the peer's outbound LAST left by (`true` = the
     /// carrier). Drives the takeover/restore switch counters in `dispatch`.
     on_carrier: bool,
+    /// R1 (`analysis-20261025-upstream-compare` §4.4, pure observation): has a
+    /// DIRECT ICE endpoint EVER landed for this peer since it was registered?
+    /// Set (never cleared) by [`WgDevice::set_endpoint`]; it only selects the
+    /// `direct->carrier` log variant (`initial=1` vs the plain fallback edge).
+    /// No forwarding/decision path reads it.
+    ever_direct: bool,
     /// N13-D4: plaintext bytes boringtun already counted as encapsulated for
     /// this peer whose datagram the bearer then REFUSED (sendto failure /
     /// typed carrier refusal). Published `tx_bytes` =
@@ -1708,6 +1726,8 @@ impl WgDevice {
                         last_outbound_ms: None,
                         carrier: None,
                         on_carrier: false,
+                        // R1: a fresh peer has never had a direct endpoint.
+                        ever_direct: false,
                         // N13-D4: transfer counters start at zero with the
                         // tunnel — peer replacement (key removed and
                         // re-added, `clear()`) drops them with the old
@@ -1925,6 +1945,9 @@ impl WgDevice {
         };
         let changed = self.peers[idx].endpoint != Some((addr, port));
         self.peers[idx].endpoint = Some((addr, port));
+        // R1 (observation only): once a direct endpoint has EVER landed, a later
+        // `direct->carrier` edge is a real fallback, not the startup transient.
+        self.peers[idx].ever_direct = true;
         if changed {
             // new path → new campaign (fresh ephemeral; an existing session
             // keeps carrying traffic while the rekey runs — WG semantics)
@@ -2733,8 +2756,16 @@ impl WgDevice {
             self.stats.carrier_takeovers += 1;
             // 0.0.34 (peer-status lag REPORT §5 F1): direct → carrier, the
             // mirror edge of the one above (N13_WG|direct->carrier).
+            // R1: a peer that has NEVER had a direct endpoint is the startup
+            // transient (relay was the only path), not a fallback — same edge,
+            // `initial=1` added. The decision/counters above are unchanged.
             crate::status_events::edge("direct->carrier");
-            emit_evidence(&direct_to_carrier_line(&self.peers[idx].key_b64));
+            let line = if self.peers[idx].ever_direct {
+                direct_to_carrier_line(&self.peers[idx].key_b64)
+            } else {
+                direct_to_carrier_initial_line(&self.peers[idx].key_b64)
+            };
+            emit_evidence(&line);
         }
         let Some(carrier) = self.peers[idx].carrier.clone() else {
             // routed but never given any path: fail-closed, counted
