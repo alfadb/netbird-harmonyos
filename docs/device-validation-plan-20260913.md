@@ -1,4 +1,4 @@
-# Device Validation Plan — 真机平台层验证（S0–S6）
+# Device Validation Plan — 真机平台层验证（S0–S7）
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 Copyright (C) 2026 NetBird HarmonyOS contributors
@@ -115,6 +115,45 @@ protect、fd 合同、真实 TUN 数据面、撤销复原。**前提**：设备�
   片段 → `~/harmonyos-signing/netbird-n1bdisc/diagnostics/<auth-id>/` +
   `.sha256` + `is_evidence:false` 声明文件；生成 `MANIFEST.sha256`。
 - 会话结束或 valid_until 到点：AUTH `consumed:true` 回填，不自动续期。
+- 系统侧日志/快照的采集命令与「掉线、被杀、崩溃、网络异常必须当场抓」规则见
+  `/home/worker/n2h-kit/tools/README-collect.md` 的「掉线/异常现场取证」一节。
+
+## S7 休眠唤醒后重连（device sleep → wake → reconnect）
+
+- 执行时机：S4 数据面已通、S5 撤销之前（编号按文末追加，执行顺序在此）；本场景
+  只观察系统休眠/唤醒对现网连接的影响，不改任何配置。
+- 目的：量化「熄屏休眠 → 唤醒」边界的重连代价、relay 回退分布与 DNS 失败，
+  确认唤醒后能自行恢复、不需要人工干预。
+- 前置：连接正常（status 行 `peers_online>0`、`vpn-tun` 接口在）；已配置 ≥2 个
+  对端（至少 1 个可直连、1 个可走 relay，便于观察直连/relay 切换）。
+- 步骤（可执行、可计时）：
+  1. 记录基线：`peers_online`/`peers_relay`、`vpn-tun` 收发字节、当前 relay 占比
+     （relay 会话数 / 总会话数）。
+  2. 让设备进入休眠：静置至熄屏休眠，或手动锁屏；记录休眠开始时刻（设备本地时间
+     + 主机时间各一，便于与 hilog 对齐）。
+  3. 保持休眠 5–10 分钟后唤醒；记录唤醒时刻（以屏幕点亮/解锁为准）。
+  4. 唤醒后 0–10 分钟内每 30 秒记录一次：连接状态、`peers_online`/`peers_relay`、
+     是否出现 DNS EPERM、是否切 relay、距唤醒的恢复耗时。
+- 判据：
+  - 通过：唤醒后 ≤60 秒恢复连接（status 行 `wgReady=true`/`peers_online>0`，且能
+    探通至少一个对端）。
+  - 观察：60–300 秒恢复，可接受但必须记为观察项，并写清卡在哪一阶段（如
+    `stage=signal-resolve`、DNS EPERM）。
+  - 失败：>300 秒未恢复，或需人工干预（重启 App/断网重连/手动切网）才恢复。
+  - 恢复后比对基线：直连/relay 状态应与基线一致；若由直连退化为 relay，记录是否
+    在观察窗口内自行恢复直连。
+  - 若出现 DNS EPERM：逐条记录 hilog 行号与时刻（`dns:send-failed errno=1`），并
+    注明是否发生在 protect 成功后 0–1 ms。
+- 记录字段（每次一行，JSONL 或表格）：时间戳、事件
+  （`sleep`/`wake`/`connect`/`relay-fallback`/`dns-eperm`）、`peers_online`、
+  `peers_relay`、恢复耗时（相对唤醒时刻，秒）。
+- 依据：2026-10-25 对 0.0.55 手机日志的分析显示，298 次 relay 回退中 94 次落在
+  休眠窗口开始前 0–15 秒、76 次落在苏醒后 10 秒内，前者相对该时段仅占观测 70.5
+  小时的 1.2% 富集约 26 倍，故休眠/唤醒边界必须以真机场景单独验证。
+- 参考数据：12:47–20:57 那次 8 小时掉线中 93.4% 时间设备在休眠（清醒仅 31.6
+  分钟），醒来后重连被 DNS EPERM 卡住直至 20:57 才恢复。
+- 失败即停：唤醒后 10 分钟窗口内始终无 `connect` 事件，或判为失败后仍需继续观察
+  时，先按 S5 撤销并当场留证（hilog 全量 + status JSONL），不得改写判据凑通过。
 
 ## 代码改动（本计划配套，已实现）
 
