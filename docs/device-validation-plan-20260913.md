@@ -179,6 +179,12 @@ protect、fd 合同、真实 TUN 数据面、撤销复原。**前提**：设备�
      `:vpn` 进程已被换掉；记录被杀时刻与新进程 pid。
   4. 观察新 `:vpn` 进程启动与重连：0–10 分钟内记录连接状态、peers、恢复耗时。
 - 判据：
+  - 失败（整应用被回收）：若回收后 UI 进程与 `:vpn` 同时消失（ps 中两者皆无、
+    `vpn-tun` 接口消失），则**无论耗时如何都直接判失败**，不再套用下面的 60 s/300 s
+    档。原因：重连策略由 UI 页面轮询驱动（`pages/Index.ets:2514` 的
+    `runAutoReconnect`，轮询间隔 `STATUS_POLL_MS=1000`，1 秒一次），UI 进程不存在时
+    没有执行体，不可能自动拉起；恢复只能靠用户手动打开应用（打开后能否自动连上仍
+    取决于 marker 状态，见下「参考」）。
   - 通过：回收后 60 s 内自动恢复连接且 peers 回到基线，全程无需用户干预。
   - 观察：60–300 s 恢复，或恢复但 peers 少于基线。
   - 失败：>300 s、需手动打开应用、或未恢复。
@@ -189,9 +195,33 @@ protect、fd 合同、真实 TUN 数据面、撤销复原。**前提**：设备�
   - DNS EPERM 是否出现，带 generation 号以便定位是哪一代进程。
   - 恢复耗时（相对进程被杀时刻，秒）。
 - 参考：0.0.15/0.0.20 的自动重连策略（`NetBirdReconnectPolicy`）在系统回收且 UI 在
-  前台/保活时的行为；核对点：系统回收不经过 `onDestroy`，marker 不会被写成
+  前台/保活时的行为；原核对点：系统回收不经过 `onDestroy`，marker 不会被写成
   clean/stopping，下一会话应报 `PRIOR_EXIT_UNCLEAN` 并按策略自动重试，而不是被
   marker 门跳过。
+- 参考修正（2026-10-26 实测）：上一条「回收不经过 `onDestroy` ⇒ marker 保持 open ⇒
+  下次自动重试」的假设只对「仅 `:vpn` 扩展被杀」成立；对「整应用被回收」**不成立**。
+  整应用被回收时系统拆 VPN 扩展走的是正规 `onDestroy`（日志 `vpn_destroy_begin`），
+  而当前代码在 `NetBirdVpnExtensionAbility.ets` 的 onDestroy 入口即同步写
+  `marker=stopping`，`NetBirdReconnectPolicy` 对 `stopping` 无条件 skip
+  （reason=`marker-stopping`）⇒ 重新打开应用后大概率仍需手动点连接。该结论是
+  **推断**：marker 文件未采集，无法实测。
+- 执行记录（2026-10-26 真机已执行；证据在 `artifacts/analysis-20261026-s8/`）：
+  - E1（仅 `:vpn` 被回收，判**通过**）：22:02:33.064 `:vpn` 35742 被系统以
+    SwapFull 回收（`netbird-ui.log:100`，`ev_kill_reason=SwapFull`）；UI 在 +2.328 s
+    即发起自动重连（`ui_auto_reconnect reason=marker-open trigger=background`，
+    `ui.log:102`），新 `:vpn` 54105 于 22:02:36.358 启动（+3.294 s），+16.178 s
+    peers 回到 12、+23.013 s 回到 12/5 基线 ⇒ 单看 E1 满足「≤60 s 通过」。
+  - E2（整应用消失，判**失败**）：22:03:18.4–22:03:24.2 整个应用消失——UI 17842 末行
+    22:03:18.376；`:vpn` 54105 收到 onDestroy 22:03:24.180、`vpn_destroy_begin`
+    22:03:24.281；22:05:46 抓取时 ps 无任何 netbird 进程、`vpn-tun` 消失，142 s 内
+    无自动恢复 ⇒ 判失败（需用户手动打开应用），即上面判据的「整应用被回收」分支。
+  - 回收类型证据边界：E1 的 SwapFull 来自系统 APP_KILLED 通道（应用侧唯一系统判定）；
+    E2 的回收类型**无法判断**——hilog 保留窗仅 21:45–22:05，`PROCESS_KILL`、
+    `LowMemoryKill`、`SwapFull` 等回收关键字命中全为 0，且窗内 hilog 自身丢行
+    203,060 行（475 次 write-socket-failed），不能凭「没搜到」判定回收类型。
+  - 其他观测：E1 重连窗口内 `initial=1` 12 次、`carrier-warmup` 11 次（冷启动全量
+    重连路径）；`PRIOR_EXIT_UNCLEAN` 全文件 3 条，代际链 49890 → 33552 → 35742 →
+    54105，`prev_state` 全为 `open`。
 - 失败即停：确认进程已被杀但 10 分钟内未恢复且无自动重试记录时，先按 S5 撤销并当场
   留证（hilog 全量 + status JSONL），不得把该场景记成通过。
 
