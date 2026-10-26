@@ -1,4 +1,4 @@
-# Device Validation Plan — 真机平台层验证（S0–S7）
+# Device Validation Plan — 真机平台层验证（S0–S8）
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 Copyright (C) 2026 NetBird HarmonyOS contributors
@@ -118,42 +118,82 @@ protect、fd 合同、真实 TUN 数据面、撤销复原。**前提**：设备�
 - 系统侧日志/快照的采集命令与「掉线、被杀、崩溃、网络异常必须当场抓」规则见
   `/home/worker/n2h-kit/tools/README-collect.md` 的「掉线/异常现场取证」一节。
 
-## S7 休眠唤醒后重连（device sleep → wake → reconnect）
+## S7 灭屏保活（screen-off keep-alive）
 
-- 执行时机：S4 数据面已通、S5 撤销之前（编号按文末追加，执行顺序在此）；本场景
-  只观察系统休眠/唤醒对现网连接的影响，不改任何配置。
-- 目的：量化「熄屏休眠 → 唤醒」边界的重连代价、relay 回退分布与 DNS 失败，
-  确认唤醒后能自行恢复、不需要人工干预。
-- 前置：连接正常（status 行 `peers_online>0`、`vpn-tun` 接口在）；已配置 ≥2 个
-  对端（至少 1 个可直连、1 个可走 relay，便于观察直连/relay 切换）。
+- 改写说明：原「休眠唤醒后重连」场景在当前设计下测不到——2026-10-26 两轮真机实测
+  证明，长时任务保活使系统对 netbird 的 Doze 被豁免（hilog
+  `Doze has special:ERR_HAS_CONTINUOUS_TASK`），灭屏期间 VPN 不会被冻结，「休眠后
+  重连」这条边根本不会触发；灭屏场景实际验证的是「保活是否让连接保持」。真正打断
+  连接的是进程被系统回收，见 S8。
+- 执行时机：S4 数据面已通、S5 撤销之前（编号按文末追加，执行顺序在此）；只观察
+  灭屏/唤醒对现网连接的影响，不改任何配置。
+- 目的：确认灭屏静置期间连接保持（peers 不归零、无 presence-cleared、无进程换代），
+  唤醒后状态与基线一致。
+- 前置：连接正常（status 行 `peers_online>0`、`vpn-tun` 接口在）；已配置 ≥2 个对端。
 - 步骤（可执行、可计时）：
-  1. 记录基线：`peers_online`/`peers_relay`、`vpn-tun` 收发字节、当前 relay 占比
-     （relay 会话数 / 总会话数）。
-  2. 让设备进入休眠：静置至熄屏休眠，或手动锁屏；记录休眠开始时刻（设备本地时间
-     + 主机时间各一，便于与 hilog 对齐）。
-  3. 保持休眠 5–10 分钟后唤醒；记录唤醒时刻（以屏幕点亮/解锁为准）。
-  4. 唤醒后 0–10 分钟内每 30 秒记录一次：连接状态、`peers_online`/`peers_relay`、
-     是否出现 DNS EPERM、是否切 relay、距唤醒的恢复耗时。
+  1. 记录基线：`peers_online`/`peers_relay`、主进程与 `:vpn` pid、`vpn-tun` 收发
+     字节；记录设备本地时间 + 主机时间各一，便于与 hilog 对齐。
+  2. 锁屏静置 5–10 分钟：按电源键熄屏，不手动断网、不退出 App；记录灭屏时刻与
+     唤醒时刻（设备时间 + 主机时间双标）。
+  3. 唤醒后 0–10 分钟内每 30 秒记录一次：连接状态、`peers_online`/`peers_relay`、
+     是否出现 presence-cleared/reconnecting、是否换代、距唤醒的恢复耗时。
 - 判据：
-  - 通过：唤醒后 ≤60 秒恢复连接（status 行 `wgReady=true`/`peers_online>0`，且能
-    探通至少一个对端）。
-  - 观察：60–300 秒恢复，可接受但必须记为观察项，并写清卡在哪一阶段（如
+  - 通过：灭屏期间连接保持（peers 不归零、无 presence-cleared、无进程换代），唤醒
+    后状态与基线一致。
+  - 观察：灭屏期间断开但唤醒后自动恢复；记录恢复耗时与卡在哪一阶段（如
     `stage=signal-resolve`、DNS EPERM）。
-  - 失败：>300 秒未恢复，或需人工干预（重启 App/断网重连/手动切网）才恢复。
-  - 恢复后比对基线：直连/relay 状态应与基线一致；若由直连退化为 relay，记录是否
-    在观察窗口内自行恢复直连。
-  - 若出现 DNS EPERM：逐条记录 hilog 行号与时刻（`dns:send-failed errno=1`），并
-    注明是否发生在 protect 成功后 0–1 ms。
-- 记录字段（每次一行，JSONL 或表格）：时间戳、事件
-  （`sleep`/`wake`/`connect`/`relay-fallback`/`dns-eperm`）、`peers_online`、
-  `peers_relay`、恢复耗时（相对唤醒时刻，秒）。
-- 依据：2026-10-25 对 0.0.55 手机日志的分析显示，298 次 relay 回退中 94 次落在
-  休眠窗口开始前 0–15 秒、76 次落在苏醒后 10 秒内，前者相对该时段仅占观测 70.5
-  小时的 1.2% 富集约 26 倍，故休眠/唤醒边界必须以真机场景单独验证。
-- 参考数据：12:47–20:57 那次 8 小时掉线中 93.4% 时间设备在休眠（清醒仅 31.6
-  分钟），醒来后重连被 DNS EPERM 卡住直至 20:57 才恢复。
-- 失败即停：唤醒后 10 分钟窗口内始终无 `connect` 事件，或判为失败后仍需继续观察
-  时，先按 S5 撤销并当场留证（hilog 全量 + status JSONL），不得改写判据凑通过。
+  - 失败：断开且未恢复，或需人工干预（重启 App/手动重连/手动切网）才恢复。
+- 必须记录（缺一不可，否则本场景不能算通过）：
+  - 系统是否对 netbird 豁免 Doze：hilog 搜 `ERR_HAS_CONTINUOUS_TASK`，记录该行
+    时刻、进程名与 pid；同窗口被正常 Doze 冻结的应用可作对照。
+  - `wall−mono` 漂移：真挂起时该漂移应约等于灭屏时长；若远小于灭屏时长，说明进程
+    没有被挂起，本场景只覆盖「灭屏不打断」，不覆盖「挂起后重连」。
+  - hilog 最大间隙：灭屏段内相邻日志行的最大间隔；与灭屏时长同量级才说明设备真的
+    静默，间隙过小同样说明没挂起。
+- 执行记录（2026-10-26 真机已执行；证据在 `artifacts/analysis-20261026-s7-run2/`）：
+  - 第二轮（干净窗口，判**通过**）：灭屏 20:39:39.885 → 唤醒 20:47:11.733
+    （451.6 s，落在 5–10 分钟内）；Doze 被 `ERR_HAS_CONTINUOUS_TASK` 豁免；
+    `wall−mono` 漂移仅 22.773 s（远小于 451.6 s，证明确未挂起）；休眠段 92 条状态
+    发布，peers 11/5 → 12/5 → 12/6 → 12/5，无 0/0、无 presence-cleared、`:vpn`
+    进程零换代；唤醒前后状态同为 12/5，连接全程保持。
+  - 第一轮（无效场景，只能记**观察**）：实际累计挂起 5.49 h（非声称的约 19 h）、
+    `:vpn` 21 小时内换代 23 次（全部 `PRIOR_EXIT_UNCLEAN`）、唤醒后 23.656 s 恢复；
+    场景有效性不成立，不能据此宣布「休眠唤醒后重连」已验证。
+- 失败即停：判失败后仍需继续观察时，先按 S5 撤销并当场留证（hilog 全量 + status
+  JSONL）；不得改写判据凑通过。
+
+## S8 进程被系统回收后重连（process killed → auto reconnect）
+
+- 改写说明/理由：白天 23 次换代**全部**是非优雅退出（`PRIOR_EXIT_UNCLEAN`），最后
+  一次能确认是系统 LowMemoryKill（hilog `KillHandlerInner LowMemoryKill` /
+  `PROCESS_KILL reason=LowMemory`）。进程被系统回收才是实际打断连接的主要路径，与
+  S7 的「灭屏不打断」互补。
+- 执行时机：S4 数据面已通、S5 撤销之前；S7 之后执行。
+- 前置：连接正常（status 行 `peers_online>0`、`vpn-tun` 接口在）；最好能制造低内存
+  压力（打开多个大应用）或等系统回收。
+- 步骤（可执行、可计时）：
+  1. 记录基线：`peers_online`/`peers_relay`、主进程与 `:vpn` pid、`vpn-tun` 收发
+     字节；记录设备本地时间 + 主机时间各一，便于与 hilog 对齐。
+  2. 触发系统回收：制造内存压力，或等待系统自然回收；记录触发时刻。
+  3. 确认进程被杀：hilog 搜 `PROCESS_KILL`/`LowMemoryKill`，或用 pid 变化确认
+     `:vpn` 进程已被换掉；记录被杀时刻与新进程 pid。
+  4. 观察新 `:vpn` 进程启动与重连：0–10 分钟内记录连接状态、peers、恢复耗时。
+- 判据：
+  - 通过：回收后 60 s 内自动恢复连接且 peers 回到基线，全程无需用户干预。
+  - 观察：60–300 s 恢复，或恢复但 peers 少于基线。
+  - 失败：>300 s、需手动打开应用、或未恢复。
+- 必查观测（逐条记，缺一不可）：
+  - 新 `:vpn` 进程 pid（与基线 pid 不同即确认换代）与主进程 pid 是否变化。
+  - `PRIOR_EXIT_UNCLEAN` 是否在重启首报，含 `prev_state` 值。
+  - 重连是否走 `initial=1`/`carrier-warmup`（区分冷启动全量重连与复用路径）。
+  - DNS EPERM 是否出现，带 generation 号以便定位是哪一代进程。
+  - 恢复耗时（相对进程被杀时刻，秒）。
+- 参考：0.0.15/0.0.20 的自动重连策略（`NetBirdReconnectPolicy`）在系统回收且 UI 在
+  前台/保活时的行为；核对点：系统回收不经过 `onDestroy`，marker 不会被写成
+  clean/stopping，下一会话应报 `PRIOR_EXIT_UNCLEAN` 并按策略自动重试，而不是被
+  marker 门跳过。
+- 失败即停：确认进程已被杀但 10 分钟内未恢复且无自动重试记录时，先按 S5 撤销并当场
+  留证（hilog 全量 + status JSONL），不得把该场景记成通过。
 
 ## 代码改动（本计划配套，已实现）
 
