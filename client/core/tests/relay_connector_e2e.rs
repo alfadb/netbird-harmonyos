@@ -55,8 +55,8 @@ use netbird_core::grpc::proto::management_service_server::{
     ManagementService, ManagementServiceServer,
 };
 use netbird_core::grpc::proto::{
-    Empty, EncryptedMessage, LoginRequest, LoginResponse, ServerKeyResponse, SyncRequest,
-    SyncResponse,
+    Empty, EncryptedMessage, LoginRequest, LoginResponse, NetbirdConfig, NetworkMap, PeerConfig,
+    RelayConfig, ServerKeyResponse, SyncRequest, SyncResponse,
 };
 use netbird_core::grpc::PeerMeta;
 use netbird_core::relay::{AuthToken, Frame, PeerId, MSG_CLOSE};
@@ -235,6 +235,10 @@ struct MiniMgmt {
     live: Arc<Mutex<Option<(EnvelopePublicKey, tokio::sync::mpsc::Sender<Result<EncryptedMessage, Status>>)>>>,
     sync_opens: Arc<Mutex<usize>>,
     logout_calls: Arc<Mutex<usize>>,
+    /// R2: the LoginResponse this mock returns (default = empty, the exact
+    /// pre-R2 fixture). Tests that exercise the login-time relay start fill
+    /// `netbird_config.relay` here.
+    login_response: Arc<Mutex<LoginResponse>>,
 }
 
 impl Default for MiniMgmt {
@@ -245,6 +249,7 @@ impl Default for MiniMgmt {
             live: Arc::new(Mutex::new(None)),
             sync_opens: Arc::new(Mutex::new(0)),
             logout_calls: Arc::new(Mutex::new(0)),
+            login_response: Arc::new(Mutex::new(LoginResponse::default())),
         }
     }
 }
@@ -252,6 +257,11 @@ impl Default for MiniMgmt {
 impl MiniMgmt {
     fn script(&self, updates: Vec<SyncResponse>) {
         *self.sync_script.lock().expect("script") = updates;
+    }
+
+    /// R2: replace the LoginResponse the mock returns (default: empty).
+    fn set_login_response(&self, response: LoginResponse) {
+        *self.login_response.lock().expect("login response") = response;
     }
 
     /// Push one more SyncResponse into the LIVE sync stream (test →
@@ -300,7 +310,7 @@ impl ManagementService for MiniMgmt {
         let plaintext = decrypt_body(&self.keys, &env)?;
         LoginRequest::decode(plaintext.as_slice())
             .map_err(|e| Status::invalid_argument(format!("body is not LoginRequest: {e}")))?;
-        let response = LoginResponse::default();
+        let response = self.login_response.lock().expect("login response").clone();
         let client_pk = EnvelopePublicKey::from_base64(&env.wg_pub_key).expect("client pk");
         let sealed = envelope::seal(&client_pk, &self.keys, &response.encode_to_vec())
             .expect("seal login reply");
@@ -716,6 +726,103 @@ async fn relay_optin_reaches_ready_and_round_trips_bytes_byte_exact() {
          \"last_error_class\":null,\"current_url\":\"{live_url}\"}}"
     );
     assert!(json.contains(&want_relay), "want {want_relay} in {json}");
+
+    handle.stop();
+    relay_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// 2b. R2: relay starts from the LOGIN response (not the first Sync's
+//     `netbird_config`), and the later same-URL relay sync does not restart it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_client_starts_from_login_before_first_relay_sync_and_stays_put() {
+    let relay_server =
+        RelayTestServer::start(TestServerConfig::default()).await.expect("fake relay");
+    let relay_url = loopback_url(relay_server.addr().port());
+    let mock = MiniMgmt::default();
+    // The LoginResponse already carries NetbirdConfig.relay — the very field
+    // upstream reads in `parseRelayInfo(loginResp)` (connect.go:570-582) and
+    // serves BEFORE engine.Start (connect.go:464-478).
+    mock.set_login_response(LoginResponse {
+        netbird_config: Some(NetbirdConfig {
+            relay: Some(RelayConfig {
+                urls: vec![relay_url.clone()],
+                token_payload: (EPOCH + 3_600).to_string(),
+                token_signature: SIG_B64.into(),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // The FIRST Sync deliberately carries NO netbird_config at all: before R2
+    // the relay client could only start from `SyncResponse.netbird_config.relay`,
+    // so any client observed below can only have come from the login reply.
+    mock.script(vec![SyncResponse {
+        netbird_config: None,
+        network_map: Some(NetworkMap {
+            serial: 1,
+            peer_config: Some(PeerConfig { address: "10.64.0.9".into(), ..Default::default() }),
+            remote_peers_is_empty: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }]);
+    let addr = spawn_mock(mock.clone()).await;
+    let clock = VirtualClock::new(EPOCH);
+    let (handle, host) = spawn_connector(addr, Some(test_relay_attach(&clock, None)));
+
+    // The connector reaches the Sync phase (map applied) — and by then the
+    // relay client already exists and has dialed, although no sync ever
+    // advertised relay.
+    wait_for(
+        FUSE,
+        || host.serials.lock().expect("serials").last() == Some(&1),
+        "first (relay-less) map applied",
+    )
+    .await;
+    let started_at_login =
+        handle.relay_client().expect("R2: relay client must start from the login response");
+    relay_server.wait_connections(1, FUSE).await.expect(
+        "R2: the login-started relay client must dial the advertised relay before any relay sync",
+    );
+    wait_for(
+        FUSE,
+        || handle.status().relay.state == "ready",
+        "login-started relay client reaches Ready",
+    )
+    .await;
+
+    // A same-URL relay sync now arrives: it may only refresh the token. The
+    // client identity, the live session and the server's connection count
+    // must all stay put (no restart / no reconnect / no second auth).
+    mock.push(sync_with_relay(
+        2,
+        vec![relay_url.clone()],
+        (EPOCH + 3_600).to_string(),
+    ));
+    wait_for(
+        FUSE,
+        || host.serials.lock().expect("serials").last() == Some(&2),
+        "relay sync applied",
+    )
+    .await;
+
+    let after_sync = handle.relay_client().expect("relay client kept after the relay sync");
+    assert!(
+        started_at_login.same_client(&after_sync),
+        "a same-URL relay sync must NOT replace the login-started client"
+    );
+    let stats = after_sync.stats();
+    assert_eq!(stats.reconnects, 0, "same-URL sync must not reconnect");
+    assert_eq!(stats.auth_successes, 1, "same-URL sync must not re-authenticate");
+    assert_eq!(
+        relay_server.stats().connections_accepted,
+        1,
+        "same-URL sync must not open a second relay TCP connection"
+    );
+    assert_eq!(handle.status().relay.state, "ready");
 
     handle.stop();
     relay_server.shutdown().await;

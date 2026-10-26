@@ -228,6 +228,11 @@ pub struct RelayPlaneLink {
     /// 共享 relay 传输是否连通（上游 `relayManager.Ready()`，
     /// `worker_relay.go:104-106`）：本端 relay 客户端的会话状态。
     transport_up: AtomicBool,
+    /// R1：**承载挂/卸**代际（每次 per-peer 车道挂上或卸下 +1）。ICE 泵的
+    /// `note_ice_edges` 每拍都要判断本 peer 的 relay 事实，但 WG 设备锁属于
+    /// 包路径上的热点锁：只有代际变了（真的挂/卸过）才重新读
+    /// `carrier_attached`，否则复用上一拍的缓存。纯原子读，不引入新锁。
+    carrier_epoch: AtomicU64,
     /// 事件驱动 ICE 泵的唤醒器（可选接线；[`PeerIceOrchestrator::set_relay_plane`]
     /// 在接线的同一步装定）。入队断连事件后 `notify` 一次——上游的
     /// `case <-g.relayedConnDisconnected:` 是 select 的事件臂，不是节拍。
@@ -261,6 +266,22 @@ impl RelayPlaneLink {
         }
     }
 
+    /// 一条 per-peer relay 承载**挂上**（上游 `conn.statusRelay` 的相反边沿；
+    /// 上游是按 level 判定、没有专门的「连上」回调）。本架构的 ICE 状态边沿由
+    /// 泵的 [`PeerIceOrchestrator::note_ice_edges`] 比较得出，所以这里推进承载
+    /// 代际并叫醒泵一拍，让 `relay-only` 尽快出现在状态面/日志里——不改变任何
+    /// 分类、预算或转发路径。**必须在 relay 平面的叶锁都已释放后调用**（锁序见
+    /// 类型文档）。
+    pub fn relay_lane_attached(&self) {
+        self.carrier_epoch.fetch_add(1, Ordering::AcqRel);
+        self.wake();
+    }
+
+    /// R1：当前承载代际（见 `carrier_epoch` 字段文档）。纯原子读。
+    pub fn carrier_epoch(&self) -> u64 {
+        self.carrier_epoch.load(Ordering::Acquire)
+    }
+
     /// 一条 per-peer relay 承载断开（上游 `conn.go:663-667` 的
     /// `SetRelayedConnDisconnected` 调用条件：**曾经**连上才发；relay 平面只
     /// 在真的卸下一条已挂承载时调用本方法，故该条件由调用方保证）。
@@ -269,6 +290,9 @@ impl RelayPlaneLink {
             let mut pending = self.disconnects.lock().unwrap_or_else(|p| p.into_inner());
             pending.insert(key.to_string());
         }
+        // R1: the lane table really changed — the next edge pass must re-read
+        // the WG seam instead of trusting its cached attach fact.
+        self.carrier_epoch.fetch_add(1, Ordering::AcqRel);
         self.wake();
     }
 
@@ -285,6 +309,7 @@ impl RelayPlaneLink {
                 pending.insert(key.clone());
             }
         }
+        self.carrier_epoch.fetch_add(1, Ordering::AcqRel);
         self.wake();
     }
 
@@ -297,8 +322,15 @@ impl RelayPlaneLink {
     }
 
     /// 发布共享 relay 传输状态（relay 平面的 relay 客户端泵每拍调用）。
+    ///
+    /// R1：**只在真的翻转时**叫醒 ICE 泵（`Ready` 分支每拍都会调用本方法；
+    /// 无条件 wake 会把泵变成随 relay 拍频转的忙循环）。传输通/断改变的是
+    /// `relay-only` 是否成立，`note_ice_edges` 下一拍会用实时原子值重算。
     pub fn set_transport_up(&self, up: bool) {
-        self.transport_up.store(up, Ordering::Release);
+        let prev = self.transport_up.swap(up, Ordering::AcqRel);
+        if prev != up {
+            self.wake();
+        }
     }
 
     /// 共享 relay 传输是否连通（上游 `IsTransportConnected()`）。
@@ -614,6 +646,67 @@ impl PeerIceState {
             PeerIceState::Disconnected => "disconnected",
             PeerIceState::Failed => "failed",
         }
+    }
+}
+
+/// R1（`analysis-20261025-upstream-compare` §8）: 本 peer 的**可用承载**三态。
+/// 官方 `evalStatus`（`client/internal/peer/conn.go:819-825`）只要
+/// `statusRelay == Connected` 或 `statusICE == Connected` 就是 `StatusConnected`，
+/// 两者都没有才是不可用。
+///
+/// 纯派生、只用于状态面/观测：不参与转发路径（转发仍由 dispatch/carrier 决定），
+/// 也不改变既有字段语义——[`PeerIceDetail::reachable`] /
+/// [`IceOrchestratorSummary::reachable`] 仍是「ICE 选中 + endpoint 落配」这条直连
+/// 事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PeerTransport {
+    /// 两条承载都不可用（含「ICE 选中但 endpoint 未落配、relay 也没挂」）。
+    #[default]
+    Offline,
+    /// relay 车道已挂且 relay 传输连通，ICE 尚未选中/落配。
+    RelayOnly,
+    /// ICE 选中且 endpoint 落配成功——实际转发路径可直接走它。relay 同时可用时
+    /// 也按这个优先级归类：直连优先（上游 `conntype/priority.go:9-11` 的档位序）。
+    IceDirect,
+}
+
+impl PeerTransport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerTransport::Offline => "offline",
+            PeerTransport::RelayOnly => "relay-only",
+            PeerTransport::IceDirect => "ice-direct",
+        }
+    }
+
+    /// 是否算「在线」（官方 `StatusConnected`）：relay 或 ICE 任一路可用。
+    pub fn online(&self) -> bool {
+        !matches!(self, PeerTransport::Offline)
+    }
+}
+
+/// R1 的纯分类函数（状态面与日志共用唯一实现；`tests/` 直接钉住三分支）。
+///
+/// - `ice_reachable` = ICE 选中 + endpoint 落配（本仓既有的直连可用事实）；
+/// - `carrier_attached` = relay 车道真的挂在这个 peer 的 WG seam 上
+///   （[`WgPeerApplier::carrier_attached`](crate::connector::WgPeerApplier::carrier_attached)）；
+/// - `relay_transport_up` = 共享 relay 传输此刻连通（上游
+///   `relayManager.Ready()`）。未接线 relay 平面的 harness 传 `true`，与
+///   [`PeerIceOrchestrator::guard_tick`] 的既有回落一致：此时车道挂没挂是唯一的
+///   relay 事实。
+///
+/// 直连优先：两条都可用时归 `ice-direct`，不把 relay 当成额外档位。
+pub fn peer_transport(
+    ice_reachable: bool,
+    carrier_attached: bool,
+    relay_transport_up: bool,
+) -> PeerTransport {
+    if ice_reachable {
+        PeerTransport::IceDirect
+    } else if carrier_attached && relay_transport_up {
+        PeerTransport::RelayOnly
+    } else {
+        PeerTransport::Offline
     }
 }
 
@@ -1022,7 +1115,12 @@ pub struct PeerIceStatus {
     /// WG endpoint 落配已成功。
     pub endpoint_applied: bool,
     /// 可用 = Connected 且 endpoint 落配成功（N3-7 默认路由闸的输入）。
+    /// **语义不变**：仍只描述 ICE 直连路径。
     pub reachable: bool,
+    /// R1：relay 车道已挂到 WG seam（上游 `statusRelay` 的挂载事实）。
+    pub carrier_attached: bool,
+    /// R1：三态可用承载（官方 `evalStatus`：relay 或 ICE 任一通即在线）。
+    pub transport: PeerTransport,
     /// 最后一次错误的分类（无消息文本，密钥纪律同 connector）。
     pub last_error: Option<ErrorClass>,
 }
@@ -1042,6 +1140,10 @@ struct PeerIceFacts {
     selected_remote: Option<([u8; 4], u16)>,
     endpoint_applied: bool,
     reachable: bool,
+    /// R1：可用承载三态（`offline` / `relay-only` / `ice-direct`）。它是渲染事实
+    /// 的一部分：relay 车道挂/卸、relay 传输通/断、ICE 选中/落配任一变化都会让
+    /// 它变，因此也是状态边沿与 `N5c_ICE|peer-transport` 日志的判据。
+    transport: PeerTransport,
     last_error: Option<ErrorClass>,
 }
 
@@ -1106,6 +1208,11 @@ pub struct PeerIceDetail {
     /// 每小时一次（上游 `guard.go:131-138` + `ice_retry_state.go`）。纯观测
     /// 投影，不改变任何行为。
     pub ice_retry: IceRetryMode,
+    /// R1（`connector_status()` 的 `ice_peers[]` 尾部追加）：本 peer 的可用承载
+    /// 三态 `offline` / `relay-only` / `ice-direct`（[`PeerTransport`]）。`reachable`
+    /// 仍是 ICE 直连事实；本字段才把官方「relay 或 ICE 任一连通即 Connected」的
+    /// 判定带进逐 peer 状态发布。纯读，不改变任何转发路径。
+    pub transport: PeerTransport,
 }
 
 /// 全体 peer 的 ICE 汇总（`connector_status()` 的 `ice` 字段）。
@@ -1120,8 +1227,16 @@ pub struct IceOrchestratorSummary {
     pub failed: usize,
     /// endpoint 落配成功数。
     pub endpoints_applied: usize,
-    /// 可用 peer 数（Connected + endpoint 已落配）。
+    /// 可用 peer 数（Connected + endpoint 已落配）。**语义不变**：ICE 直连事实。
     pub reachable: usize,
+    /// R1（`connector_status().ice` 尾部追加）：在线 peer 数 = 直连 `reachable`
+    /// ∪ relay-only。官方 `evalStatus`（`conn.go:819-825`）把 relay 或 ICE 任一
+    /// Connected 都算 `StatusConnected`，本字段是那个判定在计数面上的投影。
+    pub peers_online: usize,
+    /// R1：其中**仅** relay 可用的 peer 数（relay 车道已挂、传输连通、ICE 尚未
+    /// 选中/落配）。与 `peers_online - reachable` 同义，单独给出是为了让状态读者
+    /// 不必做算术就能看出「多少 peer 仅 relay 可用」。
+    pub peers_relay_only: usize,
     // Signal frames dropped because their sender key matched no peer in the
     // local ICE map (peer_conn handle_signal). Silent by design in the log;
     // exposed here because a key-format mismatch makes the whole negotiation
@@ -1142,10 +1257,11 @@ pub struct IceOrchestratorSummary {
 impl IceOrchestratorSummary {
     /// JSON 对象（计数 + 分类，无密钥材料）。字段**追加式**：0.0.27 在既有
     /// `last_error` 之后补 `pump_passes_total` / `pump_passes_per_10s`，
-    /// 既有字段位置与拼写不动。
+    /// 既有字段位置与拼写不动。R1 再在尾部追加 `peers_online` /
+    /// `peers_relay_only`（同一纪律：既有字段逐字不变）。
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jnum("peers", self.peers as u64),
             jnum("idle", self.idle as u64),
             jnum("gathering", self.gathering as u64),
@@ -1165,6 +1281,8 @@ impl IceOrchestratorSummary {
             ),
             jnum("pump_passes_total", self.pump_passes_total),
             jnum("pump_passes_per_10s", self.pump_passes_per_10s),
+            jnum("peers_online", self.peers_online as u64),
+            jnum("peers_relay_only", self.peers_relay_only as u64),
         )
     }
 }
@@ -1201,6 +1319,21 @@ pub(crate) fn peer_short(key: &str) -> String {
 ///   三分支语义。
 pub fn carrier_warmup(carrier_attached: bool, ice_connected: bool, ever_direct: bool) -> bool {
     carrier_attached && !ice_connected && !ever_direct
+}
+
+/// R1：peer 可用承载**变化行**的唯一构造点（`tests/` 用纯函数钉住 token 与形状，
+/// 与 [`selected_pair_line`] / [`carrier_warmup`] 同一纪律）。
+///
+/// 三态 token 逐字为 `ice-direct` / `relay-only` / `offline`；`online=1` 表示该
+/// peer 计入 [`IceOrchestratorSummary::peers_online`]（官方 `StatusConnected`）。
+/// `peer=` 用全模块统一的 [`peer_short`]（公钥字母数字前 8 位），不含密钥材料。
+pub fn peer_transport_line(peer: &str, transport: PeerTransport) -> String {
+    format!(
+        "N5c_ICE|peer-transport|peer={}|transport={}|online={}",
+        peer_short(peer),
+        transport.as_str(),
+        transport.online() as u8
+    )
 }
 
 /// 0.0.26 gap 4：[`IceEvent::SelectedPair`] 的落盘证据行，唯一构造点（单测
@@ -1462,6 +1595,12 @@ struct PeerConn {
     /// [`PeerIceFacts`]。`None` = 尚未观测过（首个快照只建立基线，不是边沿：
     /// peer 的出现本身由 `set_peers`/网络图那一侧负责）。
     edge_facts: Option<PeerIceFacts>,
+    /// R1：ICE 泵每拍判断 `transport` 用的 relay 车道挂载事实缓存。WG 设备锁
+    /// 在包路径上，不能每拍每 peer 都取；只有 relay 平面的承载代际变化（真的
+    /// 挂/卸过）才重新读 `WgPeerApplier::carrier_attached`。
+    relay_carrier_attached: bool,
+    /// R1：上面这份缓存对应的承载代际（`None` = 尚未读过）。
+    relay_carrier_epoch: Option<u64>,
     /// 2-B（`analysis-20261025-codeplan` §2.3 选项 B，**纯观测**）：本 peer 的
     /// 启动瞬态 warm-up 分类行是否已经打过（每 peer 一次）。只影响那条日志，
     /// 不参与任何连接/超时/转发判定。
@@ -1505,33 +1644,41 @@ impl PeerConn {
             last_health_ms: 0,
             gather: None,
             edge_facts: None,
+            relay_carrier_attached: false,
+            relay_carrier_epoch: None,
             warmup_logged: false,
         }
     }
 
-    fn status(&self) -> PeerIceStatus {
+    /// R1：`carrier_attached` / `relay_transport_up` 是本拍从 WG seam 与 relay 平面
+    /// 取来的事实（[`PeerIceOrchestrator::relay_facts`] 的唯一来源），本方法只做
+    /// 派生：`reachable` 语义不变（ICE 选中 + 落配），另给出三态 `transport`。
+    fn status(&self, carrier_attached: bool, relay_transport_up: bool) -> PeerIceStatus {
         let controlling = self.session.as_ref().map(|s| s.is_controlling());
+        let reachable = self.state == PeerIceState::Connected && self.endpoint_applied;
         PeerIceStatus {
             pub_key: self.key.clone(),
             state: self.state,
             controlling,
             selected_remote: self.selected_remote,
             endpoint_applied: self.endpoint_applied,
-            reachable: self.state == PeerIceState::Connected && self.endpoint_applied,
+            reachable,
+            carrier_attached,
+            transport: peer_transport(reachable, carrier_attached, relay_transport_up),
             last_error: self.last_error,
         }
     }
 
     /// 0.0.34 (peer-status lag REPORT §5 F1): the per-peer ICE facts this
     /// crate RENDERS (`ice_peers[]`: state / role / selected pair / landing /
-    /// reachability / last error class) as one `Copy` value — the change
-    /// detector behind [`PeerIceOrchestrator::note_ice_edges`]. Deliberately
-    /// NOT the check/keepalive/pair counters or the guard's retry token: a
-    /// counter tick is not an edge (upstream judges an edge on exactly the
-    /// status/relayed facts, `peer/status.go:662 hasStatusOrRelayedChange`).
+    /// reachability / transport / last error class) as one `Copy` value — the
+    /// change detector behind [`PeerIceOrchestrator::note_ice_edges`].
+    /// Deliberately NOT the check/keepalive/pair counters or the guard's retry
+    /// token: a counter tick is not an edge (upstream judges an edge on exactly
+    /// the status/relayed facts, `peer/status.go:662 hasStatusOrRelayedChange`).
     /// `selected_local` is the session's own cheap pair identity
     /// ([`IceSession::selected_pair_identity`]) — no candidate is cloned.
-    fn ice_edge_facts(&self) -> PeerIceFacts {
+    fn ice_edge_facts(&self, carrier_attached: bool, relay_transport_up: bool) -> PeerIceFacts {
         let (controlling, selected_local) = match self.session.as_ref() {
             Some(session) => (
                 Some(session.is_controlling()),
@@ -1539,13 +1686,15 @@ impl PeerConn {
             ),
             None => (None, None),
         };
+        let reachable = self.state == PeerIceState::Connected && self.endpoint_applied;
         PeerIceFacts {
             state: self.state,
             controlling,
             selected_local,
             selected_remote: self.selected_remote,
             endpoint_applied: self.endpoint_applied,
-            reachable: self.state == PeerIceState::Connected && self.endpoint_applied,
+            reachable,
+            transport: peer_transport(reachable, carrier_attached, relay_transport_up),
             last_error: self.last_error,
         }
     }
@@ -1556,8 +1705,8 @@ impl PeerConn {
     ///
     /// 纯读：不 take / dup / close 任何 socket，也不改会话——收集到的
     /// socket 归属（[`IceSession`] 持有、`Drop`/`stop` 关闭）不受影响。
-    fn detail(&self) -> PeerIceDetail {
-        let status = self.status();
+    fn detail(&self, carrier_attached: bool, relay_transport_up: bool) -> PeerIceDetail {
+        let status = self.status(carrier_attached, relay_transport_up);
         let (selected_local, selected_remote) = match self
             .session
             .as_ref()
@@ -1583,6 +1732,7 @@ impl PeerConn {
             } else {
                 IceRetryMode::Fast
             },
+            transport: status.transport,
         }
     }
 }
@@ -2103,8 +2253,30 @@ impl PeerIceOrchestrator {
         self.peers.iter().map(|p| p.key.clone()).collect()
     }
 
+    /// R1：本 peer 的 relay 事实 `(carrier_attached, relay_transport_up)`，状态面
+    /// 与 [`Self::note_ice_edges`] 共用唯一来源。
+    ///
+    /// `carrier_attached` 来自 WG seam（[`WgPeerApplier::carrier_attached`]），
+    /// `relay_transport_up` 来自共享 relay 平面（上游 `relayManager.Ready()`）。
+    /// **未接线 relay 平面**（无 relay 的路径、既有测试）时回落为 `true`，与
+    /// [`Self::guard_tick`] 的 `peer_uses_relay` 回落同义：此时车道挂没挂是唯一
+    /// 的 relay 事实。锁序：编排锁 → WG 设备锁 / relay 平面叶锁，与 `guard_tick`
+    /// 完全一致，不引入反向获取。
+    fn relay_facts(&self, key: &str) -> (bool, bool) {
+        let carrier_attached = self.wg.carrier_attached(key);
+        let relay_transport_up = self
+            .relay_plane
+            .as_ref()
+            .map(|link| link.transport_up())
+            .unwrap_or(true);
+        (carrier_attached, relay_transport_up)
+    }
+
     pub fn peer_status(&self, key: &str) -> Option<PeerIceStatus> {
-        self.peers.iter().find(|p| p.key == key).map(|p| p.status())
+        self.peers.iter().find(|p| p.key == key).map(|p| {
+            let (carrier_attached, relay_transport_up) = self.relay_facts(&p.key);
+            p.status(carrier_attached, relay_transport_up)
+        })
     }
 
     /// 单个 peer 的 ICE 细节快照（[`PeerIceDetail`]；未知 key → `None`）。
@@ -2113,7 +2285,10 @@ impl PeerIceOrchestrator {
     /// socket 的归属（[`IceSession`] 持有、`Drop`/`stop` 关闭）不变；迟到
     /// 候选与重选出的 selected pair 在每次调用时如实反映（无缓存）。
     pub fn peer_ice_detail(&self, key: &str) -> Option<PeerIceDetail> {
-        self.peers.iter().find(|p| p.key == key).map(|p| p.detail())
+        self.peers.iter().find(|p| p.key == key).map(|p| {
+            let (carrier_attached, relay_transport_up) = self.relay_facts(&p.key);
+            p.detail(carrier_attached, relay_transport_up)
+        })
     }
 
     /// 全部 peer 的 ICE 细节快照，按 `pub_key` 排序（与 `peer_relays` 同一
@@ -2121,7 +2296,14 @@ impl PeerIceOrchestrator {
     ///
     /// `connector_status()` 的 per-peer 明细字段直接消费本返回值。
     pub fn ice_details(&self) -> Vec<PeerIceDetail> {
-        let mut details: Vec<PeerIceDetail> = self.peers.iter().map(|p| p.detail()).collect();
+        let mut details: Vec<PeerIceDetail> = self
+            .peers
+            .iter()
+            .map(|p| {
+                let (carrier_attached, relay_transport_up) = self.relay_facts(&p.key);
+                p.detail(carrier_attached, relay_transport_up)
+            })
+            .collect();
         details.sort_by(|a, b| a.pub_key.cmp(&b.pub_key));
         details
     }
@@ -2146,8 +2328,20 @@ impl PeerIceOrchestrator {
             if p.endpoint_applied {
                 s.endpoints_applied += 1;
             }
-            if p.state == PeerIceState::Connected && p.endpoint_applied {
+            let reachable = p.state == PeerIceState::Connected && p.endpoint_applied;
+            if reachable {
                 s.reachable += 1;
+            }
+            // R1: availability = relay or ICE, the official `evalStatus`. The
+            // ICE-direct count above keeps its pre-existing meaning; these two
+            // are the ADDITIVE, relay-inclusive view.
+            let (carrier_attached, relay_transport_up) = self.relay_facts(&p.key);
+            let transport = peer_transport(reachable, carrier_attached, relay_transport_up);
+            if transport == PeerTransport::RelayOnly {
+                s.peers_relay_only += 1;
+            }
+            if transport.online() {
+                s.peers_online += 1;
             }
             if s.last_error.is_none() {
                 s.last_error = p.last_error;
@@ -2668,19 +2862,48 @@ impl PeerIceOrchestrator {
 
     /// 0.0.34（peer-status lag REPORT §5 F1）：把每个 peer 的 ICE 渲染事实与
     /// 上一拍比较，**任一** peer 变了就抬一次边沿（`ice_peers[]` 的任何变化
-    /// ——state/角色/选中对/落配/reachable/错误类）。全 `Copy`、零分配、
-    /// 零锁（编排锁本来就由调用方持有）。
+    /// ——state/角色/选中对/落配/reachable/transport/错误类）。全 `Copy`、零分配
+    /// （WG seam / relay 平面各一次叶锁读，与 `guard_tick` 同一锁序）。
+    ///
+    /// R1：`transport` 也是渲染事实的一部分，单独在它变化时打一行
+    /// `N5c_ICE|peer-transport|…`——这样 `ice-direct` / `relay-only` / `offline`
+    /// 三态在任何一拍的状态变化处都有可检索的证据，而不是只能从 `reachable` 的
+    /// 真假反推。首个快照（`edge_facts == None`）也打一行：它是该 peer 的首次
+    /// 观测，不是边沿，但观测面需要基线。
     ///
     /// 为什么用"与上一拍比较"而不是在每个迁移点各抬一次：迁移点有六处以上
     /// （Gathering×2 / Checking / Connected / Disconnected / drop_session 的
     /// Failed，外加 `handle_signal` 的会话重建），逐点插桩容易漏、也容易被
     /// 后来者绕过；比较法把"渲染出来的事实"本身当成判据，与文档的字段一一
     /// 对应（`PeerIceDetail`），并且天然忽略纯计数器。首个快照只建立基线
-    /// （`None` → 不抬）：peer 的出现/消失由 [`Self::set_peers`] 负责。
+    /// （`None` → 不抬边沿）：peer 的出现/消失由 [`Self::set_peers`] 负责。
     fn note_ice_edges(&mut self) {
         let mut changed = false;
+        // Disjoint field borrows: the WG seam and the relay bridge are read
+        // while the peer list is mutably borrowed (same split `guard_tick`
+        // relies on). Lock order stays orchestrator → WG device / bridge leaf.
+        let wg = &self.wg;
+        let relay_plane = &self.relay_plane;
+        // R1: the WG seam is a packet-path hot lock. The relay bridge's carrier
+        // epoch moves only on a real attach/detach (both wake the pump), so the
+        // attach fact is re-read exactly then — not on every packet-driven
+        // pass. `transport_up` is a plain atomic and is read live every pass.
+        let epoch = relay_plane.as_ref().map(|link| link.carrier_epoch()).unwrap_or(0);
         for peer in self.peers.iter_mut() {
-            let now = peer.ice_edge_facts();
+            if peer.relay_carrier_epoch != Some(epoch) {
+                peer.relay_carrier_attached = wg.carrier_attached(&peer.key);
+                peer.relay_carrier_epoch = Some(epoch);
+            }
+            let relay_transport_up = relay_plane
+                .as_ref()
+                .map(|link| link.transport_up())
+                .unwrap_or(true);
+            let now = peer.ice_edge_facts(peer.relay_carrier_attached, relay_transport_up);
+            let transport_changed =
+                peer.edge_facts.map(|prev| prev.transport) != Some(now.transport);
+            if transport_changed {
+                crate::hilog::emit(&peer_transport_line(&peer.key, now.transport));
+            }
             if let Some(prev) = peer.edge_facts {
                 if prev != now {
                     changed = true;

@@ -2669,7 +2669,9 @@ impl WgDevice {
     /// the peer — the guard's `relayUsedAndUp` input
     /// ([`WgPeerApplier::carrier_attached`](crate::connector::WgPeerApplier::carrier_attached)).
     /// Cheap read (one scan, no clone, no stats): called from the ICE pump's
-    /// guard tick only for peers that are about to be re-offered.
+    /// guard tick for peers that are about to be re-offered, by the R1
+    /// on-demand status reads, and by the per-pass edge detector ONLY when the
+    /// relay bridge's carrier epoch moved (never once per packet-driven pass).
     pub fn peer_carrier_attached(&self, pub_key_b64: &str) -> bool {
         self.peers
             .iter()

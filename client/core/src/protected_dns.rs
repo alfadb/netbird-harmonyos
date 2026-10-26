@@ -295,6 +295,14 @@ struct EpermAttempt {
     /// 1-based index in the server list of that stage ("尝试序号").
     attempt: usize,
     server: SocketAddrV4,
+    /// R0: the `SocketSupply` request id this attempt was served under — the
+    /// join key to the `socket-supply: result id=` line that handed out the
+    /// refused descriptor. Evidence only.
+    request_id: u64,
+    /// R0: the CORE-OWNED dup descriptor the attempt sent on (the shell's
+    /// original number is not visible here); `id`+`fd` is the pair the N2/DNS
+    /// receipts already use. Evidence only.
+    request_fd: i32,
     /// The socket supply's network generation AT THE MOMENT of the refusal
     /// ([`SocketSupply::generation`]) — this is the fact that lets a capture
     /// correlate the EPERM with network-generation changes.
@@ -304,22 +312,27 @@ struct EpermAttempt {
     detail: String,
 }
 
-/// 3-D: ONE structured EPERM evidence line. A stable, additive token
+/// 3-D + R0: ONE structured EPERM evidence line. A stable, additive token
 /// (`protected-dns: eperm`) beside the existing per-server result lines: the
 /// latter count the refusals, this one binds each refusal to the network
-/// generation and the attempt that produced it. Pure formatting (the in-crate
-/// test and `tests/obs_contracts.rs` pin the exact field set).
+/// generation, the attempt that produced it AND (R0) the supply request id /
+/// core-owned dup fd of the refused socket. Pure formatting (the in-crate test
+/// and `tests/obs_contracts.rs` / `tests/dns_r0_observability.rs` pin the exact
+/// field set).
+#[allow(clippy::too_many_arguments)]
 pub fn eperm_line(
     host: &str,
     stage: u8,
     attempt: usize,
     server: SocketAddrV4,
+    request_id: u64,
+    request_fd: i32,
     generation: u64,
     detail: &str,
 ) -> String {
     format!(
         "protected-dns: eperm host={host} stage={stage} attempt={attempt} server={server} \
-         errno=1 generation={generation} result={detail}"
+         id={request_id} fd={request_fd} errno=1 generation={generation} result={detail}"
     )
 }
 
@@ -334,6 +347,8 @@ fn push_eperm_lines(lines: &mut Vec<String>, host: &str, eperms: &mut Vec<EpermA
             fact.stage,
             fact.attempt,
             fact.server,
+            fact.request_id,
+            fact.request_fd,
             fact.generation,
             &fact.detail,
         ));
@@ -653,12 +668,16 @@ async fn resolve_on_servers_traced(
                 crate::hilog::emit(&format!("protected-dns: id={request_id} host={host} fd={request_fd} server={addr} elapsed_ms={} result={err}", started.elapsed().as_millis()));
                 // 3-D: capture the refusal's evidence facts BEFORE the error is
                 // moved on. Only EPERM earns a record (the class this change is
-                // about); the generation is read at the refusal instant.
+                // about); the generation is read at the refusal instant, and R0
+                // adds the request id / core-owned dup fd of THIS attempt so the
+                // record joins the supply line by id.
                 if is_permission_denied(&err) {
                     eperm.push(EpermAttempt {
                         stage,
                         attempt: index + 1,
                         server: addr,
+                        request_id,
+                        request_fd,
                         generation: supply.generation(),
                         detail: err.to_string(),
                     });
@@ -1020,6 +1039,22 @@ mod tests {
             "{}",
             records[1]
         );
+        // R0: each record binds the supply request id and the CORE-OWNED dup fd
+        // of the attempt that was refused (both real: the supply served the
+        // socket before the forced refusal, so the id is non-zero and the fd is
+        // a live descriptor number).
+        for record in &records {
+            let id = record
+                .split_whitespace()
+                .find_map(|token| token.strip_prefix("id="))
+                .unwrap_or_else(|| panic!("record carries id=: {record}"));
+            let fd = record
+                .split_whitespace()
+                .find_map(|token| token.strip_prefix("fd="))
+                .unwrap_or_else(|| panic!("record carries fd=: {record}"));
+            assert!(id.parse::<u64>().map(|id| id > 0).unwrap_or(false), "{record}");
+            assert!(fd.parse::<i32>().map(|fd| fd >= 0).unwrap_or(false), "{record}");
+        }
         // The once-per-process skip line carries the same generation when it is
         // this process's first EPERM (other tests in this binary may have run
         // it already, hence the conditional).

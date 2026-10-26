@@ -553,7 +553,10 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     /// (relay lane) attached to this seam RIGHT NOW? That is the guard's
     /// `relayConnected` input (`conn.go:851`) — one half of "relay is usable
     /// for this peer" — read by the ICE orchestrator on the guard's own due
-    /// ticks only (`crate::peer_conn::PeerIceOrchestrator::guard_tick`).
+    /// ticks (`crate::peer_conn::PeerIceOrchestrator::guard_tick`) and by the
+    /// R1 availability view: the on-demand status reads take it live, while
+    /// the per-pass edge detector refreshes its cache only when the relay
+    /// bridge's carrier epoch moves (`RelayPlaneLink::carrier_epoch`).
     ///
     /// The OTHER half — "the peer uses relay at all", which still matters
     /// AFTER the lane is gone — is the sticky remote advertisement
@@ -2743,6 +2746,55 @@ impl ConnectorShared {
         }
     }
 
+    /// R2: start the relay client from the LOGIN response's `netbird_config`
+    /// instead of waiting for the first Sync. Upstream reads the SAME field
+    /// (`parseRelayInfo(loginResp)`, connect.go:570-582) and serves the relay
+    /// manager BEFORE `engine.Start` (connect.go:464-478) — but its
+    /// `Serve()` may block engine startup for up to 30 s
+    /// (picker.go:17,36-38). This does the opposite: it only starts the
+    /// client's own worker (dialing happens there) and returns immediately,
+    /// so NO connection phase ever waits on the relay.
+    ///
+    /// Reuses [`ConnectorShared::relay_apply`] verbatim so the Sync path
+    /// stays the single owner of the lifecycle: a later same-URL sync only
+    /// refreshes the token (`update_token`, no reconnect), a changed URL set
+    /// replaces the client, and the carrier attach is skipped when the SAME
+    /// client is already armed ([`RelayCarrier::has_client`]).
+    ///
+    /// A login response WITHOUT a relay block (or with an empty URL set) is
+    /// NOT a revocation: only the Sync path may tear the client down
+    /// (upstream `handleRelayUpdate(nil)` engine.go:1175-1214), so a
+    /// config-less/reconnect login can never flap a live relay.
+    fn remember_login_relay(&self, response: &crate::grpc::proto::LoginResponse) {
+        if !self.relay_enabled {
+            return;
+        }
+        let Some(cfg) = response.netbird_config.as_ref() else {
+            hilog::emit("connector: relay login-start skipped (login carries no netbird-config)");
+            return;
+        };
+        let Some(relay) = crate::network_map::NetbirdServers::from_proto(cfg).relay else {
+            hilog::emit("connector: relay login-start skipped (login advertises no relay)");
+            return;
+        };
+        if relay.urls.is_empty() {
+            hilog::emit("connector: relay login-start skipped (empty relay url set)");
+            return;
+        }
+        self.relay_apply(&relay);
+        if let Some(client) = self.relay_handle() {
+            let state = client.stats().state;
+            self.relay_carrier_client_started(client, &relay);
+            hilog::emit_evidence(&format!(
+                "relay:login-start|urls={}|state={}",
+                relay.urls.len(),
+                relay_state_token(state)
+            ));
+        } else {
+            hilog::emit("connector: relay login-start failed (no client; fail-closed)");
+        }
+    }
+
     /// Apply one decoded Sync update to the internal state and the data
     /// plane. Snapshot ordering follows upstream engine.go:1572-1576: a
     /// NetworkMap with a serial STRICTLY BELOW the last applied one is
@@ -4159,6 +4211,13 @@ impl RelayCarrier {
                 });
                 drop(lifecycle);
                 hilog::emit("connector: relay carrier lane attached (peers-online)");
+                // R1: the lane attach is one half of the official
+                // `statusRelay == Connected` fact; wake the ICE pump once so
+                // `note_ice_edges` can publish `transport=relay-only` (status
+                // edge + log) on its next pass instead of waiting for an
+                // unrelated deadline. No event is queued and no classifier
+                // input is mutated here.
+                self.relay_plane.relay_lane_attached();
                 true
             }
             Err(e) => {
@@ -4760,7 +4819,7 @@ fn ice_endpoint_json(key: &str, v: Option<&IceCandidateEndpoint>) -> String {
 /// retained pair into a live connection.
 fn ice_detail_json(d: &PeerIceDetail) -> String {
     format!(
-        "{{{},{},{},{},{},{},{},{},{}}}",
+        "{{{},{},{},{},{},{},{},{},{},{}}}",
         jstr("pub_key", &d.pub_key),
         jstr("state", d.state.as_str()),
         match d.controlling {
@@ -4784,6 +4843,12 @@ fn ice_detail_json(d: &PeerIceDetail) -> String {
         // `guard.go:131-138` + `guard/ice_retry_state.go`). Every pre-existing
         // key keeps its position.
         jstr("ice_retry", d.ice_retry.as_str()),
+        // Appended R1: the peer's available bearer — `ice-direct` /
+        // `relay-only` / `offline` (official `evalStatus`, conn.go:819-825:
+        // relay or ICE Connected ⇒ Connected). `reachable` keeps its
+        // ICE-direct-only meaning; this is the ADDITIVE relay-inclusive view
+        // and changes no forwarding path.
+        jstr("transport", d.transport.as_str()),
     )
 }
 
@@ -7246,6 +7311,12 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 // (engine_authsession.go:17-62 semantics)
                 shared.lock().deadline.apply_wire(outcome.session_deadline_unix);
                 shared.remember_login_signal(&outcome.response);
+                // R2: the login reply carries the relay server set
+                // (LoginResponse.netbird_config.relay) — start the relay
+                // client NOW, so it is dialing while ICE/signal come up
+                // instead of waiting for the first Sync's netbird_config.
+                // Non-blocking and idempotent (see the method's contract).
+                shared.remember_login_relay(&outcome.response);
                 if outcome.peer_address.is_some() {
                     hilog::emit_evidence("connector: login ok (peer address assigned)");
                 } else {
@@ -10772,7 +10843,8 @@ mod tests {
                  \"disconnected\":0,\"failed\":1,\"endpoints_applied\":1,\"reachable\":1,\
                  \"unknown_signal\":0,\
                  \"last_error\":{\"class\":\"network\",\"status\":0},\
-                 \"pump_passes_total\":0,\"pump_passes_per_10s\":0}"
+                 \"pump_passes_total\":0,\"pump_passes_per_10s\":0,\
+                 \"peers_online\":0,\"peers_relay_only\":0}"
             ),
             "{json}"
         );
@@ -10967,6 +11039,7 @@ mod tests {
             reachable: false,
             last_error: None,
             ice_retry: crate::peer_conn::IceRetryMode::Fast,
+            transport: crate::peer_conn::PeerTransport::Offline,
         };
         let connected = PeerIceDetail {
             pub_key: "REVG".to_string(),
@@ -10986,6 +11059,7 @@ mod tests {
             reachable: true,
             last_error: None,
             ice_retry: crate::peer_conn::IceRetryMode::Fast,
+            transport: crate::peer_conn::PeerTransport::IceDirect,
         };
         // Disconnected KEEPS its selected pair (the live session snapshot
         // still holds it) but `reachable` stays FALSE: a retained endpoint is
@@ -11009,6 +11083,7 @@ mod tests {
             last_error: Some(ErrorClass::Auth { status: 7 }),
             // the hourly guard档 is observable per peer
             ice_retry: crate::peer_conn::IceRetryMode::Hourly,
+            transport: crate::peer_conn::PeerTransport::Offline,
         };
         let details = ice_peers_json(Some(&[idle.clone(), connected.clone(), disconnected.clone()]));
         assert_eq!(
@@ -11017,17 +11092,18 @@ mod tests {
              {\"pub_key\":\"QUJD\",\"state\":\"idle\",\"controlling\":null,\
              \"selected_local\":null,\"selected_remote\":null,\
              \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null,\
-             \"ice_retry\":\"fast\"},\
+             \"ice_retry\":\"fast\",\"transport\":\"offline\"},\
              {\"pub_key\":\"REVG\",\"state\":\"connected\",\"controlling\":true,\
              \"selected_local\":{\"type\":\"host\",\"address\":\"192.168.1.5\",\"port\":51820},\
              \"selected_remote\":{\"type\":\"srflx\",\"address\":\"203.0.113.9\",\"port\":51821},\
              \"endpoint_applied\":true,\"reachable\":true,\"last_error\":null,\
-             \"ice_retry\":\"fast\"},\
+             \"ice_retry\":\"fast\",\"transport\":\"ice-direct\"},\
              {\"pub_key\":\"R0hJ\",\"state\":\"disconnected\",\"controlling\":false,\
              \"selected_local\":{\"type\":\"prflx\",\"address\":\"10.0.0.7\",\"port\":41000},\
              \"selected_remote\":{\"type\":\"relay\",\"address\":\"198.51.100.5\",\"port\":28443},\
              \"endpoint_applied\":true,\"reachable\":false,\
-             \"last_error\":{\"class\":\"auth\",\"status\":7},\"ice_retry\":\"hourly\"}]"
+             \"last_error\":{\"class\":\"auth\",\"status\":7},\"ice_retry\":\"hourly\",\
+             \"transport\":\"offline\"}]"
         );
         // the guard retry档 token is projected per peer (the alignment
         // `PartiallyConnected` state surface): both values are reachable.
@@ -11128,8 +11204,13 @@ mod tests {
         assert_eq!(
             joined(&items[0]),
             "pub_key,state,controlling,selected_local,selected_remote,\
-             endpoint_applied,reachable,last_error,ice_retry",
+             endpoint_applied,reachable,last_error,ice_retry,transport",
             "the per-peer key order is the frozen contract"
+        );
+        assert_eq!(
+            obj_get(&items[1], "transport"),
+            &Json::Str("ice-direct".to_string()),
+            "R1: the additive three-state bearer rides the per-peer tail"
         );
         assert_eq!(
             obj_get(&items[2], "ice_retry"),
@@ -11251,7 +11332,7 @@ mod tests {
                 ",\"ice_peers\":[{\"pub_key\":\"UEVFUjA=\",\"state\":\"idle\",\
                  \"controlling\":null,\"selected_local\":null,\"selected_remote\":null,\
                  \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null,\
-                 \"ice_retry\":\"fast\"}],\
+                 \"ice_retry\":\"fast\",\"transport\":\"offline\"}],\
                  \"ice_mux\":null}"
             ),
             "{json}"

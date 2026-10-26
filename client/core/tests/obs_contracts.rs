@@ -121,19 +121,24 @@ use netbird_core::socket_supply::SocketSupply;
 use netbird_core::wg_device::direct_to_carrier_initial_line;
 
 #[test]
-fn eperm_record_pins_host_stage_attempt_server_errno_and_generation() {
+fn eperm_record_pins_host_stage_attempt_server_id_fd_errno_and_generation() {
+    // R0: `id=`/`fd=` are the request id and the core-owned dup fd this refusal
+    // belongs to; they are inserted before the free-text `result=` tail and no
+    // pre-R0 field moved.
     let line = eperm_line(
         "relay.example",
         1,
         2,
         SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 53), 53),
+        42,
+        17,
         7,
         "dns:send-failed errno=1 (Operation not permitted (os error 1))",
     );
     assert_eq!(
         line,
         "protected-dns: eperm host=relay.example stage=1 attempt=2 server=192.0.2.53:53 \
-         errno=1 generation=7 result=dns:send-failed errno=1 (Operation not permitted (os error 1))"
+         id=42 fd=17 errno=1 generation=7 result=dns:send-failed errno=1 (Operation not permitted (os error 1))"
     );
 }
 

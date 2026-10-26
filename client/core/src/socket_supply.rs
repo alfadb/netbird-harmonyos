@@ -101,6 +101,30 @@ impl SocketKind {
     }
 }
 
+/// R0 (design `analysis-20261026-dns-structural` §4.2/§5.2 #2): the
+/// `socket-supply: result` line. APPEND-ONLY — every pre-existing field
+/// (`id=`, `purpose=`, `kind=`, `fd=`, `result=`, `elapsed_ms=`) keeps its
+/// position and meaning, and `epoch=` is tail-appended. `epoch` is the
+/// core-owned [`SocketSupply::generation`] at the reply instant (the only
+/// platform identity the core can state without a shell self-report); the
+/// shell-reported `net_id=` / `protect_generation=` / `protect_ms=` are NOT
+/// invented here — they need the ets supply-reply extension (R0 gap). Pure
+/// formatter so the field contract is testable without capturing stderr
+/// (`tests/dns_r0_observability.rs`).
+pub fn supply_result_line(
+    id: u64,
+    purpose: Purpose,
+    kind: SocketKind,
+    fd: i32,
+    token: &str,
+    elapsed_ms: u128,
+    epoch: u64,
+) -> String {
+    format!(
+        "socket-supply: result id={id} purpose={} kind={} fd={fd} result={token} elapsed_ms={elapsed_ms} epoch={epoch}",
+        purpose.name(), kind.name())
+}
+
 #[derive(Debug)]
 struct Pending {
     purpose: Purpose,
@@ -222,7 +246,8 @@ impl SocketSupply {
             Ok(Err(_)) => Err(SocketSeamError::Supply("socket-supply-closed")),
             Err(_) => {
                 self.state.lock().expect("socket supply").pending.remove(&id);
-                hilog::emit(&format!("socket-supply: result id={id} purpose={} result=timeout elapsed_ms={}", purpose.name(), WAIT.as_millis()));
+                hilog::emit(&format!("socket-supply: result id={id} purpose={} result=timeout elapsed_ms={} epoch={}",
+                    purpose.name(), WAIT.as_millis(), self.generation()));
                 Err(SocketSeamError::Supply("socket-supply-timeout"))
             }
         }
@@ -264,8 +289,9 @@ impl SocketSupply {
             }))
         };
         let token = match &outcome { Ok(_) => "protected", Err(e) => e.token() };
-        hilog::emit(&format!("socket-supply: result id={id} purpose={} kind={} fd={fd} result={token} elapsed_ms={}",
-            pending.purpose.name(), pending.kind.name(), pending.started.elapsed().as_millis()));
+        hilog::emit(&supply_result_line(
+            id, pending.purpose, pending.kind, fd, token,
+            pending.started.elapsed().as_millis(), self.generation()));
         let ok = outcome.is_ok();
         let delivered = pending.sender.send(outcome).is_ok();
         format!("{{\"ok\":{}}}", ok && delivered)
