@@ -121,6 +121,28 @@ export interface SocketFeedResult {
   error?: string;
 }
 
+// R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`): the OS
+// availability verdict is a SEPARATE document from the change seam — the answer
+// says whether the core RECORDED the state and whether a live orchestrator
+// received it.
+export interface NetworkAvailabilityResult {
+  ok: boolean;
+  available?: boolean;
+  changed?: boolean;
+  applied?: boolean;
+  error?: string;
+}
+
+// R3: the explicit host-resume observation. `gap_ms` is echoed back verbatim
+// (the shell's wall-clock watcher gap); `applied` says whether a live
+// orchestrator recorded it.
+export interface HostResumedResult {
+  ok: boolean;
+  gap_ms?: number;
+  applied?: boolean;
+  error?: string;
+}
+
 // Error classification only — never a server/transport message
 // (connector credential discipline).
 export interface ConnectorErrorClass {
@@ -721,6 +743,27 @@ export function connectorManagementAddressUpdate(connectAddr: string): SocketFee
   return JSON.parse(core.connector_management_address_update(JSON.stringify(address))) as SocketFeedResult;
 }
 
+// R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`): the OS
+// "is there a network at all" verdict, SEPARATE from the change seam above.
+// While offline the core's peer guard skips its due attempts and spends no ICE
+// retry budget (`client/internal/peer/guard/guard.go:123-125`); availability
+// returning re-arms each peer's ticker and resets that budget. The core records
+// the verdict even when no connector is running yet (the shell registers the
+// observer BEFORE the start leg), so this call is safe at any lifecycle point.
+// It never touches forwarding, sessions, DNS or relay.
+export function connectorNetworkAvailable(available: boolean): NetworkAvailabilityResult {
+  return JSON.parse(core.connector_network_available(available)) as NetworkAvailabilityResult;
+}
+
+// R3: the explicit suspend/wake observation — the shell's wall-clock watcher
+// tick gap (NetBirdDataPlanePolicy.resumeGapDetected, > 15 s). Observation
+// only: the core logs `connector: host-resumed|gap_ms=` and records the gap;
+// no guard ticker, ICE session or deadline is changed by it, and the existing
+// recovery path stays exactly as it was.
+export function connectorHostResumed(gapMs: number): HostResumedResult {
+  return JSON.parse(core.connector_host_resumed(gapMs)) as HostResumedResult;
+}
+
 export interface ProtectedDnsResult {
   ok: boolean;
   id?: number;
@@ -794,16 +837,78 @@ export function socketSupplyUnsubscribe(): SocketFeedResult {
   return JSON.parse(core.socket_supply_unsubscribe()) as SocketFeedResult;
 }
 
-export function socketSupplyReply(id: string, fd: number, result: string): SocketFeedResult {
-  return JSON.parse(core.socket_supply_reply(id, fd, result)) as SocketFeedResult;
+// R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-1): the reply's
+// OPTIONAL platform identity — the physical net id the protect was issued on,
+// the shell's protect generation at that instant and the measured protect
+// duration. The core prints them on the `socket-supply: result` line and keeps
+// them BY REQUEST ID so the same socket's `protected-dns: eperm` record can
+// state the same group. All three are OPTIONAL and default to the core's
+// "not reported" sentinel (-1), so a pre-R0 caller (three arguments) and an
+// old core see the exact pre-R0 wire shape.
+export function socketSupplyReply(id: string, fd: number, result: string,
+  netId?: number, protectGeneration?: number, protectMs?: number): SocketFeedResult {
+  const reportedNetId: number = netId === undefined ? -1 : netId;
+  const reportedGeneration: number = protectGeneration === undefined ? -1 : protectGeneration;
+  const reportedMs: number = protectMs === undefined ? -1 : protectMs;
+  return JSON.parse(core.socket_supply_reply(id, fd, result, reportedNetId,
+    reportedGeneration, reportedMs)) as SocketFeedResult;
 }
 
 export function socketSupplyCloseFd(fd: number): void {
   core.socket_supply_close_fd(fd);
 }
 
+// R1 (design `analysis-20261026-dns-structural` §4.2): reprotect-once. On the
+// FIRST EPERM of a protected-DNS chain the core hands the shell back the VERY
+// descriptor it is about to re-send on (`fd`), the shell re-issues the ONE
+// write-side SDK call on that SAME fd (`VpnConnection.protect`, write-only —
+// @ohos.net.vpnExtension.d.ts:244) and answers `ok`/`fail` + the platform error
+// code, so the core can log "标记可恢复" versus "路径不通". The request rides the
+// SAME core wake as the supply queue; `id`/`fd` are STRINGS so a 64-bit id
+// survives any JS number, and the shell NEVER closes the descriptor (the core
+// still sends on it).
+export interface SocketReprotectRequest {
+  id: string;
+  fd: string;
+}
+
+export function socketSupplyReprotectPoll(): SocketReprotectRequest {
+  return JSON.parse(core.socket_supply_reprotect_poll()) as SocketReprotectRequest;
+}
+
+// The shell's answer to ONE reprotect request: `result` is the wire token
+// `ok`/`fail`, `errno`/`protectMs` are -1 when the shell has no such value (the
+// core prints an absent value as absent, never as 0/−1). A stale id answers
+// `request-expired` — the core already moved on to the unchanged fallback chain.
+export function socketSupplyReprotectReply(id: string, result: string, errno: number,
+  protectMs: number): SocketFeedResult {
+  return JSON.parse(core.socket_supply_reprotect_reply(id, result, errno,
+    protectMs)) as SocketFeedResult;
+}
+
 export function socketSupplyDnsServers(servers: string[]): SocketFeedResult {
   return JSON.parse(core.socket_supply_dns_servers(JSON.stringify(servers))) as SocketFeedResult;
+}
+
+// R2 (design `analysis-20261026-dns-structural` §4.2): the protected path's
+// fast-fail state, as the core latched it from an EPERM on a protected DNS send.
+// `unusable` is the latch (cleared by the existing recovery — a reported
+// physical-network change — or by a protected answer), `refuse_dns` is the
+// bounded probe window inside which a NEW DNS supply must be refused. The shell
+// turns this into the DNS-only `protected-path-unusable` gate reason, so the
+// core is never handed a socket whose every send is already refused. An old
+// core does not export the function; the caller's catch degrades to the honest
+// "not unusable" document.
+export interface SocketPathState {
+  unusable?: boolean;
+  refuse_dns?: boolean;
+  reason?: string;
+  generation?: number;
+  age_ms?: number;
+}
+
+export function socketSupplyPathState(): SocketPathState {
+  return JSON.parse(core.socket_supply_path_state()) as SocketPathState;
 }
 
 export function socketSupplyShutdown(): void {

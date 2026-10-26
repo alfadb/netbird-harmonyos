@@ -315,6 +315,24 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_status_subscribe", napi_connector_status_subscribe);
     reg!("connector_status_unsubscribe", napi_connector_status_unsubscribe);
     reg!("connector_status_revision", napi_connector_status_revision);
+    // R1 (design `analysis-20261026-dns-structural` §4.2): the reprotect-once
+    // diagnostic. The shell polls the ONE pending request (the very descriptor
+    // the core will re-send on) and answers ok/fail + the platform error code.
+    // Both are synchronous JSON->JSON; no new threadsafe function, no async
+    // work. Appended at the TAIL (append-only: every pre-existing name keeps its
+    // position and its created function object).
+    reg!("socket_supply_reprotect_poll", napi_socket_supply_reprotect_poll);
+    reg!("socket_supply_reprotect_reply", napi_socket_supply_reprotect_reply);
+    // R2 (design `analysis-20261026-dns-structural` §4.2): the protected path's
+    // fast-fail state the shell's supply gate reads (DNS-only refusal). Appended
+    // at the TAIL (append-only: every pre-existing name keeps its position and
+    // its created function object).
+    reg!("socket_supply_path_state", napi_socket_supply_path_state);
+    // R3 (REPORT §6.4): the OS availability verdict and the explicit host-resume
+    // observation. Appended at the TAIL (append-only: every pre-existing name
+    // keeps its position and its created function object).
+    reg!("connector_network_available", napi_connector_network_available);
+    reg!("connector_host_resumed", napi_connector_host_resumed);
     exports
 }
 
@@ -870,6 +888,11 @@ mod tests {
             "connector_status_subscribe",
             "connector_status_unsubscribe",
             "connector_status_revision",
+            "socket_supply_reprotect_poll",
+            "socket_supply_reprotect_reply",
+            "socket_supply_path_state",
+            "connector_network_available",
+            "connector_host_resumed",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -881,13 +904,16 @@ mod tests {
         }
 
         // Append-only surface (increments 131/132 + the additive heap readout,
-        // then the 0.0.34 status-edge trio): the route pair, `alloc_stats` and
-        // the status surface are the LAST registrations, in that order, and
-        // every export name is registered exactly once — no pre-existing name
-        // lost its position or its created function object to the new binding.
+        // then the 0.0.34 status-edge trio, then R1's reprotect pair, then R2's
+        // path-state readout, then R3's availability pair): the route pair,
+        // `alloc_stats`, the status surface, the two reprotect exports,
+        // `socket_supply_path_state` and the two R3 entries are the LAST
+        // registrations, in that order, and every export name is registered
+        // exactly once — no pre-existing name lost its position or its created
+        // function object to the new bindings.
         let names: Vec<&str> = calls.iter().map(|(_, name, _)| name.as_str()).collect();
         assert_eq!(
-            names[names.len() - 6..].to_vec(),
+            names[names.len() - 11..].to_vec(),
             vec![
                 "connector_routes",
                 "connector_route_selection_set",
@@ -895,8 +921,13 @@ mod tests {
                 "connector_status_subscribe",
                 "connector_status_unsubscribe",
                 "connector_status_revision",
+                "socket_supply_reprotect_poll",
+                "socket_supply_reprotect_reply",
+                "socket_supply_path_state",
+                "connector_network_available",
+                "connector_host_resumed",
             ],
-            "the route surface, the heap readout and the status-edge trio must stay appended at the registration tail"
+            "the route surface, the heap readout, the status-edge trio, the reprotect pair, R2's path-state readout and R3's availability pair must stay appended at the registration tail"
         );
         let mut seen = std::collections::HashSet::new();
         for name in &names {
@@ -1545,6 +1576,25 @@ unsafe extern "C" fn napi_connector_physical_network_changed(env: NapiEnv, info:
     ret_json(env, crate::connector::connector_physical_network_changed_json(&a.string_at(0)))
 }
 
+/// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68`）：OS 的网络
+/// 可用性。`true` = 有网（默认），`false` = 离线。离线期间 guard 跳不发起、
+/// 不消费 ICE 重试预算（`client/peer/guard/guard.go:123-125`）。JSON→JSON、
+/// 同步，无新线程/TSFN。
+unsafe extern "C" fn napi_connector_network_available(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    // default `true`: a missing/non-boolean argument must never invent offline.
+    let available = a.bool_at(0, true);
+    ret_json(env, crate::connector::connector_network_available_json(available))
+}
+
+/// R3：壳层的显式 resume 观测（墙钟 watcher tick-gap，毫秒）。只记录 +
+/// 一行 `connector: host-resumed|gap_ms=`，不改任何恢复路径。负值/缺参按 0。
+unsafe extern "C" fn napi_connector_host_resumed(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let gap_ms = a.i32_at(0, 0).max(0) as u64;
+    ret_json(env, crate::connector::connector_host_resumed_json(gap_ms))
+}
+
 unsafe extern "C" fn napi_connector_management_address_update(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::connector_management_address_update_json(&a.string_at(0)))
@@ -1740,7 +1790,16 @@ unsafe extern "C" fn napi_socket_supply_unsubscribe(
 
 unsafe extern "C" fn napi_socket_supply_reply(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
-    ret_json(env, crate::socket_supply::reply_json(&a.string_at(0), a.i32_at(1, -1), &a.string_at(2)))
+    // R0 ets half (design `analysis-20261026-dns-structural` §4.2): THREE
+    // OPTIONAL trailing numbers — the protect-time platform net id, the shell's
+    // protect generation and the measured protect duration. Missing arguments
+    // (the pre-R0 three-argument call) keep the `-1` default, which
+    // `meta_from_reply_args` maps back to "not reported", so the result line
+    // stays byte-identical for an old shell.
+    let meta = crate::socket_supply::meta_from_reply_args(
+        a.i32_at(3, -1), a.i32_at(4, -1), a.i32_at(5, -1));
+    ret_json(env, crate::socket_supply::reply_json_with_meta(
+        &a.string_at(0), a.i32_at(1, -1), &a.string_at(2), &meta))
 }
 
 unsafe extern "C" fn napi_socket_supply_close_fd(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -1756,6 +1815,37 @@ unsafe extern "C" fn napi_socket_supply_shutdown(env: NapiEnv, _info: NapiCallba
 unsafe extern "C" fn napi_socket_supply_dns_servers(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::socket_supply::set_dns_servers_json(&a.string_at(0)))
+}
+
+/// R1: `socket_supply_reprotect_poll() => '{"id":"<n>","fd":"<n>"}'` (or the
+/// empty id). The shell calls it from the SAME wake that drains the supply
+/// queue; `fd` is the core descriptor the protected-DNS attempt is sending on,
+/// so `protect(fd)` re-marks exactly that socket before the one re-send.
+unsafe extern "C" fn napi_socket_supply_reprotect_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::socket_supply::poll_reprotect_json())
+}
+
+/// R1: `socket_supply_reprotect_reply(id, result, errno, protect_ms) =>
+/// '{"ok":true}'` (or `request-expired` / `socket-supply-closed`). `result` is
+/// the wire token `ok`/`fail`; `errno`/`protect_ms` are `-1` when the shell has
+/// no such value.
+unsafe extern "C" fn napi_socket_supply_reprotect_reply(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::socket_supply::reprotect_reply_json(
+        &a.string_at(0), &a.string_at(1), a.i32_at(2, -1), a.i32_at(3, -1)))
+}
+
+/// R2 (design `analysis-20261026-dns-structural` §4.2):
+/// `socket_supply_path_state() => '{"unusable":<bool>,"refuse_dns":<bool>,
+/// "reason":"<token>","generation":<n>,"age_ms":<n>}'`.
+///
+/// The protected path's fast-fail verdict, so the SHELL's supply gate can answer
+/// `protected-path-unusable` for the protected-DNS supply instead of handing the
+/// core a socket whose every send is refused (the outage's 1612 "假 protected").
+/// Synchronous JSON->JSON, no wake, no threadsafe function; an old core simply
+/// does not export it and the shell degrades to "not unusable".
+unsafe extern "C" fn napi_socket_supply_path_state(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::socket_supply::path_state_json())
 }
 
 // ---------------------------------------------------------------------------

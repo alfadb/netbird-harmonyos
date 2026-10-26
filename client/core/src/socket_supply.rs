@@ -33,6 +33,32 @@ use crate::mgmtsock::{dup_socket_fd, SocketSeamError};
 const WAIT: Duration = Duration::from_secs(8);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// R2 (design `analysis-20261026-dns-structural` §4.2): EPERM is "the protected
+// path is UNUSABLE", a first-class state rather than one line of evidence.
+// ---------------------------------------------------------------------------
+
+/// R2: the reason token the SHELL's supply gate answers with once its liveness
+/// input says the protected path is down, and the `reason=` the persisted
+/// `event=socket_supply` record carries (AC-R2-2).
+pub const PROTECTED_PATH_UNUSABLE: &str = "protected-path-unusable";
+
+/// R2: the core's error token for a DNS request refused while the path is
+/// known-unusable. It is NOT transient: retrying it would ask a path that is
+/// already known to be refused for a second socket.
+pub const SUPPLY_UNUSABLE_TOKEN: &str = "socket-supply-unusable";
+
+/// R2: how long a NEW DNS request is refused outright after an EPERM.
+///
+/// A WINDOW, not a latch: when it expires the next DNS request is a PROBE, so a
+/// recovered path is discovered without any new channel AND the state can never
+/// reproduce the 0.0.27 five-hour refusal (REPORT.md §0.1/§2.4). The latch
+/// itself ([`SocketSupply::protected_path_unusable`]) outlives the window; it
+/// exists only to keep the OS-resolver stage short until the path answers again.
+/// 30 s is deliberately the same scale as the data-plane watchdog's stale
+/// window, so a recovered path is re-probed on that same order.
+const UNUSABLE_PROBE_WINDOW: Duration = Duration::from_secs(30);
+
 /// The process-wide enqueue notification (the shell's wake). `None` = nobody is
 /// listening, which is the honest state of every host test and of the window
 /// before/after the shell subscribes. Guarded, and only ever *called* with the
@@ -57,6 +83,14 @@ fn notify_enqueued(id: u64) {
     if let Some(hook) = hook {
         hook(id);
     }
+}
+
+/// R1 (design §4.2): is a shell subscribed to the wake channel? The same
+/// subscription that serves the supply queue is what drains the reprotect queue,
+/// so its presence is exactly "somebody can answer this diagnostic". No
+/// subscription → the 250 ms wait is skipped outright.
+pub fn shell_listening() -> bool {
+    NOTIFY.lock().expect("socket supply notify").is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,16 +135,127 @@ impl SocketKind {
     }
 }
 
+/// R0 ets half (design `analysis-20261026-dns-structural` §4.2, AC-R0-1): the
+/// OPTIONAL shell self-report that rides a socket-supply reply. All three
+/// values are PLATFORM facts the core cannot see — the physical network id the
+/// protect was issued on, the shell's protect generation at that instant, and
+/// the protect call's measured duration. `None` means the shell did not report
+/// it (the pre-R0 three-argument reply); NOTHING is then printed, so the line
+/// stays byte-identical to its pre-R0 shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SupplyMeta {
+    /// Platform physical network id at protect time (`net_id=`).
+    pub net_id: Option<u64>,
+    /// The shell's network/protect generation at protect time
+    /// (`protect_generation=`; the core's own counter is `epoch=`).
+    pub protect_generation: Option<u64>,
+    /// The protect call's measured duration in milliseconds (`protect_ms=`).
+    pub protect_ms: Option<u64>,
+}
+
+impl SupplyMeta {
+    pub fn is_empty(&self) -> bool {
+        self.net_id.is_none() && self.protect_generation.is_none() && self.protect_ms.is_none()
+    }
+
+    /// The APPEND-ONLY suffix shared by `socket-supply: result` and
+    /// `protected-dns: eperm`. The field order is fixed (`net_id` ->
+    /// `protect_generation` -> `protect_ms`) and each field appears only when
+    /// the shell reported it, so an old shell's reply is unchanged.
+    pub fn suffix(&self) -> String {
+        let mut out = String::new();
+        if let Some(net_id) = self.net_id { out.push_str(&format!(" net_id={net_id}")); }
+        if let Some(generation) = self.protect_generation {
+            out.push_str(&format!(" protect_generation={generation}"));
+        }
+        if let Some(ms) = self.protect_ms { out.push_str(&format!(" protect_ms={ms}")); }
+        out
+    }
+}
+
+/// R0: map the THREE OPTIONAL trailing napi reply numbers to a [`SupplyMeta`].
+/// The shell sends `-1` for "unknown" (a refused request never reached a
+/// protect), which is the same fact as an absent argument — an old shell simply
+/// passes nothing at all (the argument defaults to `-1`). A real `0` (net id 0,
+/// generation 0, a 0 ms protect) is a VALUE, not absence. The values are the
+/// shell's small counters: a network id, its generation counter and the
+/// duration of one bounded protect call, all far inside `i32` (the protect call
+/// itself is boxed at 5 s in the shell).
+pub fn meta_from_reply_args(net_id: i32, protect_generation: i32, protect_ms: i32) -> SupplyMeta {
+    let value = |v: i32| if v < 0 { None } else { Some(v as u64) };
+    SupplyMeta {
+        net_id: value(net_id),
+        protect_generation: value(protect_generation),
+        protect_ms: value(protect_ms),
+    }
+}
+
+/// R0: how many replied request ids keep their shell meta. The EPERM evidence
+/// is collected in the same resolve pass that received the reply, so a small
+/// recent window is enough; the retention is evidence only and never read by a
+/// decision.
+const META_RETAINED: usize = 64;
+
+/// R2: the protected path's fast-fail state, as the shell reads it back through
+/// `socket_supply_path_state`. Two DIFFERENT facts are reported because they
+/// expire differently:
+///
+/// - `unusable` is the LATCH (set by an EPERM, cleared by the existing recovery
+///   or by a protected answer). It keeps the OS-resolver stage at its short
+///   bound, so a fault window cannot re-introduce the 3 s wait per chain;
+/// - `refuse_dns` additionally says "refuse a NEW DNS request right now", which
+///   is only true inside [`UNUSABLE_PROBE_WINDOW`] so the next request after it
+///   is a probe instead of a permanent lockout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathState {
+    pub unusable: bool,
+    pub refuse_dns: bool,
+    pub reason: &'static str,
+    pub generation: u64,
+    pub age_ms: u128,
+}
+
+impl PathState {
+    /// The not-unusable document: what the shell must read when nothing has gone
+    /// wrong (and what a pre-R2 core's missing export degrades to).
+    pub fn usable() -> Self {
+        Self { unusable: false, refuse_dns: false, reason: "", generation: 0, age_ms: 0 }
+    }
+
+    /// The wire document of the R2 NAPI export. Flat, additive and stable — the
+    /// shell parses these five keys by name.
+    pub fn json(&self) -> String {
+        format!(
+            "{{\"unusable\":{},\"refuse_dns\":{},\"reason\":\"{}\",\"generation\":{},\"age_ms\":{}}}",
+            self.unusable, self.refuse_dns, self.reason, self.generation, self.age_ms
+        )
+    }
+}
+
+/// R2: the one unusable verdict this supply holds. `window` is carried per
+/// entry so a host test can shorten it without a second code path.
+#[derive(Debug)]
+struct UnusableState {
+    reason: &'static str,
+    since: Instant,
+    generation: u64,
+    window: Duration,
+}
+
+impl UnusableState {
+    fn refusing(&self) -> bool {
+        self.since.elapsed() < self.window
+    }
+}
+
 /// R0 (design `analysis-20261026-dns-structural` §4.2/§5.2 #2): the
 /// `socket-supply: result` line. APPEND-ONLY — every pre-existing field
 /// (`id=`, `purpose=`, `kind=`, `fd=`, `result=`, `elapsed_ms=`) keeps its
-/// position and meaning, and `epoch=` is tail-appended. `epoch` is the
-/// core-owned [`SocketSupply::generation`] at the reply instant (the only
-/// platform identity the core can state without a shell self-report); the
-/// shell-reported `net_id=` / `protect_generation=` / `protect_ms=` are NOT
-/// invented here — they need the ets supply-reply extension (R0 gap). Pure
-/// formatter so the field contract is testable without capturing stderr
-/// (`tests/dns_r0_observability.rs`).
+/// position and meaning, `epoch=` (the core-owned
+/// [`SocketSupply::generation`] at the reply instant) is tail-appended, and the
+/// shell-reported [`SupplyMeta`] group follows it when (and only when) the
+/// shell reported one. Pure formatter so the field contract is testable without
+/// capturing stderr (`tests/dns_r0_observability.rs`).
 pub fn supply_result_line(
     id: u64,
     purpose: Purpose,
@@ -119,10 +264,11 @@ pub fn supply_result_line(
     token: &str,
     elapsed_ms: u128,
     epoch: u64,
+    meta: &SupplyMeta,
 ) -> String {
     format!(
-        "socket-supply: result id={id} purpose={} kind={} fd={fd} result={token} elapsed_ms={elapsed_ms} epoch={epoch}",
-        purpose.name(), kind.name())
+        "socket-supply: result id={id} purpose={} kind={} fd={fd} result={token} elapsed_ms={elapsed_ms} epoch={epoch}{}",
+        purpose.name(), kind.name(), meta.suffix())
 }
 
 #[derive(Debug)]
@@ -138,6 +284,94 @@ struct State {
     closed: bool,
     queue: VecDeque<u64>,
     pending: HashMap<u64, Pending>,
+}
+
+// ---------------------------------------------------------------------------
+// R1 (design `analysis-20261026-dns-structural` §4.2): reprotect-once.
+//
+// On the FIRST EPERM of one protected-DNS resolution chain the chain hands the
+// shell the very descriptor it is about to re-send on, the shell re-issues the
+// ONE write-side SDK call (`VpnConnection.protect(fd)`) on that SAME descriptor,
+// and the chain sends the identical query once more, bounded. Everything below
+// is a BOUNDED, additive diagnostic: no field is read by a decision, and a
+// timeout/refusal simply continues the unchanged fallback chain.
+// ---------------------------------------------------------------------------
+
+/// R1: the shell's answer to ONE reprotect request. Only these two outcomes come
+/// FROM the shell; [`ReprotectOutcome::Timeout`] / [`ReprotectOutcome::Unavailable`]
+/// are decided here (the wait expired / nobody could be asked).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReprotectReply {
+    Ok { protect_ms: Option<u64> },
+    Failed { errno: i32, protect_ms: Option<u64> },
+}
+
+/// R1: what ONE reprotect experiment produced, as the `protected-dns:` record
+/// reports it. The four rows of the design's judgement table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReprotectOutcome {
+    /// The shell re-issued `protect(fd)` and it resolved.
+    Ok,
+    /// The shell re-issued it and the platform refused; `errno` is the shell's
+    /// error code (`-1` when the throw carried none).
+    Failed { errno: i32 },
+    /// A shell was subscribed but did not answer inside the core's bound.
+    Timeout,
+    /// Nobody could be asked: no shell subscribed, the supply was closed, or the
+    /// pending-request bound was reached.
+    Unavailable,
+}
+
+impl ReprotectOutcome {
+    pub fn is_ok(&self) -> bool { matches!(self, Self::Ok) }
+}
+
+/// R1: the bounded result of ONE reprotect request. `id` is the request id (0
+/// when nothing was enqueued), `protect_ms` the shell's own measurement of the
+/// platform call, `elapsed_ms` the core-side round trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReprotectResult {
+    pub id: u64,
+    pub outcome: ReprotectOutcome,
+    pub protect_ms: Option<u64>,
+    pub elapsed_ms: u128,
+}
+
+/// R1: ONE reprotect request. The descriptor is BORROWED from the calling
+/// attempt (the core keeps sending on it while it waits); this entry never
+/// closes it — closing a descriptor the shell may still hold the NUMBER of is
+/// exactly the reuse the hand-back is designed to avoid.
+#[derive(Debug)]
+struct ReprotectPending {
+    fd: i32,
+    started: Instant,
+    /// `true` once the shell polled it (it is now the shell's to protect).
+    claimed: bool,
+    /// The wait's sender; `None` after the core's bound expired, so a late
+    /// answer reports `request-expired` instead of resolving anything.
+    sender: Option<oneshot::Sender<ReprotectReply>>,
+}
+
+#[derive(Default, Debug)]
+struct ReprotectState {
+    /// Unclaimed request ids in arrival order.
+    queue: VecDeque<u64>,
+    pending: HashMap<u64, ReprotectPending>,
+}
+
+/// R1: an unclaimed request older than this is withdrawn (the shell's 5 s safety
+/// net still serves one whose wake was lost; a request nobody ever takes must
+/// not linger and let a late poll protect an already-closed descriptor number).
+const REPROTECT_EXPIRE: Duration = Duration::from_secs(5);
+/// R1: bound on the requests one deaf shell can leave unclaimed at a time.
+const REPROTECT_MAX_PENDING: usize = 8;
+
+/// R1: drop the requests nobody can answer any more (expired, or already
+/// answered through another path) and the queue aliases they left behind.
+fn prune_reprotect(state: &mut ReprotectState) {
+    state.pending.retain(|_, entry| entry.started.elapsed() < REPROTECT_EXPIRE);
+    let ReprotectState { queue, pending } = state;
+    queue.retain(|id| pending.contains_key(id));
 }
 
 #[derive(Default, Debug)]
@@ -159,6 +393,21 @@ pub struct SocketSupply {
     /// [`crate::protected_dns`]'s chain, after the protected path (and its
     /// retry) and the OS resolver both failed; a live lookup always wins.
     last_good: Mutex<HashMap<String, Ipv4Addr>>,
+    /// R0 (ets half): the shell-reported [`SupplyMeta`] of the most recent
+    /// `META_RETAINED` replied requests, BY REQUEST ID, so the protected-DNS
+    /// EPERM record of a socket handed out under that reply can print the SAME
+    /// `net_id` / `protect_generation` / `protect_ms` group. Evidence only,
+    /// bounded, never read by a decision.
+    reply_meta: Mutex<VecDeque<(u64, SupplyMeta)>>,
+    /// R1: the ONE reprotect request queue (shell polls, shell answers by id).
+    /// Diagnostic only; independent of the supply queue so an old shell that
+    /// never drains it cannot delay a dial.
+    reprotect: Mutex<ReprotectState>,
+    /// R2: the protected path's fast-fail state — `Some` from the first EPERM
+    /// until the existing recovery (a reported network change), a successful
+    /// protected answer, or a fresh protected-dial answer clears it. Never read
+    /// by a non-DNS purpose: management/signal/relay keep being supplied.
+    unusable: Mutex<Option<UnusableState>>,
 }
 
 struct RequestCleanup<'a> {
@@ -211,6 +460,17 @@ impl SocketSupply {
         self.network_generation.load(Ordering::Relaxed)
     }
 
+    /// R0 (ets half): the shell-reported [`SupplyMeta`] of the reply that
+    /// handed out request `id` — the SAME group the `socket-supply: result`
+    /// line printed for it, so a `protected-dns: eperm` record can state the
+    /// `net_id` / `protect_generation` / `protect_ms` the socket's protect was
+    /// issued on. `None` = that reply carried no meta (the pre-R0 shell), or the
+    /// id is older than the retained window. Evidence only.
+    pub fn request_meta(&self, id: u64) -> Option<SupplyMeta> {
+        self.reply_meta.lock().expect("socket supply meta")
+            .iter().rev().find(|(request, _)| *request == id).map(|(_, meta)| *meta)
+    }
+
     pub async fn request(&self, purpose: Purpose) -> Result<OwnedFd, SocketSeamError> {
         self.request_with_id(purpose).await.map(|(_, fd)| fd)
     }
@@ -223,9 +483,128 @@ impl SocketSupply {
         self.request_socket_with_id(purpose, purpose.default_kind()).await
     }
 
+    /// R2 (design `analysis-20261026-dns-structural` §4.2): RECORD that the
+    /// protected path is unusable, and make it cost nothing any more.
+    ///
+    /// - the latch is set (it keeps the OS-resolver stage at its short bound);
+    /// - every in-flight **DNS** request is cancelled AT ONCE with
+    ///   [`SUPPLY_UNUSABLE_TOKEN`] instead of waiting out the 8 s supply bound;
+    /// - every NEW DNS request is refused instantly for
+    ///   [`UNUSABLE_PROBE_WINDOW`] (the shell is not even woken);
+    /// - management / signal / relay are untouched — the conservative scope the
+    ///   design asks for, and the reason this can never become the 0.0.27 latch
+    ///   that refused everything.
+    ///
+    /// It is orthogonal to [`Self::generation`]: marking does NOT advance the
+    /// network epoch (only a reported physical-network change does). Returns how
+    /// many in-flight DNS requests were cancelled.
+    pub fn mark_unusable(&self, reason: &'static str) -> usize {
+        let generation = self.generation();
+        {
+            let mut unusable = self.unusable.lock().expect("socket supply unusable");
+            *unusable = Some(UnusableState {
+                reason,
+                since: Instant::now(),
+                generation,
+                window: UNUSABLE_PROBE_WINDOW,
+            });
+        }
+        let cancelled = self.cancel_pending_dns();
+        hilog::emit(&format!(
+            "socket-supply: unusable reason={reason} generation={generation} cancelled={cancelled}"));
+        cancelled
+    }
+
+    /// R2: the path is proven usable again (a protected answer, or the shell's
+    /// reported recovery). Idempotent; logs exactly the transition.
+    pub fn clear_unusable(&self, reason: &'static str) {
+        let cleared = self.unusable.lock().expect("socket supply unusable").take();
+        if let Some(state) = cleared {
+            hilog::emit(&format!(
+                "socket-supply: usable reason={reason} previous={} age_ms={} generation={}",
+                state.reason, state.since.elapsed().as_millis(), self.generation()));
+        }
+    }
+
+    /// R2: is the protected path currently known-unusable (the latch)? This is
+    /// what bounds the OS-resolver stage; it stays set across the refusal window
+    /// until the path answers or the shell reports a recovery.
+    pub fn protected_path_unusable(&self) -> bool {
+        self.unusable.lock().expect("socket supply unusable").is_some()
+    }
+
+    /// R2: must a NEW DNS request be refused AT THIS INSTANT (inside the probe
+    /// window)? `None` = serve it (normally, or as the window's probe).
+    fn dns_rejection(&self) -> Option<&'static str> {
+        let unusable = self.unusable.lock().expect("socket supply unusable");
+        match &*unusable {
+            Some(state) if state.refusing() => Some(state.reason),
+            _ => None,
+        }
+    }
+
+    /// R2: the document the shell reads (the `socket_supply_path_state` NAPI
+    /// export).
+    pub fn path_state(&self) -> PathState {
+        let unusable = self.unusable.lock().expect("socket supply unusable");
+        let Some(state) = &*unusable else {
+            return PathState { generation: self.generation(), ..PathState::usable() };
+        };
+        PathState {
+            unusable: true,
+            refuse_dns: state.refusing(),
+            reason: state.reason,
+            generation: state.generation,
+            age_ms: state.since.elapsed().as_millis(),
+        }
+    }
+
+    pub fn path_state_json(&self) -> String {
+        self.path_state().json()
+    }
+
+    /// R2 test seam: shorten/lengthen the refusal window of the live state, so
+    /// the "the window ends and the next request probes" path is testable
+    /// without sleeping 30 s. Production never calls it.
+    #[cfg(test)]
+    pub fn set_unusable_probe_window(&self, window: Duration) {
+        if let Some(state) = self.unusable.lock().expect("socket supply unusable").as_mut() {
+            state.window = window;
+        }
+    }
+
+    /// R2: cancel the DNS requests that are still waiting for their protect
+    /// reply — they belong to the path that just refused. Management / signal /
+    /// relay requests (and the reprotect queue) are kept.
+    fn cancel_pending_dns(&self) -> usize {
+        let mut state = self.state.lock().expect("socket supply");
+        let State { queue, pending, .. } = &mut *state;
+        let victims: Vec<u64> = pending.iter()
+            .filter(|(_, entry)| entry.purpose == Purpose::Dns)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &victims {
+            if let Some(entry) = pending.remove(id) {
+                let _ = entry.sender.send(Err(SocketSeamError::Supply(SUPPLY_UNUSABLE_TOKEN)));
+            }
+        }
+        queue.retain(|id| pending.contains_key(id));
+        victims.len()
+    }
+
     async fn request_socket_with_id(&self, purpose: Purpose, kind: SocketKind) -> Result<(u64, OwnedFd), SocketSeamError> {
         let (sender, receiver) = oneshot::channel();
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        // R2: a DNS request while the path is known-unusable is answered HERE,
+        // before the shell is woken and before the 8 s wait can start. The line
+        // is the ordinary `socket-supply: result` shape with `fd=-1` and
+        // `elapsed_ms=0`, so the existing parsers see a completed refusal.
+        if purpose == Purpose::Dns && self.dns_rejection().is_some() {
+            hilog::emit(&supply_result_line(
+                id, purpose, kind, -1, SUPPLY_UNUSABLE_TOKEN, 0,
+                self.generation(), &SupplyMeta::default()));
+            return Err(SocketSeamError::Supply(SUPPLY_UNUSABLE_TOKEN));
+        }
         {
             let mut state = self.state.lock().expect("socket supply");
             if state.closed {
@@ -276,6 +655,14 @@ impl SocketSupply {
     }
 
     pub fn reply(&self, id: u64, fd: i32, result: &str) -> String {
+        self.reply_with_meta(id, fd, result, &SupplyMeta::default())
+    }
+
+    /// [`Self::reply`] plus the OPTIONAL R0 shell self-report (the ets half's
+    /// `net_id` / `networkEpoch` / `protect_ms`). The group is printed on the
+    /// result line and KEPT BY REQUEST ID for the same request's EPERM evidence;
+    /// a default (empty) group is the pre-R0 reply and changes nothing.
+    pub fn reply_with_meta(&self, id: u64, fd: i32, result: &str, meta: &SupplyMeta) -> String {
         let pending = self.state.lock().expect("socket supply").pending.remove(&id);
         let Some(pending) = pending else {
             return "{\"ok\":false,\"error\":\"request-expired\"}".into();
@@ -285,16 +672,142 @@ impl SocketSupply {
         } else {
             Err(SocketSeamError::Supply(match result {
                 "protect-failed" => "socket-protect-failed",
+                // R2: the shell's OWN liveness gate refused the DNS supply, and
+                // that refusal is the same terminal fact as the core-side fast
+                // failure — never a transient `socket-supply-rejected` that the
+                // chain would retry against an unusable path.
+                PROTECTED_PATH_UNUSABLE => SUPPLY_UNUSABLE_TOKEN,
                 _ => "socket-supply-rejected",
             }))
         };
+        if !meta.is_empty() {
+            let mut retained = self.reply_meta.lock().expect("socket supply meta");
+            retained.push_back((id, *meta));
+            while retained.len() > META_RETAINED { retained.pop_front(); }
+        }
         let token = match &outcome { Ok(_) => "protected", Err(e) => e.token() };
         hilog::emit(&supply_result_line(
             id, pending.purpose, pending.kind, fd, token,
-            pending.started.elapsed().as_millis(), self.generation()));
+            pending.started.elapsed().as_millis(), self.generation(), meta));
         let ok = outcome.is_ok();
         let delivered = pending.sender.send(outcome).is_ok();
         format!("{{\"ok\":{}}}", ok && delivered)
+    }
+
+    /// R1 (design `analysis-20261026-dns-structural` §4.2): hand the shell the
+    /// descriptor the caller is sending on and wait, BOUNDED, for ONE
+    /// `protect(fd)` result. The wait and the withdrawal below are the whole
+    /// contract:
+    ///
+    /// - no subscribed shell → [`ReprotectOutcome::Unavailable`] at once (the
+    ///   diagnostic must not cost 250 ms when nobody can answer);
+    /// - the bound expires BEFORE the shell polled it → the request is
+    ///   WITHDRAWN, so a late poll can never protect a descriptor number the
+    ///   attempt has since closed;
+    /// - the shell polled it but the bound expired first → the request stays
+    ///   (the shell holds the number already) and the late answer reports
+    ///   `request-expired`.
+    ///
+    /// The descriptor is only BORROWED: this never closes it.
+    pub async fn reprotect(&self, fd: i32, wait: Duration) -> ReprotectResult {
+        let unavailable = ReprotectResult {
+            id: 0,
+            outcome: ReprotectOutcome::Unavailable,
+            protect_ms: None,
+            elapsed_ms: 0,
+        };
+        if fd < 0 || !shell_listening() { return unavailable; }
+        let started = Instant::now();
+        // The SAME monotonic id space as the supply requests: a wake is keyed by
+        // id, so a second, colliding counter would alias wakes and break the
+        // exactly-once wake contract the shell's drain loop relies on.
+        let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self.reprotect.lock().expect("socket supply reprotect");
+            prune_reprotect(&mut state);
+            if state.pending.len() >= REPROTECT_MAX_PENDING { return unavailable; }
+            state.pending.insert(id, ReprotectPending {
+                fd, started, claimed: false, sender: Some(sender),
+            });
+            state.queue.push_back(id);
+        }
+        // Woken with NO lock held: a serving hook re-enters this module.
+        notify_enqueued(id);
+        match tokio::time::timeout(wait, receiver).await {
+            Ok(Ok(reply)) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                let (outcome, protect_ms) = match reply {
+                    ReprotectReply::Ok { protect_ms } => (ReprotectOutcome::Ok, protect_ms),
+                    ReprotectReply::Failed { errno, protect_ms } =>
+                        (ReprotectOutcome::Failed { errno }, protect_ms),
+                };
+                ReprotectResult { id, outcome, protect_ms, elapsed_ms }
+            }
+            Ok(Err(_)) => ReprotectResult {
+                id,
+                outcome: ReprotectOutcome::Unavailable,
+                protect_ms: None,
+                elapsed_ms: started.elapsed().as_millis(),
+            },
+            Err(_) => {
+                let mut state = self.reprotect.lock().expect("socket supply reprotect");
+                if let Some(entry) = state.pending.get_mut(&id) {
+                    entry.sender = None;
+                    if !entry.claimed {
+                        state.pending.remove(&id);
+                        state.queue.retain(|queued| *queued != id);
+                    }
+                }
+                ReprotectResult {
+                    id,
+                    outcome: ReprotectOutcome::Timeout,
+                    protect_ms: None,
+                    elapsed_ms: started.elapsed().as_millis(),
+                }
+            }
+        }
+    }
+
+    /// R1: the shell's request poll — `(id, fd)` of the oldest unclaimed request,
+    /// or `None` when there is nothing to protect. Answering it with
+    /// [`Self::reprotect_reply`] is what resolves the core's wait.
+    pub fn poll_reprotect(&self) -> Option<(u64, i32)> {
+        let mut state = self.reprotect.lock().expect("socket supply reprotect");
+        prune_reprotect(&mut state);
+        while let Some(id) = state.queue.pop_front() {
+            let Some(entry) = state.pending.get_mut(&id) else { continue };
+            if entry.claimed { continue; }
+            entry.claimed = true;
+            return Some((id, entry.fd));
+        }
+        None
+    }
+
+    /// R1: the shell's answer to request `id`. `result` is the wire token (`ok`
+    /// or `fail`); `errno`/`protect_ms` are `-1` when the shell has no such
+    /// value. A stale id answers `request-expired` — the core already moved on
+    /// and a late answer must not be applied to anything.
+    pub fn reprotect_reply(&self, id: u64, result: &str, errno: i32, protect_ms: i32) -> String {
+        let mut state = self.reprotect.lock().expect("socket supply reprotect");
+        let Some(entry) = state.pending.remove(&id) else {
+            return "{\"ok\":false,\"error\":\"request-expired\"}".into();
+        };
+        state.queue.retain(|queued| *queued != id);
+        let protect_ms = if protect_ms < 0 { None } else { Some(protect_ms as u64) };
+        let reply = if result == "ok" {
+            ReprotectReply::Ok { protect_ms }
+        } else {
+            ReprotectReply::Failed { errno, protect_ms }
+        };
+        match entry.sender {
+            Some(sender) => {
+                let _ = sender.send(reply);
+                "{\"ok\":true}".into()
+            }
+            // The core's bound expired first; the answer is honest but late.
+            None => "{\"ok\":false,\"error\":\"request-expired\"}".into(),
+        }
     }
 
     pub fn cancel_pending_for_network_change(&self) {
@@ -302,6 +815,11 @@ impl SocketSupply {
         // path, so it is also where the evidence generation advances. The
         // cancellation semantics below are unchanged.
         self.network_generation.fetch_add(1, Ordering::Relaxed);
+        // R2: this IS the existing recovery channel (the shell's data-plane
+        // watchdog reports a physical network change through it), so the new
+        // "protected path unusable" state is cleared here — R2 adds no second
+        // recovery path of its own.
+        self.clear_unusable("physical-network-changed");
         let mut state = self.state.lock().expect("socket supply");
         state.queue.clear();
         for (_, pending) in state.pending.drain() {
@@ -326,6 +844,13 @@ impl SocketSupply {
         for (_, pending) in state.pending.drain() {
             let _ = pending.sender.send(Err(SocketSeamError::Supply("socket-supply-closed")));
         }
+        drop(state);
+        // R1: a closed supply can answer no reprotect. Dropping the waiters is
+        // what makes their `Ok(Err(_))` branch report `unavailable` instead of
+        // hanging out the bound.
+        let mut reprotect = self.reprotect.lock().expect("socket supply reprotect");
+        reprotect.queue.clear();
+        reprotect.pending.clear();
     }
 }
 
@@ -395,10 +920,33 @@ pub fn poll_json() -> String {
         .map(|s| s.poll()).unwrap_or_else(|| "{\"id\":\"\"}".into())
 }
 
+/// R2 (design `analysis-20261026-dns-structural` §4.2): the protected path's
+/// fast-fail state, as the shell's supply gate reads it
+/// (`socket_supply_path_state`). No supply installed is the honest NOT-unusable
+/// answer (a pre-R2 core answers nothing at all and the shell degrades to the
+/// same document), never an error.
+pub fn path_state_json() -> String {
+    slot().lock().expect("socket supply slot").as_ref()
+        .map(|supply| supply.path_state_json())
+        .unwrap_or_else(|| PathState::usable().json())
+}
+
 pub fn reply_json(id: &str, fd: i32, result: &str) -> String {
+    reply_json_with_meta(id, fd, result, &SupplyMeta::default())
+}
+
+/// R0 (ets half): [`reply_json`] with the THREE OPTIONAL shell-reported reply
+/// numbers already mapped by [`meta_from_reply_args`]. The pre-R0 napi export
+/// (three arguments) reaches [`reply_json`] and stays byte-identical.
+pub fn reply_json_with_meta(
+    id: &str,
+    fd: i32,
+    result: &str,
+    meta: &SupplyMeta,
+) -> String {
     let Ok(id) = id.parse::<u64>() else { return "{\"ok\":false,\"error\":\"invalid-id\"}".into(); };
     slot().lock().expect("socket supply slot").as_ref()
-        .map(|s| s.reply(id, fd, result))
+        .map(|s| s.reply_with_meta(id, fd, result, meta))
         .unwrap_or_else(|| "{\"ok\":false,\"error\":\"socket-supply-closed\"}".into())
 }
 
@@ -420,6 +968,29 @@ pub fn close_fd_json(fd: i32) -> String {
     if fd < 0 { return "{\"ok\":false}".into(); }
     crate::n2_socket_trace::closed(fd);
     format!("{{\"ok\":{}}}", unsafe { crate::sys::close(fd) } == 0)
+}
+
+/// R1: the shell's reprotect poll document — `{"id":"<n>","fd":"<n>"}` for one
+/// pending request or the empty id when there is none. Same shape convention as
+/// [`poll_json`] (ids/fds are STRINGS so a u64 id survives any JS number).
+pub fn poll_reprotect_json() -> String {
+    match slot().lock().expect("socket supply slot").as_ref() {
+        Some(supply) => match supply.poll_reprotect() {
+            Some((id, fd)) => format!("{{\"id\":\"{id}\",\"fd\":\"{fd}\"}}"),
+            None => "{\"id\":\"\",\"fd\":\"\"}".into(),
+        },
+        None => "{\"id\":\"\",\"fd\":\"\"}".into(),
+    }
+}
+
+/// R1: the shell's reprotect answer document. Unknown id → `request-expired`;
+/// no installed supply → `socket-supply-closed`; invalid id → `invalid-id` —
+/// the same vocabulary the supply reply already uses.
+pub fn reprotect_reply_json(id: &str, result: &str, errno: i32, protect_ms: i32) -> String {
+    let Ok(id) = id.parse::<u64>() else { return "{\"ok\":false,\"error\":\"invalid-id\"}".into(); };
+    slot().lock().expect("socket supply slot").as_ref()
+        .map(|supply| supply.reprotect_reply(id, result, errno, protect_ms))
+        .unwrap_or_else(|| "{\"ok\":false,\"error\":\"socket-supply-closed\"}".into())
 }
 
 #[cfg(test)]
@@ -625,5 +1196,88 @@ mod notify_tests {
         assert_eq!(log.woken(polled_id), 0, "a cleared hook is never called again");
         assert_eq!(served.lock().expect("served log").len(), 1, "only scenario (b) served");
         assert!(polled.poll_request().is_none());
+    }
+}
+
+/// R2 (design `analysis-20261026-dns-structural` §4.2): the fast-fail STATE of
+/// the protected path, at the supply that owns the request queue.
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    fn datagram_fd() -> OwnedFd {
+        let raw = unsafe { crate::sys::socket(crate::sys::AF_INET, crate::sys::SOCK_DGRAM, 0) };
+        assert!(raw >= 0, "socket(2) for a protected fd");
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+
+    async fn next_request(supply: &SocketSupply) -> (u64, Purpose) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((id, purpose)) = supply.poll_request() {
+                    return (id, purpose);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a queued supply request")
+    }
+
+    /// R2: the refusal is a WINDOW, not a permanent latch — the latch stays
+    /// (it is what bounds the OS stage) while `refuse_dns` ends, so the next
+    /// DNS request is a PROBE that can clear the state.
+    #[test]
+    fn the_latch_and_the_refusal_window_are_two_different_facts() {
+        let supply = Arc::new(SocketSupply::new());
+        supply.mark_unusable(PROTECTED_PATH_UNUSABLE);
+        assert!(supply.protected_path_unusable());
+        assert!(supply.path_state().refuse_dns);
+        supply.set_unusable_probe_window(Duration::ZERO);
+        assert!(supply.protected_path_unusable(), "the latch is still set");
+        assert!(!supply.path_state().refuse_dns, "the refusal window is over");
+        supply.clear_unusable("protected-answer");
+        assert!(!supply.protected_path_unusable(), "a protected answer clears the latch");
+        assert!(supply.path_state().reason.is_empty());
+    }
+
+    /// R2: after the window a DNS request is served again (the probe) — the
+    /// fast failure must never be able to lock protected DNS out forever.
+    #[tokio::test]
+    async fn a_dns_probe_after_the_window_is_served_and_clears_the_latch() {
+        let supply = Arc::new(SocketSupply::new());
+        supply.mark_unusable(PROTECTED_PATH_UNUSABLE);
+        supply.set_unusable_probe_window(Duration::ZERO);
+        let dial = tokio::spawn({
+            let supply = supply.clone();
+            async move { supply.request_with_id(Purpose::Dns).await }
+        });
+        let (id, purpose) = next_request(&supply).await;
+        assert_eq!(purpose, Purpose::Dns);
+        let fd = datagram_fd();
+        assert!(supply.reply(id, fd.as_raw_fd(), "protected").contains("true"));
+        let (_, delivered) = dial.await.expect("dial task").expect("the probe is served");
+        drop(delivered);
+        supply.clear_unusable("protected-answer");
+        assert!(!supply.path_state().unusable);
+        assert!(!supply.path_state().refuse_dns);
+    }
+
+    /// R2: the SHELL's own refusal reason (`protected-path-unusable`, produced
+    /// by its liveness gate) reaches the core as the SAME terminal token as the
+    /// core-side fast refusal — never as a transient `socket-supply-rejected`
+    /// that would be retried against a path already known-unusable.
+    #[tokio::test]
+    async fn the_shells_dns_refusal_reason_maps_to_the_fast_fail_token() {
+        let supply = Arc::new(SocketSupply::new());
+        let dial = tokio::spawn({
+            let supply = supply.clone();
+            async move { supply.request_with_id(Purpose::Dns).await }
+        });
+        let (id, _purpose) = next_request(&supply).await;
+        assert_eq!(supply.reply(id, -1, PROTECTED_PATH_UNUSABLE), "{\"ok\":false}");
+        let refused = dial.await.expect("dial task").expect_err("the supply is refused");
+        assert_eq!(refused.token(), SUPPLY_UNUSABLE_TOKEN);
     }
 }

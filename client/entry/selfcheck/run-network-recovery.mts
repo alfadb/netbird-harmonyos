@@ -338,9 +338,14 @@ try {
     reasonOf({ ...gate, networkUnusableNow: true }) === 'network-unusable');
   check('A3 before the first create the network rule does not bite',
     reasonOf({ ...gate, networkUnusableNow: true, networkRecoveryReady: false }) === '');
+  // R2 (design `analysis-20261026-dns-structural` §4.2) added ONE
+  // purpose-specific input (`protectedPathUnusable` / `isDnsRequest`, the
+  // conservative DNS-only fast fail); the F1 verdict below is about the OLD
+  // latch, which stays gone.
   check('A4 no policy input can express "a switch happened earlier"',
-    !policyText.includes('networkDirty: boolean') && !policyText.includes('isDns: boolean') &&
-    policyText.indexOf('gate.networkDirty') < 0 && policyText.indexOf('gate.isDns') < 0);
+    !policyText.includes('networkDirty: boolean') &&
+    policyText.indexOf('gate.networkDirty') < 0 &&
+    policyText.indexOf('gate.networkRecoveryActive') < 0);
   const capSig = policy['capabilitySignature'] as (c: number[]) => string;
   check('A5 the capability signature is order-insensitive and dedupes the empty set',
     capSig([15, 1]) === capSig([1, 15]) && capSig([15, 1]) === '1,15' &&
@@ -742,6 +747,117 @@ try {
   check('I3 the write-only SDK surface is cited where the observable half lives',
     extText.includes('@ohos.net.vpnExtension.d.ts:244') &&
     extText.includes('@ohos.net.connection.d.ts:1710') && extText.includes('readback=none'));
+  // I4–I6 (R0 ets half, design `analysis-20261026-dns-structural` AC-R0-1/2):
+  // the shell must hand the CORE the protect-time platform identity and the
+  // measured protect duration on the supply reply (the core joins that group to
+  // the same request id's EPERM evidence), and VPN_PROTECT_MARK must reach the
+  // PERSISTED diagnostics tee instead of dying in the HiLog ring.
+  check('I4 the supply reply carries netId + protectGeneration + protectMs',
+    replyLast['id'] === 'mark-d' && replyLast['netId'] === 514 &&
+    replyLast['protectGeneration'] === 8 &&
+    typeof replyLast['protectMs'] === 'number' && (replyLast['protectMs'] as number) >= 0,
+    JSON.stringify(replyLast));
+  const steadyReply = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('I5 a steady generation is reported as-is (netId 514 / generation 5 / measured ms)',
+    steadyReply['netId'] === 514 && steadyReply['protectGeneration'] === 5 &&
+    typeof steadyReply['protectMs'] === 'number' && (steadyReply['protectMs'] as number) >= 0,
+    JSON.stringify(steadyReply));
+  const persistedMarks = diagEvents().filter((e: Record<string, unknown>): boolean =>
+    e['name'] === 'protect_mark');
+  const lastMarkFields = ((persistedMarks.length === 0 ? {} : persistedMarks[persistedMarks.length - 1])
+    ['fields'] ?? {}) as Record<string, unknown>;
+  check('I6 VPN_PROTECT_MARK is PERSISTED through diagMilestone (event=protect_mark)',
+    persistedMarks.length >= 2 && lastMarkFields['detail'] === 'VPN_PROTECT_MARK' &&
+    lastMarkFields['net_id'] === 514 && lastMarkFields['protect_generation'] === 5 &&
+    Number(lastMarkFields['protect_ms']) >= 0 &&
+    lastMarkFields['result'] === 'generation-match',
+    JSON.stringify({ count: persistedMarks.length, fields: lastMarkFields }));
+
+  // -------------------------------------------------------------------------
+  // I7–I11. R1 (design `analysis-20261026-dns-structural` §4.2): the shell's
+  // half of reprotect-once. On the first EPERM of one resolution chain the core
+  // hands back the VERY descriptor it will re-send on; the shell re-issues the
+  // ONE write-side SDK call on that SAME fd and answers ok/fail + the platform
+  // error code. The same core wake drains this queue exactly like the supply
+  // queue, and the shell never closes a descriptor it does not own.
+  // -------------------------------------------------------------------------
+  seedCellular(514, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  G['__NB_PROTECTED'] = 0;
+  G['__NB_PROBE_TRACE'] = [];
+  G['__NB_REPROTECT_REPLY'] = 0;
+  G['__NB_REPROTECT_REPLY_LAST'] = undefined;
+  G['__NB_SUPPLY_CLOSE_FD_LAST'] = undefined;
+  const reprotectAbility = recoveryAbility(mod, 514, FakeConnection);
+  (reprotectAbility['startSocketSupply'] as () => void)();
+  G['__NB_REPROTECT_QUEUE'] = [{ id: '77', fd: '88' }];
+  (G['__NB_SUPPLY_WAKE'] as () => void)();
+  {
+    const deadline: number = Date.now() + 2000;
+    while (Date.now() < deadline && Number(G['__NB_REPROTECT_REPLY'] ?? 0) < 1) {
+      await sleepMs(5);
+    }
+  }
+  const r1Reply = (G['__NB_REPROTECT_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('I7 ONE core wake protects the handed descriptor exactly once and answers ok + the measured ms',
+    Number(G['__NB_PROTECTED'] ?? 0) === 1 &&
+    (G['__NB_PROBE_TRACE'] as unknown[]).indexOf('protect:88') >= 0 &&
+    r1Reply['id'] === '77' && r1Reply['result'] === 'ok' &&
+    typeof r1Reply['protectMs'] === 'number' && (r1Reply['protectMs'] as number) >= 0,
+    JSON.stringify({ protects: G['__NB_PROTECTED'], trace: G['__NB_PROBE_TRACE'], reply: r1Reply }));
+  check('I8 the shell never closes the descriptor it does not own (the core keeps sending on it)',
+    G['__NB_SUPPLY_CLOSE_FD_LAST'] === undefined,
+    JSON.stringify({ close: G['__NB_SUPPLY_CLOSE_FD_LAST'] }));
+
+  // The two non-ok shapes the core must be able to tell apart from "recoverable":
+  // a platform refusal (with its code) and a protect that never settles (the
+  // shell answers at ITS OWN bound, below the core's 250 ms wait).
+  G['__NB_PROTECT_MODE'] = 'rejected';
+  G['__NB_PROTECTED'] = 0;
+  G['__NB_REPROTECT_REPLY'] = 0;
+  G['__NB_REPROTECT_REPLY_LAST'] = undefined;
+  G['__NB_REPROTECT_QUEUE'] = [{ id: '78', fd: '89' }];
+  (G['__NB_SUPPLY_WAKE'] as () => void)();
+  {
+    const deadline: number = Date.now() + 2000;
+    while (Date.now() < deadline && Number(G['__NB_REPROTECT_REPLY'] ?? 0) < 1) {
+      await sleepMs(5);
+    }
+  }
+  const r1Fail = (G['__NB_REPROTECT_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('I9 a rejected protect answers fail + errno (never a silent drop)',
+    r1Fail['id'] === '78' && r1Fail['result'] === 'fail' &&
+    typeof r1Fail['errno'] === 'number' && (r1Fail['errno'] as number) === -1,
+    JSON.stringify(r1Fail));
+
+  G['__NB_PROTECT_MODE'] = 'never';
+  G['__NB_PROTECTED'] = 0;
+  G['__NB_REPROTECT_REPLY'] = 0;
+  G['__NB_REPROTECT_REPLY_LAST'] = undefined;
+  G['__NB_REPROTECT_QUEUE'] = [{ id: '79', fd: '90' }];
+  (G['__NB_SUPPLY_WAKE'] as () => void)();
+  {
+    const deadline: number = Date.now() + 2000;
+    while (Date.now() < deadline && Number(G['__NB_REPROTECT_REPLY'] ?? 0) < 1) {
+      await sleepMs(5);
+    }
+  }
+  const r1Never = (G['__NB_REPROTECT_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('I10 a protect that never settles is bounded and answered as fail',
+    r1Never['id'] === '79' && r1Never['result'] === 'fail' &&
+    typeof r1Never['protectMs'] === 'number' && (r1Never['protectMs'] as number) >= 0 &&
+    (r1Never['protectMs'] as number) < 1000,
+    JSON.stringify(r1Never));
+  G['__NB_PROTECT_MODE'] = undefined;
+  (reprotectAbility['stopSocketSupply'] as () => void)();
+  check('I11 the shipped extension wires the reprotect queue into the SAME wake/drain path',
+    extText.includes('socketSupplyReprotectPoll') &&
+    extText.includes('socketSupplyReprotectReply') &&
+    extText.indexOf('this.drainReprotect();') >
+      extText.indexOf('private drainSocketSupply(): void {'),
+    JSON.stringify({ drainAt: extText.indexOf('this.drainReprotect();'),
+      supplyAt: extText.indexOf('private drainSocketSupply(): void {') }));
 
   // -------------------------------------------------------------------------
   // J. N2/N3 (0.0.34): the core-side chain the shell now relies on. The
@@ -874,6 +990,8 @@ try {
   // (a >15 s wall-clock gap) and must NOT recover from that alone; this tick's
   // status read is unreachable, so only the clock can have moved.
   G['__NB_STATUS'] = 'not-a-status-document'; // pollStatusOrNull -> null
+  G['__NB_HOST_RESUMED_CALLS'] = 0;
+  G['__NB_HOST_RESUMED_GAP'] = 0;
   l4['lastWatcherTickMs'] = Date.now() - 16000;
   l4['dataPlaneStaleSinceMs'] = 0;
   l4['lastDataPlaneRecoveryMs'] = 0;
@@ -884,6 +1002,15 @@ try {
     wokeSince > 0 && wokeSince <= Date.now() && dataPlaneStaleEvents() === 0 &&
     l4['networkRecoveryActive'] !== true,
     JSON.stringify({ since: wokeSince, events: dataPlaneStaleEvents() }));
+  // R3 (REPORT §6.4): the SAME wake edge is handed to the core as an explicit
+  // resume observation (wall-clock semantics on the core side); the gap travels
+  // verbatim. This is a NEW event, not a change of the recovery path above.
+  check('L1b the >15 s wake edge reaches the core as ONE explicit resume observation',
+    Number(G['__NB_HOST_RESUMED_CALLS'] ?? 0) === 1 &&
+    Number(G['__NB_HOST_RESUMED_GAP'] ?? 0) > 15000 &&
+    Number(G['__NB_HOST_RESUMED_GAP'] ?? 0) <= 16000 + 1000,
+    JSON.stringify({ calls: G['__NB_HOST_RESUMED_CALLS'], gap: G['__NB_HOST_RESUMED_GAP'] }));
+  const resumesAfterWake = Number(G['__NB_HOST_RESUMED_CALLS'] ?? 0);
 
   // L2 — the stale run reaches 30 s: persistent evidence + the EXISTING
   // recoverPhysicalNetwork, with both watchdog clocks reset.
@@ -896,6 +1023,9 @@ try {
   l4['lastWatcherTickMs'] = Date.now(); // no new wake edge: the run AGE is the trigger
   l4Tick();
   await sleepMs(600);
+  check('L2b a normal 5 s tick is NOT a resume edge (no second resume observation)',
+    Number(G['__NB_HOST_RESUMED_CALLS'] ?? 0) === resumesAfterWake,
+    JSON.stringify({ calls: G['__NB_HOST_RESUMED_CALLS'], expected: resumesAfterWake }));
   const l2Recovered = lastLine('VPN_NETWORK_RECOVERED|');
   check('L2 a 30 s stale data plane records vpn_dataplane_stale (reason=no-signal) and ' +
     'runs the existing recovery',
@@ -1007,6 +1137,161 @@ try {
     dataPlanePolicyText.includes('export const DATA_PLANE_RECOVER_MIN_GAP_MS: number = 60000;') &&
     dataPlanePolicyText.includes('export const DATA_PLANE_RESUME_GAP_MS: number = 15000;'),
     JSON.stringify({ milestone: extText.indexOf('vpn_dataplane_stale') }));
+
+  // -------------------------------------------------------------------------
+  // M. R2 (design `analysis-20261026-dns-structural` §4.2): EPERM means "the
+  // protected path is unusable". The core latches that verdict and exposes it
+  // through `socket_supply_path_state`; the SHELL's gate reads it as a LIVENESS
+  // input and refuses ONLY the protected-DNS supply, with its own reason token.
+  // Management/signal/relay keep being served (the conservative scope the
+  // design asks for), and the state clears through the pre-existing recovery
+  // (a reported network change / a successful protect) — no new recovery path.
+  // -------------------------------------------------------------------------
+  seedCellular(614, '10.41.63.59');
+  G['__NB_STATUS'] = WATCHER_STATUS;
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_PROTECTED'] = 0;
+  G['__NB_PATH_STATE'] = { unusable: true, refuse_dns: true,
+    reason: 'protected-path-unusable', generation: 3, age_ms: 12 };
+  const r2 = recoveryAbility(mod, 614, FakeConnection);
+  await (r2['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-d', kind: 'udp', purpose: 'dns' });
+  const r2Reply = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  const r2Line = lastLine('VPN_SOCKET_SUPPLY|');
+  check('M1 a known-unusable protected path refuses the DNS supply BEFORE any socket is opened',
+    r2Reply['result'] === 'protected-path-unusable' && supplyOf('ICE_OPEN') === 0 &&
+    Number(G['__NB_PROTECTED'] ?? 0) === 0,
+    JSON.stringify({ reply: r2Reply, ice: supplyOf('ICE_OPEN'), protects: G['__NB_PROTECTED'] }));
+  check('M2 the refusal is readable in the persisted record (reason=protected-path-unusable)',
+    fieldOf(r2Line, 'reason') === 'protected-path-unusable' &&
+    fieldOf(r2Line, 'protect') === 'rejected' &&
+    diagEvents().some((e: Record<string, unknown>): boolean => {
+      const fields: Record<string, string> = (e['fields'] as Record<string, string>) ?? {};
+      return e['name'] === 'socket_supply' && fields['reason'] === 'protected-path-unusable' &&
+        fields['purpose'] === 'dns';
+    }),
+    JSON.stringify({ line: r2Line, events: diagEvents().length }));
+  await (r2['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-m', kind: 'tcp', purpose: 'management' });
+  const r2Mgmt = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('M3 management is NOT refused by the DNS-only rule (conservative scope)',
+    r2Mgmt['result'] === 'protected' && supplyOf('MGMT_OPEN') === 1 &&
+    fieldOf(lastLine('VPN_SOCKET_SUPPLY|'), 'reason') === '',
+    JSON.stringify({ reply: r2Mgmt, mgmt: supplyOf('MGMT_OPEN') }));
+  G['__NB_PATH_STATE'] = { unusable: false, refuse_dns: false,
+    reason: '', generation: 4, age_ms: 0 };
+  resetSupply();
+  await (r2['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-d2', kind: 'udp', purpose: 'dns' });
+  const r2Recovered = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('M4 the core clearing its state (recovery) lets the next DNS supply through again',
+    r2Recovered['result'] === 'protected' && supplyOf('ICE_OPEN') === 1,
+    JSON.stringify({ reply: r2Recovered, ice: supplyOf('ICE_OPEN') }));
+
+  // The shell's OWN liveness evidence: one failed protect closes the DNS path
+  // until the path is proven live again (a successful protect of any purpose).
+  G['__NB_PATH_STATE'] = undefined;
+  G['__NB_PROTECT_MODE'] = 'rejected';
+  seedCellular(714, '10.41.63.59');
+  resetSupply();
+  resetLog();
+  resetDiagEvents();
+  G['__NB_PROTECTED'] = 0;
+  const r2b = recoveryAbility(mod, 714, FakeConnection);
+  await (r2b['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-fail', kind: 'udp', purpose: 'dns' });
+  const failedReply = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  await (r2b['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-after-fail', kind: 'udp', purpose: 'dns' });
+  const afterFailReply = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('M5 a failed protect is liveness evidence: the NEXT DNS supply is refused without opening a socket',
+    failedReply['result'] === 'protect-failed' &&
+    afterFailReply['result'] === 'protected-path-unusable' &&
+    supplyOf('ICE_OPEN') === 1 && Number(G['__NB_PROTECTED'] ?? 0) === 1,
+    JSON.stringify({ failed: failedReply, after: afterFailReply,
+      ice: supplyOf('ICE_OPEN'), protects: G['__NB_PROTECTED'] }));
+  G['__NB_PROTECT_MODE'] = undefined;
+  await (r2b['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-m2', kind: 'tcp', purpose: 'management' });
+  await (r2b['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'r2-d3', kind: 'udp', purpose: 'dns' });
+  const clearedReply = (G['__NB_SUPPLY_REPLY_LAST'] ?? {}) as Record<string, unknown>;
+  check('M6 a successful protect proves the path live and re-opens the DNS supply',
+    clearedReply['result'] === 'protected' &&
+    fieldOf(lastLine('VPN_SOCKET_SUPPLY|'), 'reason') === '',
+    JSON.stringify({ reply: clearedReply }));
+
+  // The wiring and the tokens: the shell reads the core document, asks the PURE
+  // policy, and hands its own refusal reason back to the core as the terminal
+  // (never retried) token.
+  check('M7 the shipped extension reads the core path state and the pure liveness verdict',
+    extText.includes('socketSupplyPathState()') &&
+    extText.includes('protectedPathLive(') &&
+    extText.includes('isDnsRequest: isDns') &&
+    extText.includes('protectedPathUnusable:'),
+    JSON.stringify({ state: extText.indexOf('socketSupplyPathState()'),
+      live: extText.indexOf('protectedPathLive(') }));
+  check('M8 the shell\u2019s refusal reason is the token the core maps to its fast-fail error',
+    extText.includes("reason === 'protected-path-unusable'") &&
+    policyText.includes('protected-path-unusable') &&
+    !policyText.includes('networkDirty: boolean'));
+
+  // -------------------------------------------------------------------------
+  // N. R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68` +
+  // `client/internal/peer/guard/guard.go:123-125`): OS AVAILABILITY is a second
+  // signal, independent of the network-change edge. The REAL observer is driven
+  // here: netLost => offline, netAvailable / netCapabilitiesChange => online.
+  // The change seam (`connectorPhysicalNetworkChanged`) deliberately keeps its
+  // own single call site — availability never replaces or re-orders it.
+  // -------------------------------------------------------------------------
+  seedCellular(814, '10.41.63.59');
+  resetLog();
+  resetSupply();
+  G['__NB_NETWORK_AVAILABLE_CALLS'] = 0;
+  G['__NB_NETWORK_AVAILABLE'] = undefined;
+  G['__NB_NETWORK_AVAILABLE_SEQ'] = [];
+  G['__NB_NET_OBSERVERS'] = undefined;
+  G['__NB_PHYSICAL_CHANGED'] = 0;
+  const r3ability = freshAbility(mod);
+  r3ability['networkNetId'] = 814;
+  // Teardown latch: the debounced DECISION that follows the raw callbacks must
+  // not start a recovery leg in this group. The availability call itself is
+  // synchronous inside the observer callback and is unaffected.
+  r3ability['destroyRequested'] = true;
+  (r3ability['watchPhysicalNetwork'] as () => void)();
+  const observers = (G['__NB_NET_OBSERVERS'] ?? {}) as Record<string, (arg: unknown) => void>;
+  check('N1 the real network observer registers all three platform callbacks',
+    typeof observers['netLost'] === 'function' &&
+    typeof observers['netAvailable'] === 'function' &&
+    typeof observers['netCapabilitiesChange'] === 'function',
+    JSON.stringify({ events: Object.keys(observers) }));
+  observers['netLost']({ netId: 0 });
+  check('N2 netLost reports OFFLINE to the core availability entry',
+    G['__NB_NETWORK_AVAILABLE'] === false &&
+    Number(G['__NB_NETWORK_AVAILABLE_CALLS'] ?? 0) === 1,
+    JSON.stringify({ verdict: G['__NB_NETWORK_AVAILABLE'],
+      calls: G['__NB_NETWORK_AVAILABLE_CALLS'] }));
+  observers['netAvailable']({ netId: 814 });
+  observers['netCapabilitiesChange']({
+    netHandle: { netId: 814 }, netCap: { networkCap: [15] }
+  });
+  check('N3 netAvailable and netCapabilitiesChange both report ONLINE',
+    G['__NB_NETWORK_AVAILABLE'] === true &&
+    Number(G['__NB_NETWORK_AVAILABLE_CALLS'] ?? 0) === 3 &&
+    JSON.stringify(G['__NB_NETWORK_AVAILABLE_SEQ']) === '[false,true,true]',
+    JSON.stringify({ verdict: G['__NB_NETWORK_AVAILABLE'],
+      seq: G['__NB_NETWORK_AVAILABLE_SEQ'] }));
+  await sleepMs(300);
+  check('N4 availability never substitutes for the physical-network CHANGE seam',
+    Number(G['__NB_PHYSICAL_CHANGED'] ?? 0) === 0 &&
+    extText.includes("this.noteNetworkAvailability('netLost');") &&
+    extText.includes("this.noteNetworkAvailability('netAvailable');") &&
+    extText.includes("this.noteNetworkAvailability('netCapabilitiesChange');"),
+    JSON.stringify({ physicalChanged: G['__NB_PHYSICAL_CHANGED'],
+      wired: extText.indexOf('this.noteNetworkAvailability(') }));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

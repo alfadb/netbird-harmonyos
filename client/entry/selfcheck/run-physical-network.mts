@@ -52,7 +52,7 @@ try {
   };
   check('startup physical switch permits protected management resupply',
     policy.socketSupplyRejectionReason(gate) === '');
-  check('startup physical switch permits protected DNS resupply (no isDns carve-out left)',
+  check('startup physical switch permits protected DNS resupply (the F1 network rule has no purpose carve-out)',
     policy.socketSupplyRejectionReason(gate) ===
       policy.socketSupplyRejectionReason({ ...gate, isDns: true }));
   // The 5 h 29 m latch (REPORT.md §0.1/§2.4): the network is USABLE now, the
@@ -68,11 +68,55 @@ try {
       policy.socketSupplyRejectionReason({ ...outageGate, isDns: true }));
   check('the outage shape is exactly the old latch: no field can say "a switch happened"',
     !policySource.includes('networkDirty: boolean') &&
-    !policySource.includes('isDns: boolean') &&
     !policySource.includes('networkRecoveryActive: boolean') &&
     policySource.indexOf('gate.networkDirty') < 0 &&
-    policySource.indexOf('gate.isDns') < 0 &&
     policySource.indexOf('gate.networkRecoveryActive') < 0);
+  // R2 (design `analysis-20261026-dns-structural` §4.2): "the physical default
+  // network EXISTS" was the gate's only network input, and existence is not
+  // usability — under the platform's EPERM the netId stayed valid while every
+  // protected send was refused (`假 protected` 1612 times). The decision moves to
+  // a LIVENESS verdict: presence AND no positive unusability evidence (the
+  // core's EPERM fast-fail state, or the shell's own last protect failing).
+  // A FLOWING data plane outranks a stale refusal — that is the guard against
+  // re-introducing the 5 h 29 m latch of REPORT.md §0.1/§2.4.
+  const liveFacts = { physicalNetId: 101, corePathUnusable: false,
+    lastProtectFailed: false, dataPlaneFlowing: false };
+  check('R2-1 a physical net id with no failure evidence is LIVE (startup / idle)',
+    policy.protectedPathLive(liveFacts) === true);
+  check('R2-2 the core\u2019s EPERM fast-fail state is NOT live',
+    policy.protectedPathLive({ ...liveFacts, corePathUnusable: true }) === false);
+  check('R2-3 the shell\u2019s own failed protect is NOT live',
+    policy.protectedPathLive({ ...liveFacts, lastProtectFailed: true }) === false);
+  check('R2-4 a flowing data plane clears a stale failed protect (no re-latch of the outage)',
+    policy.protectedPathLive({ ...liveFacts, lastProtectFailed: true,
+      dataPlaneFlowing: true }) === true);
+  check('R2-4b but a flowing tunnel does NOT overrule the core\u2019s fresh EPERM verdict',
+    policy.protectedPathLive({ ...liveFacts, corePathUnusable: true,
+      lastProtectFailed: true, dataPlaneFlowing: true }) === false);
+  check('R2-5 no physical default network is never live',
+    policy.protectedPathLive({ ...liveFacts, physicalNetId: 0 }) === false);
+  // The DNS-only rule: the conservative scope the design asks for (mgmt/signal/
+  // relay keep being served), and it never fires before create() — the startup
+  // carve-out of the network rule is preserved.
+  check('R2-6 an unusable protected path refuses the DNS supply with its own reason',
+    policy.socketSupplyRejectionReason({ ...gate, ...outageGate,
+      protectedPathUnusable: true, isDnsRequest: true }) === 'protected-path-unusable');
+  check('R2-7 the same unusable path still serves management/signal/relay',
+    policy.socketSupplyRejectionReason({ ...outageGate,
+      protectedPathUnusable: true, isDnsRequest: false }) === '');
+  check('R2-8 the instantaneous network rule wins over the DNS-only rule',
+    policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true,
+      protectedPathUnusable: true, isDnsRequest: true }) === 'network-unusable');
+  check('R2-9 before the first create the DNS path is not gated by it (startup carve-out)',
+    policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true,
+      networkRecoveryReady: false, protectedPathUnusable: true, isDnsRequest: true }) === '');
+  check('R2-10 a live path changes nothing (the pre-existing rules still decide)',
+    policy.socketSupplyRejectionReason({ ...outageGate,
+      protectedPathUnusable: false, isDnsRequest: true }) === '');
+  check('R2-11 the gate carries the R2 input (the ONE purpose-specific field) and no latch',
+    policySource.includes('protectedPathUnusable: boolean') &&
+    policySource.includes('isDnsRequest: boolean') &&
+    !policySource.includes('networkDirty: boolean'));
   check('no usable physical network at THIS request refuses management',
     policy.socketSupplyRejectionReason({ ...outageGate, networkUnusableNow: true }) ===
       'network-unusable');
@@ -146,6 +190,33 @@ try {
     !ability.includes('this.topUpIceBatch()') &&
     !ability.includes('iceSocketTopUpCount(') &&
     !ability.includes('protectAndFeedIceSocket('));
+
+  // -------------------------------------------------------------------------
+  // R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68` and
+  // `client/internal/peer/guard/guard.go:123-125`): "is there a network at all"
+  // is a SECOND signal next to "the network changed". The availability verdict
+  // is pure policy (`networkEventAvailability`) so it is host-verifiable; the
+  // observer forwards all three platform events to ONE core entry, and the
+  // existing change seam keeps exactly one call site of its own.
+  // -------------------------------------------------------------------------
+  check('a lost default network is the offline verdict',
+    policy.networkEventAvailability('netLost') === false);
+  check('an available default network is the online verdict',
+    policy.networkEventAvailability('netAvailable') === true);
+  check('a capability change on the default handle means a network is present',
+    policy.networkEventAvailability('netCapabilitiesChange') === true);
+  check('an unknown observer event has no availability verdict (never invent offline)',
+    policy.networkEventAvailability('netSpeedChange') === null &&
+    policy.networkEventAvailability('') === null);
+  check('the observer forwards each availability event to the ONE availability entry',
+    ability.includes("this.noteNetworkAvailability('netLost');") &&
+    ability.includes("this.noteNetworkAvailability('netAvailable');") &&
+    ability.includes("this.noteNetworkAvailability('netCapabilitiesChange');") &&
+    ability.includes('private noteNetworkAvailability(event: string): void {') &&
+    ability.includes('connectorNetworkAvailable(available);'));
+  check('availability is a SEPARATE entry from the physical-network change seam',
+    [...ability.matchAll(/connectorNetworkAvailable\(/g)].length === 1 &&
+    [...ability.matchAll(/connectorPhysicalNetworkChanged\(/g)].length === 1);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

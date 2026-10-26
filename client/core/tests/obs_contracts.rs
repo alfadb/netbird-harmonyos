@@ -117,14 +117,16 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use netbird_core::peer_conn::carrier_warmup;
 use netbird_core::protected_dns::eperm_line;
-use netbird_core::socket_supply::SocketSupply;
+use netbird_core::socket_supply::{SocketSupply, SupplyMeta};
 use netbird_core::wg_device::direct_to_carrier_initial_line;
 
 #[test]
 fn eperm_record_pins_host_stage_attempt_server_id_fd_errno_and_generation() {
     // R0: `id=`/`fd=` are the request id and the core-owned dup fd this refusal
     // belongs to; they are inserted before the free-text `result=` tail and no
-    // pre-R0 field moved.
+    // pre-R0 field moved. An EMPTY shell meta group (an old shell, or a reply
+    // that carried no optional args) keeps this line byte-identical: the ets
+    // half's `net_id=` group is additive only when the shell reports it.
     let line = eperm_line(
         "relay.example",
         1,
@@ -133,6 +135,7 @@ fn eperm_record_pins_host_stage_attempt_server_id_fd_errno_and_generation() {
         42,
         17,
         7,
+        &SupplyMeta::default(),
         "dns:send-failed errno=1 (Operation not permitted (os error 1))",
     );
     assert_eq!(

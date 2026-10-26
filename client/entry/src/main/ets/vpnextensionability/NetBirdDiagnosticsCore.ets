@@ -488,7 +488,17 @@ export const PUBLIC_FIELD_KEYS: string[] = [
   // the "connected but no data plane" run had lasted when the recovery was
   // started (a bounded small integer computed from the watcher's own clocks).
   // A bounded scalar, so the public key set stays closed.
-  'age'
+  'age',
+  // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-2): the protect
+  // marker's own correlation vocabulary — the persisted `protect_mark` record
+  // carries the SAME request id / fd / net_id / protect generation / measured
+  // protect duration the core prints on `socket-supply: result` and
+  // `protected-dns: eperm`, so one capture can name the net_id a refusal
+  // belongs to. `id`/`fd`/`net_id`/`protect_generation`/`protect_ms` are bounded
+  // small integers (a monotonic request id, an fd number, a platform net id, two
+  // generation/ms counters) and `readback` is the fixed `none` token — the set
+  // stays closed and non-secret.
+  'id', 'fd', 'net_id', 'protect_generation', 'protect_ms', 'readback'
 ];
 
 // Public keys plus the runtime's own keys (memory readings, the every-10th

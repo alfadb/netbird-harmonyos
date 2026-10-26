@@ -3,6 +3,25 @@ export function isPhysicalNetworkSwitch(previousNetId: number, currentNetId: num
   return previousNetId !== currentNetId;
 }
 
+// R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`): "is there a
+// network at all" (availability) is a SECOND OS signal, separate from "the
+// network changed" (`NotifyNetworkChange`). The core's peer guard skips every
+// attempt and spends no ICE retry budget while offline
+// (`client/internal/peer/guard/guard.go:123-125`), so the shell must map the
+// platform connection events onto a verdict. HarmonyOS registers
+// `createNetConnection()` with no specifier = the DEFAULT network, so:
+//   * netLost              -> the default network is gone => OFFLINE;
+//   * netAvailable         -> a default network appeared   => ONLINE;
+//   * netCapabilitiesChange-> the default handle is present with (possibly)
+//                             changed capabilities        => ONLINE.
+// Anything else has NO verdict (`null`): an unknown event must never invent
+// offline and freeze retries. PURE: no platform call, no state.
+export function networkEventAvailability(event: string): boolean | null {
+  if (event === 'netLost') { return false; }
+  if (event === 'netAvailable' || event === 'netCapabilitiesChange') { return true; }
+  return null;
+}
+
 // F4 (v0.0.27 outage REPORT.md §5): the dedupe key of a network handle's
 // capability set. Upstream dedupes the callback on the network HANDLE
 // (ConcreteNetworkAvailabilityListener.java:70-84: a same-type AP handover
@@ -63,6 +82,53 @@ export interface SocketSupplyGate extends ProtectedConnectionGate {
   // gate waits for is sent by the shell's own opener, never through here, so
   // refusing even the DNS socket cannot deadlock the release.
   productionGateBlocked: boolean;
+  // R2 (design `analysis-20261026-dns-structural` §4.2): the protected path is
+  // KNOWN-UNUSABLE — the core reported the EPERM fast-fail state
+  // (`socket_supply_path_state`) or this shell's own last protect failed (see
+  // `protectedPathLive`). "The physical default net id exists" was the gate's
+  // only network input and existence is not usability: under the platform's
+  // EPERM the netId stayed valid while every protected send was refused (the
+  // capture's 1612 "假 protected"). CONSERVATIVE SCOPE: this input refuses the
+  // protected-DNS supply ONLY (`isDnsRequest`); management / signal / relay keep
+  // being served, which is what keeps this from becoming the 0.0.27 latch that
+  // refused everything for 5 h 29 m (REPORT.md §0.1/§2.4). It also carries the
+  // same pre-create carve-out as the network rule.
+  protectedPathUnusable: boolean;
+  // R2: is THIS request the protected-DNS supply? The one purpose bit the DNS
+  // fast fail needs; every other rule stays purpose-blind.
+  isDnsRequest: boolean;
+}
+
+// R2: the liveness facts behind `SocketSupplyGate.protectedPathUnusable`. The
+// question is not "does a physical network exist" but "is the protected egress
+// demonstrably usable right now":
+//   * a physical default net id must exist at all (0 = the platform reports
+//     none) — the F1 existence half, kept;
+//   * the core's EPERM fast-fail state (a protected send was refused `EPERM`,
+//     the outage's actual mechanism) says it is NOT. This is DIRECT evidence
+//     with its own bounded probe window on the core side (it cannot latch
+//     forever), so a flowing tunnel does not overrule it;
+//   * this shell's own last protect failing says it is NOT — the WEAKEST
+//     evidence here (a protect failure can be a shell/connection error rather
+//     than a path one) and the only one with no expiry of its own, so a FLOWING
+//     data plane clears it: WG sockets ride the very same protected path, and a
+//     live session is the strongest liveness evidence there is. That override
+//     is the guard against re-introducing a stale refusal that outlives its
+//     cause (REPORT.md §0.1/§2.4).
+// No positive failure evidence (startup, idle, first connect) is NOT unusable:
+// an unknown verdict must never gate the startup DNS the login needs.
+export interface ProtectedPathFacts {
+  physicalNetId: number;
+  corePathUnusable: boolean;
+  lastProtectFailed: boolean;
+  dataPlaneFlowing: boolean;
+}
+
+export function protectedPathLive(facts: ProtectedPathFacts): boolean {
+  if (facts.physicalNetId === 0) { return false; }
+  if (facts.corePathUnusable) { return false; }
+  if (facts.lastProtectFailed) { return facts.dataPlaneFlowing; }
+  return true;
 }
 
 export function socketSupplyRejectionReason(gate: SocketSupplyGate): string {
@@ -74,6 +140,14 @@ export function socketSupplyRejectionReason(gate: SocketSupplyGate): string {
   // available even if the physical network is momentarily unusable (login is
   // allowed to fail on its own terms; the shell must not invent a gate).
   if (gate.networkUnusableNow && gate.networkRecoveryReady) { return 'network-unusable'; }
+  // R2: the DNS-only fast fail — the protected path is known-unusable, so
+  // handing the core another socket would only reproduce the refusal (and the
+  // 8 s supply wait + 3 s OS timeout behind it). Checked AFTER the network rule
+  // (which refuses everything) and under the same pre-create carve-out, so
+  // startup DNS is never invented away.
+  if (gate.isDnsRequest && gate.networkRecoveryReady && gate.protectedPathUnusable) {
+    return 'protected-path-unusable';
+  }
   return '';
 }
 

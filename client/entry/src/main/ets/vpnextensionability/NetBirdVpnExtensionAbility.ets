@@ -65,6 +65,9 @@ import {
   connectorRoutes, connectorSignalFeed,
   connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
+  // R3 (REPORT §6.4): the OS availability verdict and the explicit wake edge —
+  // both are SEPARATE entries from the physical-network change seam above.
+  connectorNetworkAvailable, connectorHostResumed,
   connectorStatus, connectorStop, connectorLogout, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
   // 0.0.34 peer-status lag fix (device report §5 F1): the core's edge wake.
   // (`connectorStatusRevision` — the same revision without the document — stays
@@ -74,7 +77,14 @@ import {
   connectorStatusSubscribe, connectorStatusUnsubscribe,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplySubscribe, socketSupplyUnsubscribe,
+  // R1 (design `analysis-20261026-dns-structural` §4.2): the reprotect-once
+  // diagnostic — the core hands back the descriptor it will re-send on, the
+  // shell re-issues protect() on that SAME fd and answers ok/fail + errno.
+  socketSupplyReprotectPoll, socketSupplyReprotectReply,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
+  // R2 (design `analysis-20261026-dns-structural` §4.2): the core's latched
+  // "protected path unusable" verdict, read back by the DNS-only gate.
+  socketSupplyPathState,
   physicalDefaultLanProbe,
   resolveProtectedIp,
   SocketSupplyRequest,
@@ -103,6 +113,14 @@ import type { PhoneLogConfigureResult, PhoneLogSummary, NativeResourceSample }
 // at runtime — the value import is the wrapper function the staged REAL
 // connector already exports, so no shim const is needed anywhere.
 import type { RouteSelectionSetResult } from './NetBirdConnector';
+// type-only: ONE reprotect request (R1). Same erased-name rule as above — the
+// staged fixtures need no shim const, and the shape has exactly one owner
+// (`NetBirdConnector`'s parse of the core document).
+import type { SocketReprotectRequest } from './NetBirdConnector';
+// type-only: the R2 path-state document. Erased at runtime for the same reason
+// (the staged fixture's shim needs no const); the VALUE that reads it is the
+// real `socketSupplyPathState` wrapper above.
+import type { SocketPathState } from './NetBirdConnector';
 
 import { CONNECT_ENTRY_REJECT_RUNNING, UiStatusDocument, buildUiStatusDocument,
   connectEntryDecision } from './NetBirdUiModel';
@@ -129,11 +147,11 @@ import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
 // `account_login_*` NAPI job) and every connect is token-less.
 
 import { capabilitySignature, isPhysicalNetworkSwitch, lanRoamCheckDue,
-  lanRoamDecision, protectedConnectionRejectionReason,
-  socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
+  lanRoamDecision, networkEventAvailability, protectedConnectionRejectionReason,
+  protectedPathLive, socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
 // type-only: erased at runtime (same rule as the endpoint shapes above), so
 // the staging selfchecks never need a shim for the policy module.
-import type { LanRoamDecision } from './NetBirdPhysicalNetworkPolicy';
+import type { LanRoamDecision, ProtectedPathFacts } from './NetBirdPhysicalNetworkPolicy';
 
 // 2026-10-08 shell-side diagnostics wiring. The native core already tees its
 // OWN events into filesDir/netbird-vpn.log; these two modules must NEVER
@@ -205,6 +223,12 @@ const ALL_ON_ROUTE_SELECTION: RouteSelection = {
 // best-effort treatment, the shell treats box expiry as protect failure
 // (governance docs/native-nx-governance.md item 4: fail-closed).
 const PROTECT_BOX_MS: number = 5000;
+// R1 (design `analysis-20261026-dns-structural` §4.2): the shell-side bound of
+// the reprotect-once diagnostic. DELIBERATELY shorter than the core's 250 ms wait
+// (protected_dns::REPROTECT_WAIT): a protect that has not settled by then cannot
+// inform the one re-send, and the core must never be kept waiting past its own
+// bound. The answer still says ok/fail + errno, so the judgement stays possible.
+const REPROTECT_BOX_MS: number = 200;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
@@ -1008,6 +1032,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // read the watcher already performs — no new timer, no extra core call.
   private connectorFlowingNow: boolean = false;
   private connectorDownSinceMs: number = -1;
+  // R2 (design `analysis-20261026-dns-structural` §4.2): the shell's OWN
+  // protected-path liveness evidence — did the LAST protect() of a socket
+  // succeed? EPERM happens on the SEND, so `protect()` itself returns ok during
+  // the fault; a protect that actually FAILS is still a path fact worth having,
+  // and it is cleared by the very next successful protect (of any purpose, so a
+  // management dial is enough to re-open the DNS path). Consumed ONLY by the
+  // DNS-only gate through `protectedPathLive`, never by the all-purpose rules.
+  private lastProtectFailed: boolean = false;
   // N1(ii): the last connector state the poll reported. The health gate needs
   // "the tunnel is broken and needs recovery", so only `reconnecting`/`failed`
   // arm it: `connecting` is a normal (possibly slow) startup and `disconnected`
@@ -1658,12 +1690,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
       });
       observer.on('netLost', (net: connection.NetHandle): void => {
+        // R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`):
+        // the default network is gone => the core's guard must stop attempting
+        // (and stop spending its ICE retry budget). This is a SEPARATE signal:
+        // the change seam below keeps its exact existing behaviour.
+        this.noteNetworkAvailability('netLost');
         this.schedulePhysicalNetworkCheck('netLost', net.netId, '');
       });
       observer.on('netAvailable', (net: connection.NetHandle): void => {
+        this.noteNetworkAvailability('netAvailable');
         this.schedulePhysicalNetworkCheck('netAvailable', net.netId, '');
       });
       observer.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
+        this.noteNetworkAvailability('netCapabilitiesChange');
         this.schedulePhysicalNetworkCheck('netCapabilitiesChange', info.netHandle.netId,
           capabilitySignature(capabilityNumbers(info.netCap.networkCap)));
       });
@@ -1678,6 +1717,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_WATCH_FAIL|summary=%{public}s', safeError(error as Error));
     }
+  }
+
+  // R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`): forward
+  // the OS availability verdict to the core's SEPARATE entry. Availability is
+  // not a network change — it says whether ANY network exists right now, which
+  // is what gates the peer guard's attempts and its ICE retry budget
+  // (`client/internal/peer/guard/guard.go:123-125`). The pure policy maps only
+  // the three known platform events; an unknown event carries NO verdict and
+  // never invents offline. No debounce: the availability bit is instantaneous,
+  // while the change decision below keeps its 250 ms stability window.
+  private noteNetworkAvailability(event: string): void {
+    const available: boolean | null = networkEventAvailability(event);
+    if (available === null) { return; }
+    connectorNetworkAvailable(available);
   }
 
   private schedulePhysicalNetworkCheck(event: string, eventNetId: number,
@@ -2078,6 +2131,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const now: number = Date.now();
     if (this.lastWatcherTickMs > 0 && resumeGapDetected(now - this.lastWatcherTickMs)) {
       this.dataPlaneStaleSinceMs = now;
+      // R3 (REPORT §6.4): the SAME wake edge is handed to the core as an
+      // explicit resume observation. The core only records it (an event count
+      // + `connector: host-resumed|gap_ms=`); the recovery decision stays with
+      // the watchdog below, and no guard ticker/session/deadline is re-armed by
+      // this call.
+      connectorHostResumed(now - this.lastWatcherTickMs);
     }
     this.lastWatcherTickMs = now;
   }
@@ -6695,6 +6754,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // fulfillSocketRequest (which closes its own fd on every path), and an empty
   // answer is the termination condition — never a fixed number of requests.
   private drainSocketSupply(): void {
+    // R1 (design `analysis-20261026-dns-structural` §4.2): the SAME core wake
+    // serves the reprotect-once diagnostic. Its queue is independent of the
+    // supply queue (an old shell that never drains it cannot delay a dial), and
+    // it is drained first because its answer is bounded by 250 ms — an order of
+    // magnitude tighter than the supply's 8 s per-request budget.
+    this.drainReprotect();
     for (;;) {
       if (this.destroyRequested || this.destroyPromise !== undefined) {
         return;
@@ -6712,6 +6777,34 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       this.fulfillSocketRequest(request).catch((error: Error): void => {
         hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_ERROR|id=%{public}s|summary=%{public}s',
+          request.id, safeError(error));
+      });
+    }
+  }
+
+  // R1 (design `analysis-20261026-dns-structural` §4.2): drain the ONE-shot
+  // reprotect queue the same way the supply queue is drained — until the core
+  // answers an EMPTY id. Each request is answered in its own fire-and-forget
+  // promise (the core's wait is only 250 ms, so the first one must not wait for
+  // a later request).
+  private drainReprotect(): void {
+    for (;;) {
+      if (this.destroyRequested || this.destroyPromise !== undefined) {
+        return;
+      }
+      let request: SocketReprotectRequest;
+      try {
+        request = socketSupplyReprotectPoll();
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_REPROTECT_POLL_FAILED|summary=%{public}s',
+          safeError(error as Error));
+        return;
+      }
+      if (request.id === undefined || request.id.length === 0) {
+        return;
+      }
+      this.fulfillReprotectRequest(request).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_REPROTECT_ERROR|id=%{public}s|summary=%{public}s',
           request.id, safeError(error));
       });
     }
@@ -6738,6 +6831,39 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }, ROUTE_APPLY_MAILBOX_MS);
   }
 
+  // R2 (design `analysis-20261026-dns-structural` §4.2): "is the protected path
+  // known-unusable RIGHT NOW?" — the LIVENESS input of the DNS-only gate.
+  //
+  // Two cheap facts, both fail-OPEN on an unreadable verdict: the core's own
+  // latched EPERM state (`socket_supply_path_state`, the mechanism the outage
+  // actually had) and this shell's last protect result. They are collapsed by
+  // the PURE policy (`protectedPathLive`): the core's verdict is direct evidence
+  // and stands on its own (it expires with the core's probe window), while the
+  // shell's own failed protect — the weakest, never-expiring fact — is cleared
+  // by a flowing data plane, because WG sockets ride the same protected path. A
+  // live session IS liveness, and that override is what keeps a stale refusal
+  // from re-creating the 5 h 29 m latch of REPORT.md §0.1/§2.4.
+  private dnsPathUnusableNow(): boolean {
+    let corePathUnusable: boolean = false;
+    try {
+      const state: SocketPathState = socketSupplyPathState();
+      // `refuse_dns` (not `unusable`) is the bounded probe window: using the
+      // latch here would refuse the core's own probe forever.
+      corePathUnusable = state.refuse_dns === true;
+    } catch (error) {
+      // An old core exports nothing here; an unreadable verdict must never
+      // invent a refusal.
+      corePathUnusable = false;
+    }
+    const facts: ProtectedPathFacts = {
+      physicalNetId: physicalDefaultNetId(),
+      corePathUnusable,
+      lastProtectFailed: this.lastProtectFailed,
+      dataPlaneFlowing: this.connectorFlowingNow
+    };
+    return !protectedPathLive(facts);
+  }
+
   private async fulfillSocketRequest(request: SocketSupplyRequest): Promise<void> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;
     let fd: number = -1;
@@ -6745,6 +6871,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let reason: string = 'none';
     const t0: number = Date.now();
     const epoch: number = this.networkEpoch;
+    // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-1): the
+    // protect-time platform identity and the measured protect duration that the
+    // supply REPLY carries to the core. `-1` is the core's "not reported"
+    // sentinel: a refusal that never reached a protect keeps the reply
+    // byte-identical (and an old core sees the pre-R0 three arguments).
+    let metaNetId: number = -1;
+    let metaProtectGeneration: number = -1;
+    let metaProtectMs: number = -1;
     try {
       const isDns: boolean = request.purpose === 'dns' &&
         (request.kind === 'udp' || request.kind === 'tcp');
@@ -6761,7 +6895,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
         protectDeviation: this.protectDeviationRouteExclusion,
-        productionGateBlocked: this.n2CdProductionBlocked()
+        productionGateBlocked: this.n2CdProductionBlocked(),
+        // R2: the liveness half — see `dnsPathUnusableNow`. DNS-only.
+        protectedPathUnusable: this.dnsPathUnusableNow(),
+        isDnsRequest: isDns
       });
       if (reason.length > 0 || connection === undefined) { return; }
       if (!isDns && (request.kind !== 'tcp' || (request.purpose !== 'management' &&
@@ -6794,8 +6931,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       const netIdAtProtect: number = this.networkNetId;
+      metaNetId = netIdAtProtect;
+      metaProtectGeneration = epoch;
+      const protectStartedMs: number = Date.now();
       let protectedOk: boolean = await this.protectSocketWithBox(connection, fd,
         isDns ? 'D' : request.purpose === 'relay' ? 'R' : request.purpose === 'signal' ? 'S' : 'M', request.id);
+      metaProtectMs = Date.now() - protectStartedMs;
       // N5 (0.0.34, protected-DNS outage REPORT.md §5): the protect mark,
       // OBSERVED. The SDK has no read-back for a protected descriptor — the
       // only APIs are the write side: `VpnConnection.protect(socketFd)`
@@ -6817,7 +6958,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // and route belong to the generation the request was made for).
       let mark: string = epoch === this.networkEpoch ? 'generation-match' : 'generation-moved';
       if (protectedOk && isDns && request.kind === 'udp' && epoch !== this.networkEpoch) {
+        // R0: the REPROTECT is the protect whose mark is handed over, so the
+        // reported identity/timing are re-read at THIS call.
+        metaNetId = this.networkNetId;
+        metaProtectGeneration = this.networkEpoch;
+        const reprotectStartedMs: number = Date.now();
         protectedOk = await this.protectSocketWithBox(connection, fd, 'D', request.id);
+        metaProtectMs = Date.now() - reprotectStartedMs;
         mark = protectedOk ? 'reprotect-ok' : 'reprotect-failed';
       }
       if (isDns) {
@@ -6828,6 +6975,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           `protectNetId=${String(netIdAtProtect)}|mark=${mark}|readback=none`;
         hilog.info(DOMAIN, TAG, '%{public}s', markLine);
         this.n2RingAppend(markLine);
+        // AC-R0-2 (R0): the same mark ALSO rides the PERSISTED diagnostics tee
+        // (`diagMilestone` -> `diagEvent` -> sink -> phoneLogAppend). This ROM
+        // keeps no I-level A02900 HiLog line, so the ring above is not a
+        // capture: VPN_PROTECT_MARK was 0 lines in the S7 netbird-vpn.log files.
+        // `detail` carries the verbatim marker token so a grep for
+        // VPN_PROTECT_MARK matches the persistent record; the numeric fields are
+        // the SAME protect-time group the supply reply hands the core, so the
+        // marker, the `socket-supply: result` line and the `protected-dns:
+        // eperm` line can name one net_id. One record per DNS supply.
+        const markFields: DiagFields = {
+          'detail': 'VPN_PROTECT_MARK', 'id': request.id, 'fd': fd,
+          'net_id': metaNetId, 'protect_generation': metaProtectGeneration,
+          'protect_ms': metaProtectMs, 'gen': this.networkEpoch,
+          'result': mark, 'readback': 'none'
+        };
+        this.diagMilestone('protect_mark', markFields);
       }
       const postReason: string = socketSupplyRejectionReason({
         networkUnusableNow: physicalDefaultNetId() === 0,
@@ -6836,9 +6999,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
         protectDeviation: this.protectDeviationRouteExclusion,
-        productionGateBlocked: this.n2CdProductionBlocked()
+        productionGateBlocked: this.n2CdProductionBlocked(),
+        // R2: re-read at handoff exactly like the network probe above — the
+        // protect we just did may have settled the question either way.
+        protectedPathUnusable: this.dnsPathUnusableNow(),
+        isDnsRequest: isDns
       });
       const epochOk: boolean = epoch === this.networkEpoch || mark === 'reprotect-ok';
+      // R2: the shell's own path-liveness evidence, recorded AFTER the post-gate
+      // evaluated. This attempt's own failure keeps the pre-R2 `protect-failed`
+      // token; only the NEXT request sees the liveness verdict, and the very next
+      // successful protect of any purpose clears it.
+      this.lastProtectFailed = !protectedOk;
       if (protectedOk && epochOk && postReason.length === 0) {
         result = 'protected';
       } else {
@@ -6852,8 +7024,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         request.id, safeError(error as Error));
     } finally {
       try {
+        // R2 (design `analysis-20261026-dns-structural` §4.2): the DNS-only fast
+        // fail answers the core with its OWN token, which the core maps to
+        // `socket-supply-unusable` (terminal — never retried). Every other
+        // refusal keeps the historical `rejected` wire value unchanged.
+        const replyResult: string = result === 'protected' ? result :
+          reason === 'protected-path-unusable' ? 'protected-path-unusable' : result;
         const reply: SocketFeedResult = socketSupplyReply(request.id, result === 'protected' ? fd : -1,
-          result);
+          replyResult, metaNetId, metaProtectGeneration, metaProtectMs);
         // 2026-10-13 (v0.0.27 outage REPORT.md §5, observability prerequisite):
         // the refusal reason token was INVISIBLE on the device — this ROM keeps
         // no I-level A02900 line (0 of 14 domain lines are INFO, REPORT.md §1),
@@ -6895,6 +7073,66 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (fd >= 0) {
           socketSupplyCloseFd(fd);
         }
+      }
+    }
+  }
+
+  // R1 (design `analysis-20261026-dns-structural` §4.2): the shell half of the
+  // reprotect-once diagnostic. The core hands back the descriptor of the DNS
+  // socket it is ABOUT TO RE-SEND ON (its own dup of the socket this shell
+  // protected at supply time); the shell re-issues the ONE write-side API the SDK
+  // offers on that SAME descriptor (`VpnConnection.protect(fd)`,
+  // @ohos.net.vpnExtension.d.ts:244) and answers `ok`/`fail` + the platform error
+  // code, which is what lets the core decide between "the mark is recoverable"
+  // and "the protected path is down". The descriptor is NOT the shell's and is
+  // NEVER closed here — the core keeps sending on it. No gate (connection
+  // identity / epoch / recovery) may swallow the answer: a refusal is itself part
+  // of the judgement table, so every path answers.
+  private async fulfillReprotectRequest(request: SocketReprotectRequest): Promise<void> {
+    const connection: vpnExtension.VpnConnection | undefined = this.connection;
+    const fd: number = Number(request.fd);
+    let ok: boolean = false;
+    let errno: number = -1;
+    let protectMs: number = -1;
+    try {
+      if (connection === undefined || this.destroyRequested || this.destroyPromise !== undefined ||
+        this.recreateInFlight || !Number.isInteger(fd) || fd < 0) {
+        return;
+      }
+      const started: number = Date.now();
+      let boxTimer: number = -1;
+      const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+        connection.protect(fd).then((): void => {
+          if (boxTimer !== -1) { clearTimeout(boxTimer); }
+          ok = true;
+          errno = 0;
+          resolve(true);
+        }).catch((error: Error): void => {
+          if (boxTimer !== -1) { clearTimeout(boxTimer); }
+          const code: number | undefined = (error as BusinessFailure).code;
+          errno = code === undefined ? -1 : Number(code);
+          resolve(false);
+        });
+      });
+      const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+        boxTimer = setTimeout((): void => {
+          resolve(false);
+        }, REPROTECT_BOX_MS);
+      });
+      await Promise.race([settled, box]);
+      if (boxTimer !== -1) { clearTimeout(boxTimer); }
+      protectMs = Date.now() - started;
+    } catch (error) {
+      // A SYNCHRONOUS throw from the platform call: still an answer, never a
+      // silent drop (the core would otherwise see only its own timeout).
+      const code: number | undefined = (error as BusinessFailure).code;
+      errno = code === undefined ? -1 : Number(code);
+    } finally {
+      try {
+        socketSupplyReprotectReply(request.id, ok ? 'ok' : 'fail', errno, protectMs);
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_REPROTECT_REPLY_FAILED|id=%{public}s|summary=%{public}s',
+          request.id, safeError(error as Error));
       }
     }
   }

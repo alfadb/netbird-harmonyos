@@ -6543,6 +6543,14 @@ impl ConnectorHandle {
             }
         };
         let _ = shared.ice.set(ice.clone());
+        // R3: seed the orchestrator with the LAST availability the shell
+        // reported. The shell registers its network observer BEFORE the start
+        // leg (`watchPhysicalNetwork` → `startConnectorThenCreate`), so an
+        // offline start must not begin from an implicit "network is up". With
+        // no report (the default `true`) this is a no-op — it can never turn a
+        // normal start offline.
+        ice.lock_poison()
+            .set_network_available(NETWORK_AVAILABLE.load(Ordering::SeqCst), crate::sys::mono_ms());
         // N5c glare fix: the ICE orchestrator decides controlling/controlled
         // by the official isController rule (public-key comparison). The
         // signal materials ARE the WG keypair (the same `config.keys` whose
@@ -6617,6 +6625,22 @@ impl ConnectorHandle {
             source.refresh_stun_dns(&servers);
         }
         Ok(())
+    }
+
+    /// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68` +
+    /// `client/peer/guard/guard.go:123-125`）：把 OS 的网络可用性交给活的
+    /// ICE 编排。**只**影响 guard 的发起时机与 `PartiallyConnected` 的 3 次
+    /// 预算——转发路径、会话、DNS、relay 一概不动。返回是否发生了边沿。
+    pub fn set_network_available(&self, available: bool) -> bool {
+        self.ice
+            .lock_poison()
+            .set_network_available(available, crate::sys::mono_ms())
+    }
+
+    /// R3：显式 host resume 观测（壳层的墙钟 watcher tick-gap > 15 s）。
+    /// 只记录（事件计数 + 最近 gap）；恢复动作仍归壳层既有的恢复路径。
+    pub fn note_host_resumed(&self, gap_ms: u64) {
+        self.ice.lock_poison().note_host_resumed(gap_ms);
     }
 
     /// Called only after the replacement WG socket has been protected and fed.
@@ -7439,6 +7463,15 @@ pub fn global_runtime() -> &'static tokio::runtime::Runtime {
 
 static CONNECTOR: Mutex<Option<Arc<ConnectorHandle>>> = Mutex::new(None);
 
+/// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68` 的 availability
+/// 位）：**进程级**的「OS 报告有没有网」。放在这里而不是只放在 handle 上，
+/// 是因为壳层在 start leg **之前**就注册了网络观察者：离线时启动的
+/// connector 必须继承当时的可用性，否则它会在无网情况下照常消费 guard 预算。
+/// 默认 `true`（未知/未报告 ≠ 离线）。活的 connector 由
+/// [`ConnectorHandle::set_network_available`] 同步，NAPI 入口是
+/// [`connector_network_available_json`]。
+static NETWORK_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
 /// 006: cumulative SUCCESSFUL starts in this process — the source of each
 /// handle's [`ConnectorHandle::generation`]. Monotonic, never reset, so a
 /// deployment can compare two snapshots and see whether the process keeps
@@ -7848,6 +7881,67 @@ pub fn connector_physical_network_changed_json(addr_json: &str) -> String {
         Ok(()) => format!("{{{}}}", jbool("ok", true)),
         Err(error) => format!("{{{},{}}}", jbool("ok", false), jstr("error", error)),
     }
+}
+
+/// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68`）：OS 的
+/// 「有没有网」——与「换网」([`connector_physical_network_changed_json`]) **分开**
+/// 的第二个语义。壳层在 `watchPhysicalNetwork` 的 netLost /
+/// netAvailable / netCapabilitiesChange 里调用。
+///
+/// 可用性先记进进程级的 [`NETWORK_AVAILABLE`]（壳层在 start leg 之前就可能
+/// 报告；离线启动也必须被记住），再有 connector 时同步给活的 ICE 编排：
+/// 离线期间 guard 跳只前进、不发起、不消费预算（`guard.go:123-125`）。
+/// 没有 connector 时不是错误——`applied:false` 如实说明此刻只记录了状态。
+///
+/// 返回文档：`{"ok":true,"available":<bool>,"changed":<bool>,"applied":<bool>}`
+/// （`changed` = 这是否是一次真实边沿，用于去重日志；`applied` = 是否有活的
+/// 编排接收了它）。
+pub fn connector_network_available_json(available: bool) -> String {
+    let changed = NETWORK_AVAILABLE.swap(available, Ordering::SeqCst) != available;
+    let slot = connector_slot();
+    let applied = match slot.as_ref() {
+        Some(handle) => handle.set_network_available(available),
+        None => false,
+    };
+    if changed || applied {
+        hilog::emit(&format!(
+            "connector: network-available|available={}|changed={}|applied={}",
+            u8::from(available),
+            u8::from(changed),
+            u8::from(applied)
+        ));
+    }
+    format!(
+        "{{{},\"available\":{},\"changed\":{},\"applied\":{}}}",
+        jbool("ok", true),
+        available,
+        changed,
+        applied
+    )
+}
+
+/// R3（REPORT §6.4）：壳层的**显式 resume 观测**——`noteWatcherTick` 的墙钟
+/// tick-gap（`NetBirdDataPlanePolicy.resumeGapDetected`：> 15 s）作为挂起/唤醒
+/// 边沿传给核心。本入口只记录：`connector: host-resumed|gap_ms=…` 一行，并把
+/// gap 交给活的 orchestrator 留存（[`PeerIceOrchestrator::note_host_resumed`]）。
+/// **不改变**任何既有恢复路径——恢复动作仍由壳层的 `recoverPhysicalNetwork`
+/// 与核心自己的事件驱动。
+///
+/// 返回文档：`{"ok":true,"gap_ms":<n>,"applied":<bool>}`。
+pub fn connector_host_resumed_json(gap_ms: u64) -> String {
+    let slot = connector_slot();
+    let applied = match slot.as_ref() {
+        Some(handle) => {
+            handle.note_host_resumed(gap_ms);
+            true
+        }
+        None => false,
+    };
+    hilog::emit(&format!(
+        "connector: host-resumed|gap_ms={gap_ms}|applied={}",
+        u8::from(applied)
+    ));
+    format!("{{{},\"gap_ms\":{},\"applied\":{}}}", jbool("ok", true), gap_ms, applied)
 }
 
 /// The `connector_socket_feed(fd)` implementation — shell-side resupply of

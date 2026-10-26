@@ -136,6 +136,23 @@ try {
   check('internal memory keys are not accepted on public events',
     m.buildRecord(ts, 42, 'ui', 'ui_ok', { rss_kb: '1' }, false).indexOf('rss_kb') < 0 &&
     m.buildRecord(ts, 42, 'ui', 'mem_sample', { rss_kb: '1' }, true).indexOf('rss_kb=1') > 0);
+  // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-2): the protect
+  // marker's correlation fields must survive the PERSISTED writer's key
+  // allowlist — otherwise the `protect_mark` record loses the net_id that joins
+  // it to `socket-supply: result` and `protected-dns: eperm`. This pins the
+  // exact rendered record, not just a membership test.
+  check('R0 protect_mark correlation fields render on the persisted record',
+    m.buildRecord(ts, 42, 'vpn', 'protect_mark',
+      { detail: 'VPN_PROTECT_MARK', id: '42', fd: 17, net_id: 297,
+        protect_generation: 7, protect_ms: 34, gen: 8, result: 'generation-match',
+        readback: 'none' }, false) ===
+    'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=protect_mark detail=VPN_PROTECT_MARK' +
+      ' fd=17 gen=8 id=42 net_id=297 protect_generation=7 protect_ms=34' +
+      ' readback=none result=generation-match\n',
+    m.buildRecord(ts, 42, 'vpn', 'protect_mark',
+      { detail: 'VPN_PROTECT_MARK', id: '42', fd: 17, net_id: 297,
+        protect_generation: 7, protect_ms: 34, gen: 8, result: 'generation-match',
+        readback: 'none' }, false));
   check('a space or newline in a value cannot inject a field or a record',
     m.buildRecord(ts, 42, 'ui', 'ui_ok', { reason: 'a b\nc' }, false) ===
     'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok reason=a_b_c\n',

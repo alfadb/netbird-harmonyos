@@ -385,6 +385,24 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '  return (netG()[name] || {})[handle ? handle.netId : 0];\n' +
   '}\n' +
   'export default {\n' +
+  // R3 (REPORT §6.4): the extension's network observer. The REAL
+  // `watchPhysicalNetwork` is driven by the fixtures, so the observer surface
+  // is functional: `on(event, cb)` records each callback under
+  // `__NB_NET_OBSERVERS` (the fixture fires them with a platform-shaped
+  // NetHandle) and `register`/`unregister` accept their callbacks. Additive:
+  // before R3 no fixture called `createNetConnection`, so the extension's own
+  // try/catch took the historical `VPN_NETWORK_WATCH_FAIL` path and nothing
+  // else changed shape.
+  '  createNetConnection: () => {\n' +
+  '    netG().__NB_NET_OBSERVERS = {};\n' +
+  '    return {\n' +
+  '      register: (callback) => { netG().__NB_NET_REGISTERED = (netG().__NB_NET_REGISTERED || 0) + 1;\n' +
+  '        if (typeof callback === "function") { callback(undefined); } },\n' +
+  '      unregister: (callback) => { netG().__NB_NET_UNREGISTERED = (netG().__NB_NET_UNREGISTERED || 0) + 1;\n' +
+  '        if (typeof callback === "function") { callback(undefined); } },\n' +
+  '      on: (event, callback) => { netG().__NB_NET_OBSERVERS[event] = callback; }\n' +
+  '    };\n' +
+  '  },\n' +
   '  getAddressesByName: (host) => {\n' +
   '    const t = netG().__NB_DNS || {};\n' +
   '    const v = t[host];\n' +
@@ -548,6 +566,26 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["physical-changed"]);\n' +
   '    return JSON.stringify({ ok: true });\n' +
   '  },\n' +
+  // R3 (REPORT §6.4; upstream `client/netevents/netevents.go:48-68`): the OS
+  // availability entry, SEPARATE from the change seam above. Functional and
+  // recording — the extension calls it from the real network observer, so
+  // `run-network-recovery.mts` asserts the verdict the core would have
+  // received instead of matching source text.
+  '  connector_network_available: (available) => {\n' +
+  '    const verdict = available === true;\n' +
+  '    g().__NB_NETWORK_AVAILABLE_CALLS = (g().__NB_NETWORK_AVAILABLE_CALLS || 0) + 1;\n' +
+  '    g().__NB_NETWORK_AVAILABLE = verdict;\n' +
+  '    g().__NB_NETWORK_AVAILABLE_SEQ = (g().__NB_NETWORK_AVAILABLE_SEQ || []).concat([verdict]);\n' +
+  '    return JSON.stringify({ ok: true, available: verdict, changed: true, applied: true });\n' +
+  '  },\n' +
+  // R3: the explicit host-resume observation (wall-clock watcher gap). Counted
+  // and recorded verbatim so the fixture can assert BOTH the call and the gap.
+  '  connector_host_resumed: (gapMs) => {\n' +
+  '    const gap = Number(gapMs);\n' +
+  '    g().__NB_HOST_RESUMED_CALLS = (g().__NB_HOST_RESUMED_CALLS || 0) + 1;\n' +
+  '    g().__NB_HOST_RESUMED_GAP = gap;\n' +
+  '    return JSON.stringify({ ok: true, gap_ms: gap, applied: true });\n' +
+  '  },\n' +
   // 2026-09-30 (formal-switch production-recovery gate): every seam that hands
   // the core a production socket is now COUNTED (`__NB_SUPPLY_*`, one counter
   // per entry), so a fixture can assert "the gate let NOTHING through" as a
@@ -577,6 +615,13 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_SUPPLY_DNS = (g().__NB_SUPPLY_DNS || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +
   '  },\n' +
+  // R2 (design `analysis-20261026-dns-structural` §4.2): the protected path's
+  // fast-fail state the shell reads back. Default = the honest NOT-unusable
+  // document (a pre-R2 core answers nothing, which the shell's try/catch turns
+  // into the same default), and a fixture seeds `g().__NB_PATH_STATE` to drive
+  // the REAL gate with the core's EPERM verdict.
+  '  socket_supply_path_state: () => JSON.stringify(g().__NB_PATH_STATE ||\n' +
+  '    { unusable: false, refuse_dns: false, reason: "", generation: 0, age_ms: 0 }),\n' +
   '  connector_management_address_update: () => {\n' +
   '    g().__NB_SUPPLY_MGMT_ADDR = (g().__NB_SUPPLY_MGMT_ADDR || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +
@@ -608,10 +653,16 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_SUPPLY_UNSUBSCRIBE = (g().__NB_SUPPLY_UNSUBSCRIBE || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +
   '  },\n' +
-  '  socket_supply_reply: (id, fd, result) => {\n' +
+  // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-1): the reply's
+  // OPTIONAL ets half — the protect-time platform net id, the generation the
+  // protect was issued at and the measured protect duration. All three are
+  // recorded verbatim (including `undefined` for the pre-R0 three-argument
+  // call), so a fixture asserts the REAL shell passes them.
+  '  socket_supply_reply: (id, fd, result, netId, protectGeneration, protectMs) => {\n' +
   '    g().__NB_SUPPLY_REPLY = (g().__NB_SUPPLY_REPLY || 0) + 1;\n' +
   '    g().__NB_SUPPLY_REPLY_IDS = (g().__NB_SUPPLY_REPLY_IDS || []).concat([id]);\n' +
-  '    g().__NB_SUPPLY_REPLY_LAST = { id: id, fd: fd, result: result };\n' +
+  '    g().__NB_SUPPLY_REPLY_LAST = { id: id, fd: fd, result: result,\n' +
+  '      netId: netId, protectGeneration: protectGeneration, protectMs: protectMs };\n' +
   '    return JSON.stringify({ ok: result === "protected" });\n' +
   '  },\n' +
   // The shell-side protected-DNS resolution the recovery awaits. Parked by
@@ -623,8 +674,32 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  },\n' +
   '  connector_protected_dns_poll: () => JSON.stringify(g().__NB_DNS_POLL ||\n' +
   '    { ok: true, pending: false, ip: "203.0.113.7" }),\n' +
+  // R1 (design `analysis-20261026-dns-structural` §4.2): the reprotect-once
+  // diagnostic's two core seams. `socket_supply_reprotect_poll` answers from
+  // `__NB_REPROTECT_QUEUE` element by element (a fixture seeds `{id, fd}` to
+  // drive the REAL shell handler, and an empty queue is the drain's termination
+  // condition, exactly like the supply poll). The reply is recorded verbatim so
+  // a fixture asserts what the shell actually told the core.
+  '  socket_supply_reprotect_poll: () => {\n' +
+  '    g().__NB_REPROTECT_POLL = (g().__NB_REPROTECT_POLL || 0) + 1;\n' +
+  '    const queue = g().__NB_REPROTECT_QUEUE;\n' +
+  '    if (Array.isArray(queue) && queue.length > 0) { return JSON.stringify(queue.shift()); }\n' +
+  '    return JSON.stringify({ id: "", fd: "" });\n' +
+  '  },\n' +
+  '  socket_supply_reprotect_reply: (id, result, errno, protectMs) => {\n' +
+  '    g().__NB_REPROTECT_REPLY = (g().__NB_REPROTECT_REPLY || 0) + 1;\n' +
+  '    g().__NB_REPROTECT_REPLY_LAST = { id: id, result: result, errno: errno,\n' +
+  '      protectMs: protectMs };\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
   '  socket_supply_shutdown: () => JSON.stringify({ ok: true }),\n' +
-  '  socket_supply_close_fd: () => JSON.stringify({ ok: true }),\n' +
+  // The shell must NEVER close a descriptor it does not own; recording the last
+  // value (and the count) lets a fixture prove the reprotect path does not.
+  '  socket_supply_close_fd: (fd) => {\n' +
+  '    g().__NB_SUPPLY_CLOSE_FD = (g().__NB_SUPPLY_CLOSE_FD || 0) + 1;\n' +
+  '    g().__NB_SUPPLY_CLOSE_FD_LAST = fd;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
   '  connector_wg_socket_feed: () => {\n' +
   '    g().__NB_SUPPLY_WG_FEED = (g().__NB_SUPPLY_WG_FEED || 0) + 1;\n' +
   '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["recover-feed"]);\n' +

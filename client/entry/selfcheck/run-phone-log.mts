@@ -543,6 +543,14 @@ try {
     // data plane gone (signal unregistered / no WG session) — the reason token
     // and how many seconds the stale run had lasted before the recovery started.
     ['vpn_dataplane_stale', ['reason', 'age']],
+    // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-2): the protect
+    // mark, PERSISTED. `detail` carries the verbatim VPN_PROTECT_MARK marker
+    // token (this ROM keeps no I-level HiLog line, so the marker was 0 lines in
+    // the captured netbird-vpn.log files), and the numeric fields are the SAME
+    // protect-time group the supply reply hands the core, so the marker,
+    // `socket-supply: result` and `protected-dns: eperm` name one net_id.
+    ['protect_mark', ['detail', 'id', 'fd', 'net_id', 'protect_generation',
+      'protect_ms', 'gen', 'result', 'readback']],
     // 0.0.34 peer-status lag fix (peer-status-lag REPORT §3.5): the extension's
     // publication stamp + the core's edge revision + the two peer counts the F5
     // label change moves — one record per REAL write (the debounce above folds
@@ -889,8 +897,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 23 reviewed names / 28 helper calls',
-    milestones.length === 23 && extText.split('this.diagMilestone(').length === 29);
+  check('the wired milestone surface is exactly the 24 reviewed names / 29 helper calls',
+    milestones.length === 24 && extText.split('this.diagMilestone(').length === 30);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

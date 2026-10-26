@@ -121,7 +121,9 @@ mod host_link_stubs {
 }
 
 use netbird_core::protected_dns::eperm_line;
-use netbird_core::socket_supply::{supply_result_line, Purpose, SocketKind};
+use netbird_core::socket_supply::{
+    meta_from_reply_args, supply_result_line, Purpose, SocketKind, SocketSupply, SupplyMeta,
+};
 
 /// The R0 gap (`design.md` §5.1 #4): the EPERM record had no `id=`/`fd=`, so
 /// the only way to bind it to the supply line that handed out the socket was
@@ -137,6 +139,7 @@ fn eperm_line_binds_the_request_id_and_the_core_dup_fd_additively() {
         42,
         17,
         7,
+        &SupplyMeta::default(),
         "dns:send-failed errno=1 (Operation not permitted (os error 1))",
     );
     // (1) The pre-R0 prefix is byte-identical: host/stage/attempt/server kept
@@ -162,7 +165,8 @@ fn eperm_line_binds_the_request_id_and_the_core_dup_fd_additively() {
 /// reply instant; it is TAIL-appended after every pre-existing field.
 #[test]
 fn supply_result_line_appends_the_core_epoch_after_every_existing_field() {
-    let protected = supply_result_line(42, Purpose::Dns, SocketKind::Udp, 17, "protected", 3, 5);
+    let protected = supply_result_line(
+        42, Purpose::Dns, SocketKind::Udp, 17, "protected", 3, 5, &SupplyMeta::default());
     assert_eq!(
         protected,
         "socket-supply: result id=42 purpose=dns kind=udp fd=17 result=protected \
@@ -171,7 +175,8 @@ fn supply_result_line_appends_the_core_epoch_after_every_existing_field() {
     // The refusal spelling (`result=socket-protect-failed`) is unchanged, and
     // the rejection line gets the same additive suffix.
     let refused = supply_result_line(
-        43, Purpose::Management, SocketKind::Tcp, -1, "socket-protect-failed", 8, 5);
+        43, Purpose::Management, SocketKind::Tcp, -1, "socket-protect-failed", 8, 5,
+        &SupplyMeta::default());
     assert_eq!(
         refused,
         "socket-supply: result id=43 purpose=management kind=tcp fd=-1 \
@@ -181,3 +186,133 @@ fn supply_result_line_appends_the_core_epoch_after_every_existing_field() {
     assert!(protected.starts_with("socket-supply: result id=42 "));
     assert!(refused.starts_with("socket-supply: result id=43 "));
 }
+
+/// R0 ets half (`design.md` §4.2, AC-R0-1): the shell reports the protect-time
+/// network identity and the measured protect duration on the reply. The core
+/// keeps that group BY REQUEST ID and prints the SAME group on the supply line
+/// AND on the `protected-dns: eperm` line of a socket handed out under it, so a
+/// capture can state the `net_id` a refusal belongs to without guessing from
+/// (host, server, time).
+#[test]
+fn eperm_and_supply_lines_share_the_shell_reported_meta_group() {
+    let meta = SupplyMeta {
+        net_id: Some(297),
+        protect_generation: Some(7),
+        protect_ms: Some(34),
+    };
+    let supply = supply_result_line(
+        42, Purpose::Dns, SocketKind::Udp, 17, "protected", 3, 5, &meta);
+    assert_eq!(
+        supply,
+        "socket-supply: result id=42 purpose=dns kind=udp fd=17 result=protected \
+         elapsed_ms=3 epoch=5 net_id=297 protect_generation=7 protect_ms=34"
+    );
+
+    let eperm = eperm_line(
+        "relay.example",
+        1,
+        2,
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 53), 53),
+        42,
+        17,
+        5,
+        &meta,
+        "dns:send-failed errno=1 (Operation not permitted (os error 1))",
+    );
+    // The group is additive and sits between the existing generation= token and
+    // the free-text `result=` tail — no pre-R0 field moved, `result=` stays last.
+    assert!(
+        eperm.contains(
+            " id=42 fd=17 errno=1 generation=5 net_id=297 protect_generation=7 protect_ms=34 result="
+        ),
+        "{eperm}"
+    );
+    assert!(eperm.starts_with(
+        "protected-dns: eperm host=relay.example stage=1 attempt=2 server=192.0.2.53:53 "), "{eperm}");
+    assert!(eperm.ends_with(
+        "result=dns:send-failed errno=1 (Operation not permitted (os error 1))"), "{eperm}");
+
+    // A partial group prints only what the shell sent (an older shell sends
+    // nothing at all, which is the byte-identical pre-R0 line).
+    let partial = SupplyMeta { net_id: Some(301), ..SupplyMeta::default() };
+    assert!(supply_result_line(44, Purpose::Dns, SocketKind::Udp, 18, "protected", 2, 5, &partial)
+        .ends_with(" epoch=5 net_id=301"));
+}
+
+/// R0: the optional reply numbers are the transport shape of the ets half. A
+/// negative value is the shell's "unknown" sentinel (the pre-R0 signature's
+/// absence), so it must NOT be printed as a fabricated field — while a real 0
+/// (a platform net id of 0, a generation 0) is an honest value.
+#[test]
+fn reply_meta_numbers_map_the_shell_unknown_sentinel_to_absent() {
+    assert_eq!(meta_from_reply_args(-1, -1, -1), SupplyMeta::default());
+    assert_eq!(
+        meta_from_reply_args(0, 0, 0),
+        SupplyMeta {
+            net_id: Some(0),
+            protect_generation: Some(0),
+            protect_ms: Some(0),
+        }
+    );
+    assert_eq!(
+        meta_from_reply_args(297, 7, 34),
+        SupplyMeta {
+            net_id: Some(297),
+            protect_generation: Some(7),
+            protect_ms: Some(34),
+        }
+    );
+}
+
+/// R0: the core keeps the shell's group by request id so the EPERM evidence of
+/// a socket handed out under it can state the same `net_id`. The retention is
+/// evidence only — a reply WITHOUT the optional args (the pre-R0 shell) leaves
+/// no group, and an unknown id answers `None` (never a fabricated default).
+#[tokio::test]
+async fn reply_meta_is_retained_by_request_id_for_the_eperm_join() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::Arc;
+
+    let supply = Arc::new(SocketSupply::new());
+    let task = tokio::spawn({
+        let supply = supply.clone();
+        async move { supply.request_with_id(Purpose::Dns).await }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let id = loop {
+        if let Some((id, _purpose)) = supply.poll_request() { break id; }
+        assert!(tokio::time::Instant::now() < deadline, "the request was never queued");
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(supply.request_meta(id), None, "no reply yet, no group");
+
+    let raw = netbird_core::host_sockets::open_udp_unbound().expect("udp socket");
+    // The shell keeps its original fd until handoff; the core only holds the dup.
+    let shell_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let meta = meta_from_reply_args(297, 7, 34);
+    assert_eq!(supply.reply_with_meta(id, raw, "protected", &meta), "{\"ok\":true}");
+    let (_id, delivered) = task.await.expect("dial task").expect("protected fd");
+    assert_ne!(delivered.as_raw_fd(), raw, "the dial owns the dup only");
+    drop(shell_fd); // the shell's `finally { socketSupplyCloseFd(fd) }`
+    assert_eq!(supply.request_meta(id), Some(meta), "the group is kept by request id");
+    assert_eq!(supply.request_meta(id + 9999), None, "an unknown id has no group");
+
+    // The pre-R0 reply shape (no optional args) must stay byte-identical: no
+    // group is stored and none can be printed for the EPERM of that request.
+    let task = tokio::spawn({
+        let supply = supply.clone();
+        async move { supply.request_with_id(Purpose::Dns).await }
+    });
+    let id = loop {
+        if let Some((id, _purpose)) = supply.poll_request() { break id; }
+        assert!(tokio::time::Instant::now() < deadline, "the second request was never queued");
+        tokio::task::yield_now().await;
+    };
+    let raw = netbird_core::host_sockets::open_udp_unbound().expect("udp socket");
+    let shell_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    assert_eq!(supply.reply(id, raw, "protected"), "{\"ok\":true}");
+    let _delivered = task.await.expect("dial task").expect("protected fd");
+    drop(shell_fd);
+    assert_eq!(supply.request_meta(id), None, "an old-shell reply carries no group");
+}
+

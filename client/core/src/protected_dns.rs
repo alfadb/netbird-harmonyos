@@ -21,9 +21,22 @@ use std::time::{Duration, Instant};
 use crypto_box::aead::rand_core::RngCore;
 
 use crate::config::{parse_document, Json};
-use crate::socket_supply::{Purpose, SocketSupply};
+use crate::socket_supply::{
+    Purpose, ReprotectOutcome, ReprotectResult, SocketSupply, SupplyMeta, PROTECTED_PATH_UNUSABLE,
+};
 
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// R1 (design `analysis-20261026-dns-structural` §4.2): the core's bound on the
+/// ONE reprotect round trip of a chain. The shell's own box is SHORTER (200 ms,
+/// `REPROTECT_BOX_MS` in the extension), so a protect that does not settle in
+/// time is answered well before this expires.
+const REPROTECT_WAIT: Duration = Duration::from_millis(250);
+
+/// R1: the bound on the ONE diagnostic re-send after a successful reprotect.
+/// Its timeout token is its own (`dns:resend-timeout`), so it can never be
+/// mistaken for the chain's "the resolver was silent" `dns:timeout`.
+const RESEND_WAIT: Duration = Duration::from_millis(250);
 
 /// N2(b) ceiling on the OS/system-resolver fallback. `getaddrinfo` is a
 /// blocking libc call on a thread of the runtime's blocking pool; the lookup
@@ -32,6 +45,19 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// `resolveProtectedIp`), so a resolver that hangs is abandoned as
 /// `dns:os-resolver-timeout` and the chain falls through to the cache.
 const OS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// R2 (design `analysis-20261026-dns-structural` §4.2, AC-R2-1): the OS-stage
+/// ceiling once the protected path is KNOWN-UNUSABLE (an EPERM of this chain, or
+/// the supply's latched verdict from a previous one).
+///
+/// The capture's 794/805 OS-stage timeouts were pure waiting: the physical
+/// network reported a valid default netId while nothing could egress it, so
+/// `getaddrinfo` sat out its full 3 s on EVERY refused lookup. 500 ms is the
+/// same order as one protected query attempt and keeps a whole chain under the
+/// 1 s target, while a genuinely slow-but-working resolver is still given a
+/// real chance (the answer is cached as last-known-good for the next chain).
+const OS_RESOLVE_TIMEOUT_UNUSABLE: Duration = Duration::from_millis(500);
+
 
 /// The DNS service port every protected query goes to. Fixed in production;
 /// only the in-crate fake-resolver tests move it (a host test cannot bind a
@@ -103,6 +129,45 @@ thread_local! {
     static FORCE_EPERM: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
+// R1 test seam: a host UDP send to a bound local socket cannot be refused with
+// EPERM on demand, so the in-crate RECOVERY test relabels the FIRST protected
+// send only. Everything after it — the reprotect handshake, the re-send, the
+// answering fake server — stays the production path.
+#[cfg(test)]
+thread_local! {
+    static FORCE_SEND_EPERM: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// R1: the protected-DNS send, with the test seam in front of the real syscall
+/// (production compiles to the plain `send`).
+async fn send_query(socket: &tokio::net::UdpSocket, query: &[u8]) -> io::Result<usize> {
+    #[cfg(test)]
+    if FORCE_SEND_EPERM.with(|once| once.replace(false)) {
+        return Err(io::Error::from_raw_os_error(1));
+    }
+    socket.send(query).await
+}
+
+/// R1: the ONE re-send after a successful reprotect — the SAME socket, the SAME
+/// query, bounded by [`RESEND_WAIT`]. Re-connecting is idempotent for a connected
+/// UDP socket (the peer is unchanged) and covers the case where the first EPERM
+/// came from `connect(2)` rather than `send(2)`.
+async fn resend_after_reprotect(
+    socket: &tokio::net::UdpSocket,
+    addr: SocketAddrV4,
+    query: &[u8],
+) -> io::Result<()> {
+    let attempt = async {
+        socket.connect(addr).await.map_err(|e| syscall_error("connect", e))?;
+        socket.send(query).await.map_err(|e| syscall_error("send", e))?;
+        Ok::<(), io::Error>(())
+    };
+    match tokio::time::timeout(RESEND_WAIT, attempt).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(io::Error::other("dns:resend-timeout")),
+    }
+}
+
 /// N2(a): is this failure worth ONE more protected attempt?
 ///
 /// Yes for the refusal class the outage is made of — a syscall-level errno
@@ -120,6 +185,11 @@ thread_local! {
 /// identically).
 fn is_transient(error: &io::Error) -> bool {
     let text = error.to_string();
+    // R2: `socket-supply-unusable` is the supply's "the protected path is known
+    // unusable" answer. It is NOT retried: a second socket would be refused for
+    // the same reason, and the chain's job is to fail fast onto the stages that
+    // can still answer. (Every other `socket-supply*` token keeps its retry.)
+    if text.starts_with(crate::socket_supply::SUPPLY_UNUSABLE_TOKEN) { return false; }
     ["dns:connect-failed", "dns:send-failed", "dns:recv-failed",
      "socket-supply", "socket-protect-failed", "physical-network-changed"]
         .iter()
@@ -288,8 +358,9 @@ pub(crate) async fn resolve_on_port(host: &str, supply: &Arc<SocketSupply>, port
 /// 3-D (code plan `analysis-20261025-codeplan` §3.2 D): the facts of ONE
 /// refused protected attempt that the structured EPERM record carries. Purely
 /// evidence — it is collected during stage 1/2 and printed by the chain, never
-/// read by a decision (EPERM still does not retry).
-struct EpermAttempt {
+/// read by a decision (EPERM still does not retry). `pub(crate)` only because
+/// the R2 [`EpermSummary`] constructor names it.
+pub(crate) struct EpermAttempt {
     /// 1 = the primary protected pass, 2 = the single transient retry.
     stage: u8,
     /// 1-based index in the server list of that stage ("尝试序号").
@@ -307,6 +378,12 @@ struct EpermAttempt {
     /// ([`SocketSupply::generation`]) — this is the fact that lets a capture
     /// correlate the EPERM with network-generation changes.
     generation: u64,
+    /// R0 (ets half): the shell-reported protect identity of the request this
+    /// attempt was served under — the SAME `net_id` / `protect_generation` /
+    /// `protect_ms` group its `socket-supply: result id=` line printed, read
+    /// back by [`SocketSupply::request_meta`]. `SupplyMeta::default()` (and the
+    /// byte-identical pre-R0 line) when the shell reported nothing.
+    meta: SupplyMeta,
     /// The full syscall token incl. the original errno text
     /// (`dns:send-failed errno=1 (Operation not permitted (os error 1))`).
     detail: String,
@@ -316,9 +393,9 @@ struct EpermAttempt {
 /// (`protected-dns: eperm`) beside the existing per-server result lines: the
 /// latter count the refusals, this one binds each refusal to the network
 /// generation, the attempt that produced it AND (R0) the supply request id /
-/// core-owned dup fd of the refused socket. Pure formatting (the in-crate test
-/// and `tests/obs_contracts.rs` / `tests/dns_r0_observability.rs` pin the exact
-/// field set).
+/// core-owned dup fd of the refused socket / the shell's protect-time identity
+/// group. Pure formatting (the in-crate test and `tests/obs_contracts.rs` /
+/// `tests/dns_r0_observability.rs` pin the exact field set).
 #[allow(clippy::too_many_arguments)]
 pub fn eperm_line(
     host: &str,
@@ -328,11 +405,13 @@ pub fn eperm_line(
     request_id: u64,
     request_fd: i32,
     generation: u64,
+    meta: &SupplyMeta,
     detail: &str,
 ) -> String {
     format!(
         "protected-dns: eperm host={host} stage={stage} attempt={attempt} server={server} \
-         id={request_id} fd={request_fd} errno=1 generation={generation} result={detail}"
+         id={request_id} fd={request_fd} errno=1 generation={generation}{} result={detail}",
+        meta.suffix()
     )
 }
 
@@ -350,9 +429,127 @@ fn push_eperm_lines(lines: &mut Vec<String>, host: &str, eperms: &mut Vec<EpermA
             fact.request_id,
             fact.request_fd,
             fact.generation,
+            &fact.meta,
             &fact.detail,
         ));
     }
+}
+
+/// R2: what one refused protected PASS contributes to the chain-level verdict —
+/// how many attempts were refused EPERM and the id range that identifies them.
+/// Read BEFORE [`push_eperm_lines`] drains the facts.
+#[derive(Clone, Copy, Default)]
+pub struct EpermSummary {
+    pub attempts: usize,
+    pub first_id: u64,
+    pub last_id: u64,
+}
+
+impl EpermSummary {
+    pub(crate) fn of(facts: &[EpermAttempt]) -> Self {
+        Self {
+            attempts: facts.len(),
+            first_id: facts.first().map(|fact| fact.request_id).unwrap_or(0),
+            last_id: facts.last().map(|fact| fact.request_id).unwrap_or(0),
+        }
+    }
+
+    pub(crate) fn refused_eperm(&self) -> bool { self.attempts > 0 }
+}
+
+/// R2 (design §4.2/§5.2 #5): ONE first-class state record per chain that judged
+/// the protected path unusable — the `retry-skipped` evidence line upgraded to a
+/// state, with the id range of the refused attempts so the refusal can be joined
+/// to its `socket-supply: result` lines without stitching per-server rows.
+/// APPEND-ONLY vocabulary: `result=` stays the last field, the detail is the
+/// protected path's own token, and the line is emitted once per chain.
+pub fn eperm_state_line(
+    host: &str,
+    state: &str,
+    summary: &EpermSummary,
+    generation: u64,
+    elapsed_ms: u128,
+    detail: &str,
+) -> String {
+    format!(
+        "protected-dns: eperm-state host={host} state={state} attempts={} \
+         first_id={} last_id={} generation={generation} elapsed_ms={elapsed_ms} result={detail}",
+        summary.attempts, summary.first_id, summary.last_id
+    )
+}
+
+/// R1 (design `analysis-20261026-dns-structural` §4.2): the per-CHAIN latch of
+/// the reprotect experiment — "每条解析链最多一次，不是每 server 一次". The first
+/// EPERM anywhere in the chain (stage 1 or the stage-2 retry) spends it; every
+/// later refused attempt is recorded exactly as before R1.
+#[derive(Default)]
+struct ReprotectGate {
+    used: bool,
+}
+
+/// R1: the ONE reprotect experiment of one refused attempt, collected inside the
+/// I/O block so the records below carry the SAME `id`/`fd` as the attempt's
+/// `protected-dns: eperm` fact.
+struct ReprotectAttempt {
+    /// The original EPERM token (the reason the experiment ran); it stays a
+    /// recorded EPERM fact even when the re-send recovers the lookup.
+    trigger: String,
+    /// The shell's answer (or the core-side bound outcome).
+    reprotect: ReprotectResult,
+    /// The ONE re-send on the same descriptor — only when the reprotect said ok.
+    resend: Option<(io::Result<()>, u128)>,
+}
+
+/// R1: ONE reprotect record — WHERE the experiment ran (host/stage/attempt/
+/// server), WHICH socket (`id`/`fd`, the same pair the EPERM record carries),
+/// what the shell answered and how long each leg took. APPEND-ONLY beside the
+/// pre-R1 records; `result=` stays the last field, as everywhere else.
+pub fn reprotect_line(
+    host: &str,
+    stage: u8,
+    attempt: usize,
+    server: SocketAddrV4,
+    request_id: u64,
+    request_fd: i32,
+    reprotect: &ReprotectResult,
+) -> String {
+    let (token, errno, protect_ms) = match &reprotect.outcome {
+        ReprotectOutcome::Ok => ("ok", None, reprotect.protect_ms),
+        ReprotectOutcome::Failed { errno } => ("fail", Some(*errno), reprotect.protect_ms),
+        ReprotectOutcome::Timeout => ("timeout", None, None),
+        ReprotectOutcome::Unavailable => ("unavailable", None, None),
+    };
+    let errno = errno.map(|code| format!(" errno={code}")).unwrap_or_default();
+    let protect_ms = protect_ms.map(|ms| format!(" protect_ms={ms}")).unwrap_or_default();
+    format!(
+        "protected-dns: reprotect host={host} stage={stage} attempt={attempt} server={server} \
+         id={request_id} fd={request_fd} reprotect_id={}{errno}{protect_ms} elapsed_ms={} result={token}",
+        reprotect.id, reprotect.elapsed_ms
+    )
+}
+
+/// R1: ONE re-send record — the second `send(2)` on the SAME descriptor. Its
+/// `result=` is the syscall's own token (so a repeated EPERM is readable
+/// verbatim) or `ok`.
+#[allow(clippy::too_many_arguments)]
+pub fn resend_line(
+    host: &str,
+    stage: u8,
+    attempt: usize,
+    server: SocketAddrV4,
+    request_id: u64,
+    request_fd: i32,
+    result: &io::Result<()>,
+    elapsed_ms: u128,
+) -> String {
+    let token = match result {
+        Ok(()) => "ok".to_string(),
+        Err(error) => error.to_string(),
+    };
+    format!(
+        "protected-dns: resend host={host} stage={stage} attempt={attempt} server={server} \
+         id={request_id} fd={request_fd} elapsed_ms={elapsed_ms} result={token}"
+    )
 }
 
 /// N2 (REPORT.md §5): the fallback chain around one protected lookup. Every
@@ -400,13 +597,28 @@ pub(crate) async fn resolve_chain_traced(
     let elapsed = |started: &Instant| started.elapsed().as_millis();
     // 3-D: EPERM facts collected by the protected passes (evidence only).
     let mut eperms: Vec<EpermAttempt> = Vec::new();
+    // R1: the ONE reprotect experiment of THIS chain and its records. The gate is
+    // chain-scoped on purpose: the design allows "每条解析链最多一次", never per
+    // server, so the second refused server is left byte-for-byte as before.
+    let mut reprotect_gate = ReprotectGate::default();
+    let mut r1_lines: Vec<String> = Vec::new();
 
     // Stage 1 — the protected path. Unchanged shape: one fresh protected socket
     // and one query per server, in the order the shell fed them.
-    let stage_one = resolve_on_servers_traced(host, supply, servers, 1, &mut eperms).await;
+    let stage_one =
+        resolve_on_servers_traced(host, supply, servers, 1, &mut eperms, &mut reprotect_gate, &mut r1_lines).await;
+    // R2: read the pass's EPERM facts BEFORE they are drained into their own
+    // records — the chain-level verdict is "ANY attempt of this pass was refused
+    // EPERM", not "the LAST server failed with it".
+    let stage_one_eperms = EpermSummary::of(&eperms);
     push_eperm_lines(&mut lines, host, &mut eperms);
+    lines.append(&mut r1_lines);
     let mut last = match stage_one {
         Ok(ip) => {
+            // R2: a protected answer is liveness evidence — the path works, so
+            // any "unusable" verdict (including one from a previous chain) is
+            // spent.
+            supply.clear_unusable("protected-answer");
             supply.remember_address(host, ip);
             return (Ok(ip), lines);
         }
@@ -418,12 +630,28 @@ pub(crate) async fn resolve_chain_traced(
     // failure of the chain (N3's per-syscall token).
     let mut protected_error = last.to_string();
 
+    // R2 (design §4.2): the pass refused with EPERM ⇒ "the protected path is
+    // unusable", recorded ONCE as a state (not just the per-attempt evidence),
+    // latched on the supply (which also refuses NEW DNS requests for the probe
+    // window and cancels in-flight ones) and reported as the one state line.
+    // A chain that saw no EPERM itself (e.g. it was already fast-rejected)
+    // records nothing here — the state is still whatever the supply holds.
+    if stage_one_eperms.refused_eperm() {
+        note_protected_path_unusable(supply, &mut lines, host, &stage_one_eperms,
+            &protected_error, elapsed(&started));
+    }
+
     // Stage 2 (N2a) — one retry, transient failures only, never for EPERM.
     if is_transient(&last) && !is_permission_denied(&last) {
-        let retry = resolve_on_servers_traced(host, supply, servers, 2, &mut eperms).await;
+        let retry =
+            resolve_on_servers_traced(host, supply, servers, 2, &mut eperms, &mut reprotect_gate, &mut r1_lines)
+                .await;
+        let retry_eperms = EpermSummary::of(&eperms);
         push_eperm_lines(&mut lines, host, &mut eperms);
+        lines.append(&mut r1_lines);
         match retry {
             Ok(ip) => {
+                supply.clear_unusable("protected-answer");
                 supply.remember_address(host, ip);
                 lines.push(format!(
                     "protected-dns: fallback host={host} source=protected-retry ip={ip} elapsed_ms={}",
@@ -436,6 +664,12 @@ pub(crate) async fn resolve_chain_traced(
                     elapsed(&started)));
                 protected_error = error.to_string();
                 last = error;
+                // The RETRY is what refused EPERM this time (the first pass
+                // failed for a non-EPERM reason): the same verdict applies.
+                if retry_eperms.refused_eperm() && !stage_one_eperms.refused_eperm() {
+                    note_protected_path_unusable(supply, &mut lines, host, &retry_eperms,
+                        &protected_error, elapsed(&started));
+                }
             }
         }
     }
@@ -461,8 +695,15 @@ pub(crate) async fn resolve_chain_traced(
         ));
     }
 
-    // Stage 3 (N2b) — the OS/system resolver.
-    match resolve_via_os(host, os).await {
+    // Stage 3 (N2b) — the OS/system resolver. R2: while the protected path is
+    // known-unusable its ceiling is 500 ms instead of 3 s (the capture's
+    // 794/805 OS timeouts were pure waiting on a netId that only EXISTED).
+    let os_bound = if supply.protected_path_unusable() {
+        OS_RESOLVE_TIMEOUT_UNUSABLE
+    } else {
+        OS_RESOLVE_TIMEOUT
+    };
+    match resolve_via_os(host, os, os_bound).await {
         Ok(ip) => {
             supply.remember_address(host, ip);
             lines.push(format!(
@@ -498,17 +739,42 @@ pub(crate) async fn resolve_chain_traced(
     (Err(io::Error::other(aggregate)), lines)
 }
 
-/// N2(b): run the OS resolver off the async worker, bounded by
-/// [`OS_RESOLVE_TIMEOUT`]. A `getaddrinfo` that outlives the bound is abandoned
-/// (its blocking thread finishes on its own); the chain then uses the cache.
-async fn resolve_via_os(host: &str, os: OsResolver) -> io::Result<Ipv4Addr> {
+/// N2(b): run the OS resolver off the async worker, bounded by `bound` (the
+/// pre-R2 [`OS_RESOLVE_TIMEOUT`], or the short [`OS_RESOLVE_TIMEOUT_UNUSABLE`]
+/// once the protected path is known-unusable). A `getaddrinfo` that outlives the
+/// bound is abandoned (its blocking thread finishes on its own); the chain then
+/// uses the cache.
+async fn resolve_via_os(host: &str, os: OsResolver, bound: Duration) -> io::Result<Ipv4Addr> {
     let name = host.to_string();
     let call = tokio::task::spawn_blocking(move || os(&name));
-    match tokio::time::timeout(OS_RESOLVE_TIMEOUT, call).await {
+    match tokio::time::timeout(bound, call).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(join_error)) => Err(io::Error::other(format!("dns:os-resolver-join-failed: {join_error}"))),
         Err(_) => Err(io::Error::other("dns:os-resolver-timeout")),
     }
+}
+
+/// R2: latch "the protected path is unusable" on the supply and push the ONE
+/// state record of this chain. Pure bookkeeping around
+/// [`SocketSupply::mark_unusable`] so both protected passes (primary and the
+/// single retry) report the verdict identically.
+fn note_protected_path_unusable(
+    supply: &Arc<SocketSupply>,
+    lines: &mut Vec<String>,
+    host: &str,
+    summary: &EpermSummary,
+    detail: &str,
+    elapsed_ms: u128,
+) {
+    supply.mark_unusable(PROTECTED_PATH_UNUSABLE);
+    lines.push(eperm_state_line(
+        host,
+        "unusable",
+        summary,
+        supply.generation(),
+        elapsed_ms,
+        detail,
+    ));
 }
 
 // N2 D-row (preregistration v4 §3 evidence 3 / §4 D): the facts of ONE
@@ -591,21 +857,27 @@ fn emit_dns_facts(host: &str, addr: SocketAddrV4, query_id: u16, request_fd: i32
 /// EPERM facts. Production always goes through [`resolve_on_servers_traced`].
 #[cfg(test)]
 async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[SocketAddrV4]) -> io::Result<Ipv4Addr> {
-    resolve_on_servers_traced(host, supply, servers, 1, &mut Vec::new()).await
+    resolve_on_servers_traced(host, supply, servers, 1, &mut Vec::new(),
+        &mut ReprotectGate::default(), &mut Vec::new()).await
 }
 
 /// The same lookup as `resolve_on_servers`, plus the 3-D EPERM evidence
 /// collection: every refused attempt whose token is EPERM is recorded
-/// (stage/attempt/server/generation) in `eperm`, in attempt order. The lookup
-/// itself — one fresh protected socket and one query per server, the error it
-/// returns, the timing — is IDENTICAL to the pre-3-D shape: this only reads
-/// facts that already exist, no decision consults them.
+/// (stage/attempt/server/generation) in `eperm`, in attempt order, and (R1) the
+/// first such refusal of the CHAIN may spend the one reprotect experiment. The
+/// lookup itself — one fresh protected socket and one query per server, the
+/// error it returns, the timing — is IDENTICAL to the pre-3-D shape: no
+/// decision consults the evidence, and an experiment that cannot run leaves the
+/// attempt exactly as it was.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_on_servers_traced(
     host: &str,
     supply: &Arc<SocketSupply>,
     servers: &[SocketAddrV4],
     stage: u8,
     eperm: &mut Vec<EpermAttempt>,
+    gate: &mut ReprotectGate,
+    r1: &mut Vec<String>,
 ) -> io::Result<Ipv4Addr> {
     if servers.is_empty() {
         // Report it like every other outcome of this function: the pre-F3
@@ -627,6 +899,7 @@ async fn resolve_on_servers_traced(
         let mut request_id = 0;
         let mut request_fd = -1;
         let mut facts = DnsFacts::new();
+        let mut reprotect_attempt: Option<ReprotectAttempt> = None;
         let outcome: io::Result<Ipv4Addr> = async {
             let (id, fd) = supply.request_with_id(Purpose::Dns).await.map_err(|e| io::Error::other(e.token()))?;
             request_id = id;
@@ -638,13 +911,46 @@ async fn resolve_on_servers_traced(
                 // N3: each of the three I/O calls names itself and carries the
                 // raw OS error, so the next capture can tell `connect(2)` from
                 // `send(2)` from `recv(2)` (the 0.0.33 outage could not).
-                socket.connect(addr).await.map_err(|e| syscall_error("connect", e))?;
-                crate::n2_socket_trace::io_begin(socket.as_raw_fd(), addr.into());
-                let sent = socket.send(&query).await;
-                facts.sent_mono_ms = crate::sys::mono_ms();
-                crate::n2_socket_trace::first_io(socket.as_raw_fd(), addr.into(),
-                    if sent.is_ok() { "sent" } else { "failed" }, "dns_query");
-                sent.map_err(|e| syscall_error("send", e))?;
+                let mut send_error: Option<io::Error> = None;
+                if let Err(error) = socket.connect(addr).await.map_err(|e| syscall_error("connect", e)) {
+                    send_error = Some(error);
+                } else {
+                    crate::n2_socket_trace::io_begin(socket.as_raw_fd(), addr.into());
+                    let sent = send_query(&socket, &query).await;
+                    facts.sent_mono_ms = crate::sys::mono_ms();
+                    crate::n2_socket_trace::first_io(socket.as_raw_fd(), addr.into(),
+                        if sent.is_ok() { "sent" } else { "failed" }, "dns_query");
+                    send_error = sent.map_err(|e| syscall_error("send", e)).err();
+                }
+                // R1 (design `analysis-20261026-dns-structural` §4.2): the FIRST
+                // EPERM of this chain spends the ONE experiment — hand the shell
+                // the descriptor this attempt is sending on, and if it re-protects
+                // it, send the identical query once more on that SAME socket. The
+                // EPERM no-retry rule is untouched: a failed/timed-out experiment
+                // falls straight through to the unchanged stage 3 -> 4.
+                let eperm_token = send_error.as_ref()
+                    .filter(|error| is_permission_denied(error))
+                    .map(|error| error.to_string());
+                if let Some(trigger) = eperm_token {
+                    if !gate.used {
+                        gate.used = true;
+                        let reprotect = supply.reprotect(raw, REPROTECT_WAIT).await;
+                        let mut resend: Option<(io::Result<()>, u128)> = None;
+                        if reprotect.outcome.is_ok() {
+                            let resend_started = Instant::now();
+                            let resent = resend_after_reprotect(&socket, addr, &query).await;
+                            match &resent {
+                                Ok(()) => send_error = None,
+                                // Carry the re-send's own token on, so the attempt's
+                                // result line and the exit path stay unchanged.
+                                Err(error) => send_error = Some(io::Error::other(error.to_string())),
+                            }
+                            resend = Some((resent, resend_started.elapsed().as_millis()));
+                        }
+                        reprotect_attempt = Some(ReprotectAttempt { trigger, reprotect, resend });
+                    }
+                }
+                if let Some(error) = send_error { return Err(error); }
                 let mut buf = [0u8; 1500];
                 let size = socket.recv(&mut buf).await.map_err(|e| syscall_error("recv", e))?;
                 facts.has_response = true;
@@ -655,6 +961,18 @@ async fn resolve_on_servers_traced(
                 response(&buf[..size], &query)
             }).await.map_err(|_| io::Error::other("dns:timeout"))?
         }.await;
+        // R1: the experiment's TWO records, printed with the SAME `id`/`fd` as
+        // the attempt's `protected-dns: eperm` fact (machine join). Emitted even
+        // when the experiment recovered the lookup, which is exactly the
+        // judgement the diagnostic exists for.
+        if let Some(attempt) = &reprotect_attempt {
+            r1.push(reprotect_line(host, stage, index + 1, addr, request_id, request_fd,
+                &attempt.reprotect));
+            if let Some((resend, elapsed_ms)) = &attempt.resend {
+                r1.push(resend_line(host, stage, index + 1, addr, request_id, request_fd,
+                    resend, *elapsed_ms));
+            }
+        }
         // N2 D-row: one armed-only `N2_DNS` receipt per production query, before
         // the (unchanged) `protected-dns:` result line below.
         emit_dns_facts(host, addr, query_id, request_fd, &facts, &outcome,
@@ -662,6 +980,13 @@ async fn resolve_on_servers_traced(
         match outcome {
             Ok(ip) => {
                 crate::hilog::emit(&format!("protected-dns: id={request_id} host={host} fd={request_fd} server={addr} elapsed_ms={} result={ip}", started.elapsed().as_millis()));
+                // R1: the refusal that STARTED the experiment is still an EPERM
+                // fact (the judgement table reads it with the two R1 records),
+                // even though the re-send recovered the lookup.
+                if let Some(attempt) = &reprotect_attempt {
+                    eperm.push(eperm_attempt(stage, index + 1, addr, request_id, request_fd, supply,
+                        attempt.trigger.clone()));
+                }
                 return Ok(ip);
             }
             Err(err) => {
@@ -670,17 +995,16 @@ async fn resolve_on_servers_traced(
                 // moved on. Only EPERM earns a record (the class this change is
                 // about); the generation is read at the refusal instant, and R0
                 // adds the request id / core-owned dup fd of THIS attempt so the
-                // record joins the supply line by id.
-                if is_permission_denied(&err) {
-                    eperm.push(EpermAttempt {
-                        stage,
-                        attempt: index + 1,
-                        server: addr,
-                        request_id,
-                        request_fd,
-                        generation: supply.generation(),
-                        detail: err.to_string(),
-                    });
+                // record joins the supply line by id. R1: when the experiment ran,
+                // its TRIGGER is the EPERM of record (the final error may be the
+                // re-send's instead), and an attempt recorded from the trigger is
+                // never recorded twice.
+                if let Some(attempt) = &reprotect_attempt {
+                    eperm.push(eperm_attempt(stage, index + 1, addr, request_id, request_fd, supply,
+                        attempt.trigger.clone()));
+                } else if is_permission_denied(&err) {
+                    eperm.push(eperm_attempt(stage, index + 1, addr, request_id, request_fd, supply,
+                        err.to_string()));
                 }
                 last = err;
             }
@@ -689,11 +1013,35 @@ async fn resolve_on_servers_traced(
     Err(last)
 }
 
+/// 3-D + R0 + R1: build the EPERM evidence fact of ONE refused attempt (the one
+/// place the `net_id`/`protect_generation` group is read back from the supply).
+#[allow(clippy::too_many_arguments)]
+fn eperm_attempt(
+    stage: u8,
+    attempt: usize,
+    server: SocketAddrV4,
+    request_id: u64,
+    request_fd: i32,
+    supply: &Arc<SocketSupply>,
+    detail: String,
+) -> EpermAttempt {
+    EpermAttempt {
+        stage,
+        attempt,
+        server,
+        request_id,
+        request_fd,
+        generation: supply.generation(),
+        meta: supply.request_meta(request_id).unwrap_or_default(),
+        detail,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::UdpSocket as AsyncUdpSocket;
 
     fn answer(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
@@ -1064,6 +1412,56 @@ mod tests {
         force_eperm(false);
     }
 
+    /// R0 (ets half, AC-R0-1): the shell-reported protect identity rides the
+    /// REPLY, is kept BY REQUEST ID, and is printed on the EPERM record of the
+    /// very socket that reply handed out — so the supply line and the refusal
+    /// line name one `net_id` instead of being joined by (host, server, time).
+    /// A pre-R0 reply (no meta) keeps the byte-identical pre-R0 record, which
+    /// the sibling tests above already pin.
+    #[tokio::test]
+    async fn eperm_record_carries_the_supply_replys_shell_meta_group() {
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let meta = SupplyMeta { net_id: Some(297), protect_generation: Some(7), protect_ms: Some(34) };
+        let provider = tokio::spawn({
+            let supply = supply.clone();
+            let stop = stop.clone();
+            async move {
+                let mut served = 0usize;
+                loop {
+                    if let Some((id, purpose)) = supply.poll_request() {
+                        assert_eq!(purpose, Purpose::Dns);
+                        let fd = unix_dgram_fd();
+                        assert!(supply
+                            .reply_with_meta(id, fd.as_raw_fd(), "protected", &meta)
+                            .contains("true"));
+                        served += 1;
+                        continue;
+                    }
+                    if stop.load(Ordering::SeqCst) { return served; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        });
+        let (outcome, lines) =
+            resolve_chain_traced("eperm-meta.test", &supply, &[unreached()], os_failing).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 1, "EPERM is never retried");
+        assert!(outcome.is_err(), "no stage can answer");
+        let record = lines
+            .iter()
+            .find(|l| l.contains("protected-dns: eperm "))
+            .unwrap_or_else(|| panic!("an EPERM record: {lines:?}"));
+        assert!(
+            record.contains(
+                "errno=1 generation=0 net_id=297 protect_generation=7 protect_ms=34 result="),
+            "{record}"
+        );
+        force_eperm(false);
+    }
+
     /// 0.0.50: with EPERM the chain still walks stage 4 (last-known-good) and,
     /// when that is empty too, reports the protected EPERM in the aggregate.
     /// Both legs cost exactly ONE supply request.
@@ -1193,10 +1591,366 @@ mod tests {
     }
 
     /// N2(b): the REAL OS-resolver path (the same one OHOS now uses) resolves a
-    /// hosts-file name and fails, bounded, for a name that does not exist.
+    /// hosts-file name and fails, bounded, for a name that does not exist. R2
+    /// added the bound as a parameter; both bounds are exercised (the short one
+    /// must not break a resolver that answers, the long one keeps its ceiling).
     #[tokio::test]
     async fn the_real_os_resolver_path_resolves_localhost_and_is_bounded() {
-        assert_eq!(resolve_via_os("localhost", os_getaddrinfo).await.unwrap(), Ipv4Addr::LOCALHOST);
-        assert!(resolve_via_os("no-such-host.invalid", os_getaddrinfo).await.is_err());
+        for bound in [OS_RESOLVE_TIMEOUT, OS_RESOLVE_TIMEOUT_UNUSABLE] {
+            assert_eq!(
+                resolve_via_os("localhost", os_getaddrinfo, bound).await.unwrap(),
+                Ipv4Addr::LOCALHOST
+            );
+            assert!(resolve_via_os("no-such-host.invalid", os_getaddrinfo, bound).await.is_err());
+        }
+    }
+
+    // ------------- R1: reprotect-once (design §4.2) -------------
+
+    /// R1: a subscribed shell that serves EVERY reprotect request of `supply` the
+    /// instant the core wakes it — the real wake contract, no polling loop, so the
+    /// diagnostic costs no wall time. Returns the number of requests it answered
+    /// (the "once per chain, not per server" count).
+    fn listen_and_serve_reprotect(supply: &Arc<SocketSupply>, result: &'static str) -> Arc<AtomicUsize> {
+        let served = Arc::new(AtomicUsize::new(0));
+        let supply = supply.clone();
+        let counted = served.clone();
+        crate::socket_supply::set_notify(Some(Arc::new(move |_id: u64| {
+            while let Some((id, _fd)) = supply.poll_reprotect() {
+                assert!(supply.reprotect_reply(id, result, 0, 3).contains("true"),
+                    "the shell's reprotect answer must be accepted");
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        })));
+        served
+    }
+
+    /// R1: a subscribed shell that never answers — the "reprotect 请求本身超时" row.
+    fn listen_but_never_answer() {
+        crate::socket_supply::set_notify(Some(Arc::new(|_id: u64| {})));
+    }
+
+    /// The wake hook is process-wide: every R1 test must clear it before it lets
+    /// go of the serialization lock, or the next test inherits a listener.
+    struct ClearListener;
+
+    impl Drop for ClearListener {
+        fn drop(&mut self) {
+            crate::socket_supply::set_notify(None);
+        }
+    }
+
+    /// R1: make the NEXT protected-DNS send fail as EPERM (the
+    /// `FORCE_SEND_EPERM` test seam) — the only way a host test can produce a
+    /// `send(2)` refusal while the socket, the resolver address and the fake
+    /// server all stay REAL.
+    fn force_send_eperm_once() {
+        FORCE_SEND_EPERM.with(|once| once.set(true));
+    }
+
+    /// The `key=value` token of a `protected-dns:` record (`""` when absent).
+    fn token<'a>(line: &'a str, key: &str) -> &'a str {
+        line.split_whitespace().find_map(|part| part.strip_prefix(key)).unwrap_or("")
+    }
+
+    fn r1_lines<'a>(lines: &'a [String], kind: &str) -> Vec<&'a String> {
+        let needle = format!("protected-dns: {kind} ");
+        lines.iter().filter(|line| line.starts_with(&needle)).collect()
+    }
+
+    /// R1 (design §4.2): the ONE experiment of a chain that RECOVERS — the send
+    /// was refused EPERM, the shell re-protected the SAME core descriptor, and
+    /// the ONE re-send got through. The lookup answers on the protected path
+    /// (no fallback line), both R1 records and the trigger EPERM are emitted, and
+    /// all three lines name the same `id`/`fd`.
+    #[tokio::test]
+    async fn reprotect_once_recovers_a_send_eperm_and_the_chain_answers() {
+        let _serial = crate::socket_supply::notify_test_lock();
+        let _clear = ClearListener;
+        let _guard = crate::n2_stimulus::test_guard();
+        let server = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = match server.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
+        let supply = Arc::new(SocketSupply::new());
+        let served = listen_and_serve_reprotect(&supply, "ok");
+        force_send_eperm_once();
+        let provider = tokio::spawn(supply_requests(supply.clone(), 1, true));
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, peer) = server.recv_from(&mut buf).await.unwrap();
+            server.send_to(&answer(&buf[..n], [203, 0, 113, 21]), peer).await.unwrap();
+        });
+        let (outcome, lines) =
+            resolve_chain_traced("recover.test", &supply, &[address], os_failing).await;
+        provider.await.unwrap();
+        responder.await.unwrap();
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(203, 0, 113, 21),
+            "the re-send after the reprotect answers on the protected path");
+        assert_eq!(served.load(Ordering::SeqCst), 1, "ONE reprotect for the chain: {lines:?}");
+        assert!(lines.iter().all(|line| !line.contains("source=")),
+            "stage 1 answered, so no fallback line: {lines:?}");
+
+        let reprotect = r1_lines(&lines, "reprotect");
+        assert_eq!(reprotect.len(), 1, "{lines:?}");
+        assert!(reprotect[0].starts_with(
+            "protected-dns: reprotect host=recover.test stage=1 attempt=1 server="), "{}", reprotect[0]);
+        assert!(reprotect[0].contains(" protect_ms=3 "), "{}", reprotect[0]);
+        assert!(reprotect[0].ends_with("result=ok"), "{}", reprotect[0]);
+        let resend = r1_lines(&lines, "resend");
+        assert_eq!(resend.len(), 1, "{lines:?}");
+        assert!(resend[0].ends_with("result=ok"), "{}", resend[0]);
+        // The refusal that STARTED the experiment is still a recorded EPERM fact
+        // (the judgement table reads it together with the two R1 records), even
+        // though the lookup itself ended in success.
+        let eperm = r1_lines(&lines, "eperm");
+        assert_eq!(eperm.len(), 1, "{lines:?}");
+        assert!(eperm[0].contains(" errno=1 "), "{}", eperm[0]);
+        // Machine join: one id/fd pair across all three records.
+        for record in [reprotect[0], resend[0]] {
+            assert_eq!(token(record, "id="), token(eperm[0], "id="), "{record}");
+            assert_eq!(token(record, "fd="), token(eperm[0], "fd="), "{record}");
+        }
+        assert_ne!(token(reprotect[0], "reprotect_id="), "0");
+    }
+
+    /// R1: the re-send is refused EPERM again → both R1 records are emitted (the
+    /// "标记在、路径不通" row), the chain STILL asks for exactly one socket and
+    /// continues into the unchanged stage 3.
+    #[tokio::test]
+    async fn a_resend_that_is_refused_again_is_recorded_and_the_chain_still_falls_back() {
+        let _serial = crate::socket_supply::notify_test_lock();
+        let _clear = ClearListener;
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let served = listen_and_serve_reprotect(&supply, "ok");
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("os-fallback.test", &supply, &[unreached()], os_resolves_the_test_host).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 1, "the EPERM chain still asks for exactly one socket");
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        let reprotect = r1_lines(&lines, "reprotect");
+        assert_eq!(reprotect.len(), 1, "{lines:?}");
+        assert!(reprotect[0].ends_with("result=ok"), "{}", reprotect[0]);
+        let resend = r1_lines(&lines, "resend");
+        assert_eq!(resend.len(), 1, "{lines:?}");
+        assert!(resend[0].contains("result=dns:connect-failed errno=1 ("), "{}", resend[0]);
+        let eperm = r1_lines(&lines, "eperm");
+        assert_eq!(eperm.len(), 1, "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("source=os-resolver ip=198.51.100.7")), "{lines:?}");
+        assert!(lines.iter().all(|line| !line.contains("source=protected-retry")), "{lines:?}");
+        force_eperm(false);
+    }
+
+    /// R1: the experiment is PER CHAIN, not per server — with two EPERM servers
+    /// in one stage the shell is asked exactly ONCE, and only the first attempt
+    /// carries the R1/re-send records; both refusals keep their EPERM evidence.
+    #[tokio::test]
+    async fn the_reprotect_experiment_runs_once_per_chain_not_once_per_server() {
+        let _serial = crate::socket_supply::notify_test_lock();
+        let _clear = ClearListener;
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let served = listen_and_serve_reprotect(&supply, "ok");
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let servers = [unreached(), SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 99), DNS_PORT)];
+        let (outcome, lines) = resolve_chain_traced("once-per-chain.test", &supply, &servers, os_failing).await;
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 2, "each server is still tried once");
+        assert!(outcome.is_err());
+        assert_eq!(served.load(Ordering::SeqCst), 1, "ONE experiment for the whole chain: {lines:?}");
+        assert_eq!(r1_lines(&lines, "reprotect").len(), 1, "{lines:?}");
+        assert_eq!(r1_lines(&lines, "resend").len(), 1, "{lines:?}");
+        assert_eq!(r1_lines(&lines, "eperm").len(), 2, "both refusals keep their evidence: {lines:?}");
+        force_eperm(false);
+    }
+
+    /// R1: a subscribed shell that never answers → the bound decides, the record
+    /// says `timeout`, and the chain sends no re-send (it continues to stage 3).
+    #[tokio::test]
+    async fn a_silent_shell_records_the_reprotect_timeout_and_no_resend_is_sent() {
+        let _serial = crate::socket_supply::notify_test_lock();
+        let _clear = ClearListener;
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        listen_but_never_answer();
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("os-fallback.test", &supply, &[unreached()], os_resolves_the_test_host).await;
+        stop.store(true, Ordering::SeqCst);
+        provider.await.unwrap();
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
+        let reprotect = r1_lines(&lines, "reprotect");
+        assert_eq!(reprotect.len(), 1, "{lines:?}");
+        assert!(reprotect[0].ends_with("result=timeout"), "{}", reprotect[0]);
+        assert_ne!(token(reprotect[0], "reprotect_id="), "0", "the record names the request");
+        assert!(r1_lines(&lines, "resend").is_empty(), "no answer ⇒ no re-send: {lines:?}");
+        assert_eq!(r1_lines(&lines, "eperm").len(), 1, "{lines:?}");
+        force_eperm(false);
+    }
+
+    /// R1: no shell is subscribed → the experiment is `unavailable` at once (no
+    /// wait, no re-send), and the fallback chain is byte-for-byte the pre-R1 one.
+    #[tokio::test]
+    async fn without_a_listening_shell_the_experiment_is_unavailable_without_a_wait() {
+        let _serial = crate::socket_supply::notify_test_lock();
+        let _clear = ClearListener;
+        let _guard = crate::n2_stimulus::test_guard();
+        crate::socket_supply::set_notify(None);
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let (outcome, lines) =
+            resolve_chain_traced("os-fallback.test", &supply, &[unreached()], os_resolves_the_test_host).await;
+        stop.store(true, Ordering::SeqCst);
+        provider.await.unwrap();
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(198, 51, 100, 7));
+        let reprotect = r1_lines(&lines, "reprotect");
+        assert_eq!(reprotect.len(), 1, "{lines:?}");
+        assert!(reprotect[0].ends_with("reprotect_id=0 elapsed_ms=0 result=unavailable"),
+            "{}", reprotect[0]);
+        assert!(r1_lines(&lines, "resend").is_empty(), "{lines:?}");
+        assert_eq!(r1_lines(&lines, "eperm").len(), 1, "{lines:?}");
+        force_eperm(false);
+    }
+
+    // ------------- R2: EPERM means "the protected path is unusable" ----------
+
+    /// R2: an OS resolver that outlives the new bound but NOT the pre-R2 3 s
+    /// one — the measured fault shape (794/805 OS-stage timeouts were pure
+    /// waiting). The sleep is a real `getaddrinfo` that hangs.
+    fn os_hanging_1200ms(_host: &str) -> io::Result<Ipv4Addr> {
+        std::thread::sleep(Duration::from_millis(1200));
+        Err(io::Error::other("dns:os-resolver-failed: test"))
+    }
+
+    /// R2 (design §4.2, AC-R2-1): ONE chain that sees EPERM marks the path
+    /// unusable, records that FIRST-CLASS state once, and bounds the OS stage
+    /// at 500 ms instead of 3 s. Without the change this chain costs the full
+    /// hang (~1.2 s here, up to 3 s on the device).
+    #[tokio::test]
+    async fn eperm_marks_the_path_unusable_and_bounds_the_os_stage() {
+        let _guard = crate::n2_stimulus::test_guard();
+        force_eperm(true);
+        let supply = Arc::new(SocketSupply::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let provider = tokio::spawn(serve_until_stopped(supply.clone(), stop.clone(), unix_dgram_fd));
+        let servers = [unreached(), SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 99), DNS_PORT)];
+        let started = Instant::now();
+        let (outcome, lines) =
+            resolve_chain_traced("unusable.test", &supply, &servers, os_hanging_1200ms).await;
+        let elapsed = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(provider.await.unwrap(), 2, "each server is still tried once");
+        assert!(outcome.is_err(), "no stage can answer");
+        assert!(
+            supply.protected_path_unusable(),
+            "an EPERM of this chain must latch the 'protected path unusable' state: {lines:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "the OS stage must be bounded at 500 ms after EPERM, the chain took {elapsed:?}"
+        );
+        assert_eq!(r1_lines(&lines, "eperm").len(), 2, "{lines:?}");
+        let state = r1_lines(&lines, "eperm-state");
+        assert_eq!(state.len(), 1, "one state record per chain, not per server: {lines:?}");
+        assert!(state[0].contains("host=unusable.test state=unusable attempts=2"), "{}", state[0]);
+        assert!(
+            token(state[0], "first_id=").parse::<u64>().map(|id| id > 0).unwrap_or(false)
+                && token(state[0], "last_id=").parse::<u64>().map(|id| id > 0).unwrap_or(false),
+            "{}",
+            state[0]
+        );
+        assert!(state[0].starts_with("protected-dns: eperm-state "), "{}", state[0]);
+        assert!(state[0].contains("result=dns:connect-failed errno=1 ("), "{}", state[0]);
+        force_eperm(false);
+    }
+
+    /// R2 (design §4.2, AC-R2-1/2): a chain that starts while the path is
+    /// already known-unusable does NOT receive a protected socket at all — the
+    /// supply refuses instantly — so the chain costs one fast refusal plus the
+    /// SHORT OS bound and answers from the last-known-good address.
+    #[tokio::test]
+    async fn a_known_unusable_path_is_refused_instantly_and_keeps_the_short_os_bound() {
+        let _guard = crate::n2_stimulus::test_guard();
+        let supply = Arc::new(SocketSupply::new());
+        supply.remember_address("cached.test", Ipv4Addr::new(203, 0, 113, 9));
+        supply.mark_unusable(crate::socket_supply::PROTECTED_PATH_UNUSABLE);
+        let started = Instant::now();
+        let (outcome, lines) =
+            resolve_chain_traced("cached.test", &supply, &[unreached()], os_hanging_1200ms).await;
+        let elapsed = started.elapsed();
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(203, 0, 113, 9), "{lines:?}");
+        assert!(supply.poll_request().is_none(), "no socket is even requested: {lines:?}");
+        // The refusal is the supply's own state answer (the per-attempt
+        // `protected-dns:` line lives on hilog, not in the traced vector), and the
+        // OS stage timed out at the R2 500 ms bound instead of the pre-R2 3 s.
+        assert!(supply.path_state().refuse_dns, "the DNS fast refusal is in force");
+        assert!(
+            lines.iter().any(|line| line.contains("dns:os-resolver-timeout")),
+            "the OS stage was bounded: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("source=last-known-good ip=203.0.113.9")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("source=protected-retry")),
+            "a known-unusable path is not retried: {lines:?}"
+        );
+        assert_eq!(r1_lines(&lines, "eperm-state").len(), 0, "this chain saw no EPERM itself");
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "the latched state keeps the OS bound short, the chain took {elapsed:?}"
+        );
+    }
+
+    /// R2: the fast failure is a WINDOW, not a permanent latch — after it the
+    /// next chain is a PROBE, and a protected answer is the liveness evidence
+    /// that clears the state.
+    #[tokio::test]
+    async fn a_protected_answer_after_the_probe_window_clears_the_unusable_state() {
+        let _guard = crate::n2_stimulus::test_guard();
+        let server = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = match server.local_addr().unwrap() { std::net::SocketAddr::V4(a) => a, _ => unreachable!() };
+        let supply = Arc::new(SocketSupply::new());
+        supply.mark_unusable(crate::socket_supply::PROTECTED_PATH_UNUSABLE);
+        supply.set_unusable_probe_window(Duration::ZERO);
+        assert!(supply.protected_path_unusable(), "the latch still bounds the OS stage");
+        let provider = tokio::spawn(supply_requests(supply.clone(), 1, true));
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, peer) = server.recv_from(&mut buf).await.unwrap();
+            server.send_to(&answer(&buf[..n], [203, 0, 113, 31]), peer).await.unwrap();
+        });
+        let (outcome, lines) =
+            resolve_chain_traced("probe.test", &supply, &[address], os_failing).await;
+        provider.await.unwrap();
+        responder.await.unwrap();
+        assert_eq!(outcome.unwrap(), Ipv4Addr::new(203, 0, 113, 31), "{lines:?}");
+        assert!(
+            !supply.protected_path_unusable(),
+            "a protected answer is liveness evidence and clears the R2 state: {lines:?}"
+        );
+        assert!(!supply.path_state().refuse_dns);
+    }
+
+    /// R2: the fast-refusal token is terminal for the chain — retrying it would
+    /// only ask a path that is already known-unusable for a second socket. The
+    /// pre-existing transient tokens keep their one retry.
+    #[test]
+    fn the_unusable_token_is_not_retried() {
+        assert!(!is_transient(&io::Error::other("socket-supply-unusable")));
+        for token in ["socket-supply-rejected", "socket-supply-timeout",
+            "socket-supply-closed", "socket-protect-failed", "physical-network-changed"] {
+            assert!(is_transient(&io::Error::other(token)), "{token} must stay transient");
+        }
     }
 }

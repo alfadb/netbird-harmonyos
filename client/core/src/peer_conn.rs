@@ -1586,6 +1586,11 @@ struct PeerConn {
     /// [`ICE_RETRY_HOURLY_MS`] 前进（退避 backoff 停在原处不再前进，与上游
     /// `ticker.Stop()` 同义）。`guard_reset` 清除。
     guard_hourly: bool,
+    /// R3（REPORT §6.4）：本 peer 在**当前离线期**是否已经打过一行离线跳过
+    /// 日志。离线期间跳照常前进，日志是限流的——每 peer 每离线 episode 一行，
+    /// 而不是每拍一行（数十 peer × 最长 45 s 的节拍会刷屏）。
+    /// [`PeerIceOrchestrator::set_network_available`] 在可用性变化时清零。
+    guard_offline_logged: bool,
     /// 上一次输出健康摘要行的时刻（0 = 尚未输出过；见
     /// [`HEALTH_SUMMARY_MS`]）。
     last_health_ms: u64,
@@ -1641,6 +1646,7 @@ impl PeerConn {
             guard_next_at_ms: 0,
             guard_ice_retries: 0,
             guard_hourly: false,
+            guard_offline_logged: false,
             last_health_ms: 0,
             gather: None,
             edge_facts: None,
@@ -1809,6 +1815,19 @@ pub struct PeerIceOrchestrator {
     signal_reconnected: bool,
     /// 是否曾经就绪过（区分「首次就绪」与「重连边沿」）。
     signal_ever_ready: bool,
+    /// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68` 的
+    /// availability 位）：OS 报告的「有没有网」。`false` = 离线：guard 的跳
+    /// 照常前进，但**不发起**、也不消费 `PartiallyConnected` 的 3 次预算
+    /// （上游 `guard.go:123-125` 在 tick 分支最前面 `continue`；预算冻结在
+    /// 原值，恢复时由 netChanged 分支的 `iceState.reset()` 清零）。默认
+    /// `true`——未知不等于离线，启动期的首跳不能被凭空吞掉。
+    network_available: bool,
+    /// R3：显式 suspend/resume 观测（shell 的墙钟 tick-gap 边沿）——事件计数
+    /// 与最近一次的 gap_ms。**纯观测**：不改任何节拍、会话或到期判断；恢复
+    /// 动作仍归既有的 shell 恢复路径。
+    host_resumes: u64,
+    /// R3：最近一次 resume 事件的 gap_ms（0 = 尚未观测到）。
+    last_host_resume_gap_ms: u64,
     /// 非网络图 peer 的 signal 帧计数（观测，不作为错误）。STAGE 1 起**只**有
     /// 这一支会计数：无会话的 ANSWER 不再丢弃、改为开启一轮协商（官方语义，
     /// 见 `handle_signal`），因此它不再是「迟到 ANSWER 被丢」的指示器。
@@ -1884,6 +1903,9 @@ impl PeerIceOrchestrator {
             signal_ready: false,
             signal_reconnected: false,
             signal_ever_ready: false,
+            network_available: true,
+            host_resumes: 0,
+            last_host_resume_gap_ms: 0,
             unknown_signal: 0,
             fixed_local_port: deps.fixed_local_port,
             advertised_candidates: deps.advertised_candidates,
@@ -1915,6 +1937,70 @@ impl PeerIceOrchestrator {
         // 的 `case <-g.relayedConnDisconnected:` 臂是 select 的事件，不是节拍）。
         link.set_waker(Arc::clone(&self.waker));
         self.relay_plane = Some(link);
+    }
+
+    /// R3（REPORT §6.4；上游 `client/netevents/netevents.go:48-68` +
+    /// `client/internal/peer/guard/guard.go:123-125`）：记录 OS 报告的
+    /// 网络可用性（入口是 NAPI `connector_network_available`，由壳层
+    /// `watchPhysicalNetwork` 的 netLost / netAvailable /
+    /// netCapabilitiesChange 驱动）。返回是否真的发生了边沿。
+    ///
+    /// - **离线**：后续 guard 跳只推进 `guard_next_at_ms`，不分类、不发起、
+    ///   不消费 `PartiallyConnected` 的 3 次预算——上游在 tick 分支最前面
+    ///   `continue`，跳过整个 `switch`（含 `iceState.shouldRetry()`）；
+    /// - **恢复**：照上游 netChanged 分支（`guard.go:162-176`）为每个 peer 重建
+    ///   800 ms 节拍并清零预算，然后唤醒泵（`newReconnectTicker` 消费立即首跳
+    ///   后，下一次发起落在恢复后约 800 ms）。恢复不拆会话：ICE 会话自己的
+    ///   定时器与既有的恢复路径都不变。
+    pub fn set_network_available(&mut self, available: bool, now_ms: u64) -> bool {
+        if self.network_available == available {
+            return false;
+        }
+        self.network_available = available;
+        for peer in self.peers.iter_mut() {
+            peer.guard_offline_logged = false;
+        }
+        if available {
+            let peers = self.peers.len();
+            for idx in 0..peers {
+                self.guard_reset(idx, now_ms);
+            }
+            if peers > 0 {
+                crate::hilog::emit(&format!(
+                    "N5c_ICE|guard|network-restored|peers={peers}"
+                ));
+            }
+            self.waker.notify(PumpWake::Peers);
+        }
+        true
+    }
+
+    /// R3：当前 OS 可用性（`true` = 有网；默认 `true`）。
+    pub fn network_available(&self) -> bool {
+        self.network_available
+    }
+
+    /// R3：显式 host resume 观测（shell 的墙钟 watcher tick-gap 边沿，
+    /// `NetBirdDataPlanePolicy.resumeGapDetected` > 15 s）。只记录事实——
+    /// `connector: host-resumed|gap_ms=` 行由 connector 的 NAPI 入口打，
+    /// 这里保留可断言的计数与最近 gap，**不**改任何节拍/会话/到期判断。
+    ///
+    /// 为什么默认不动定时器：核心的 `now_ms` 是 `CLOCK_MONOTONIC`
+    /// （`sys::mono_ms`，挂起期间不前进），所以挂起不会让 ICE 的
+    /// disconnected/failed 判定凭空到期；恢复动作仍归壳层的既有恢复路径。
+    pub fn note_host_resumed(&mut self, gap_ms: u64) {
+        self.host_resumes = self.host_resumes.saturating_add(1);
+        self.last_host_resume_gap_ms = gap_ms;
+    }
+
+    /// R3：累计收到的 resume 事件数（观测面/测试）。
+    pub fn host_resumes(&self) -> u64 {
+        self.host_resumes
+    }
+
+    /// R3：最近一次 resume 事件的墙钟 gap（0 = 尚未观测到）。
+    pub fn last_host_resume_gap_ms(&self) -> u64 {
+        self.last_host_resume_gap_ms
     }
 
     /// 本编排**下一次必须醒来的时刻**（注入时钟；`None` = 没有任何定时器）。
@@ -2986,6 +3072,24 @@ impl PeerIceOrchestrator {
         }
     }
 
+    /// R3：离线跳过行的**限流器**——离线期间每 peer 只记一行（每拍一行会在
+    /// 数十 peer × 最长 45 s 的节拍下变成刷屏）。闩在
+    /// [`Self::set_network_available`] 的可用性边沿清零，所以下一次离线
+    /// episode 仍会各打一行。
+    fn note_guard_offline(&mut self, idx: usize) {
+        if self.peers[idx].guard_offline_logged {
+            return;
+        }
+        self.peers[idx].guard_offline_logged = true;
+        let peer_prefix = peer_short(&self.peers[idx].key);
+        crate::hilog::emit(&format!(
+            "N5c_ICE|guard|network-offline|peer={peer_prefix}|next_ms={}|retries={}|hourly={}",
+            self.peers[idx].guard_next_at_ms,
+            self.peers[idx].guard_ice_retries,
+            u8::from(self.peers[idx].guard_hourly)
+        ));
+    }
+
     /// 一拍的重连节拍（上游 `Guard.reconnectLoopWithRetry` 的 tick 分支，
     /// `guard.go:118-139`）：到点即**先推进**下一跳（ticker 每跳都前进，与
     /// 回调是否真的发起无关），再按连接状态决定要不要发起。
@@ -3064,6 +3168,15 @@ impl PeerIceOrchestrator {
                 let at = now_ms.saturating_add(delay_ms(d));
                 self.peers[idx].guard_next_at_ms = at;
             }
+        }
+        // R3（上游 `guard.go:123-125`）：OS 报告无网时**跳过发起**——本拍只
+        // 推进了 ticker，分类、预算消费与发送一概不发生（含 `shouldRetry` 的
+        // 3 次预算，以及每小时档下那一跳的「照常发起」）。可用性恢复由
+        // [`Self::set_network_available`] 统一重建节拍/清零预算（`guard.go`
+        // 的 netChanged 分支），本方法不自行复位。
+        if !self.network_available {
+            self.note_guard_offline(idx);
+            return Ok(());
         }
         let connected = self.peers[idx].state == PeerIceState::Connected;
         // 上游 `InProgress()`：agent 存在且尚未连上。
@@ -5978,6 +6091,111 @@ mod tests {
         orch.run_once(expected_next).expect("a beat 6 h later");
         assert_eq!(offer_frames(&signal), before + 1);
         assert!(!orch.peers[0].guard_hourly);
+    }
+
+    // -------------------------------------------------------------------
+    // R3 (REPORT §6.4 / `analysis-20261025-upstream-compare` §6): the OS
+    // availability gate. Upstream `guard.go:123-125` skips every attempt while
+    // the OS reports no usable network — the tick still advances, the ICE retry
+    // budget is NOT consumed — and `netevents.go:48-68` + `guard.go:162-176`
+    // restart the reconnect ticker (fresh 800 ms hop, `iceState.reset()`) when
+    // availability comes back. Our core had no availability bit at all, so an
+    // offline peer spent its 3-attempt budget and parked on the hourly tick.
+    // -------------------------------------------------------------------
+
+    /// 离线期间：跳照常前进、**零发起、零预算**（对齐 `guard.go:123-125`）；
+    /// 恢复时重建 800 ms 节拍并清零预算（`guard.go:162-176`）。
+    #[test]
+    fn offline_guard_ticks_skip_attempts_without_spending_the_ice_budget() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        carriers.attach("P");
+        let mut orch = carrier_orch(signal.clone(), carriers.clone());
+        assert!(orch.network_available(), "an injected orchestrator starts online");
+        assert!(orch.set_network_available(false, 1_000), "online -> offline is a transition");
+        assert!(!orch.network_available());
+        assert!(
+            !orch.set_network_available(false, 1_000),
+            "a repeated offline report is not a transition"
+        );
+
+        // 三拍离线（首拍 + 两拍到点）：下一跳照常前进，但零 OFFER、零预算。
+        orch.run_once(1_000).expect("offline beat");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 4_000, "the ticker still advances");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "offline spends no ICE budget");
+        orch.run_once(4_000).expect("offline beat");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 10_000);
+        orch.run_once(10_000).expect("offline beat");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 22_000);
+        assert!(!orch.peers[0].guard_hourly, "offline never enters hourly mode");
+        assert_eq!(offer_frames(&signal), 0, "no OFFER is sent while offline");
+
+        // 恢复：800 ms 起跳 + 预算清零（上游 netChanged 分支）。
+        assert!(orch.set_network_available(true, 10_000), "offline -> online is a transition");
+        assert_eq!(orch.peers[0].guard_next_at_ms, 10_800, "restore re-arms at +800 ms");
+        assert_eq!(orch.peers[0].guard_ice_retries, 0);
+        assert!(!orch.peers[0].guard_hourly);
+        orch.run_once(10_799).expect("pre-hop beat");
+        assert_eq!(offer_frames(&signal), 0, "the restored hop is not due yet");
+        orch.run_once(10_800).expect("the restored hop");
+        assert_eq!(offer_frames(&signal), 1, "the restored peer retries immediately");
+        assert_eq!(orch.peers[0].guard_ice_retries, 1, "the fresh budget starts at 1/3");
+    }
+
+    /// 离线再久也不进每小时档：8 个到点跳之后预算仍为 0、`hourly` 仍假；
+    /// 恢复后**完整**的 3 次预算重新走一遍（第 4 拍才转每小时）。
+    #[test]
+    fn offline_guard_never_enters_hourly_mode_and_the_budget_is_fresh_after_restore() {
+        let signal = Arc::new(FrameLog::default());
+        let carriers = Arc::new(CarrierWg::default());
+        carriers.attach("P");
+        let mut orch = carrier_orch(signal.clone(), carriers.clone());
+        assert!(orch.set_network_available(false, 1_000));
+
+        let mut at = 1_000u64;
+        for _ in 0..8 {
+            orch.run_once(at).expect("offline beat");
+            at = orch.peers[0].guard_next_at_ms;
+        }
+        assert_eq!(orch.peers[0].guard_ice_retries, 0, "8 offline hops spend nothing");
+        assert!(!orch.peers[0].guard_hourly, "offline hops never exhaust a budget");
+        assert_eq!(offer_frames(&signal), 0);
+
+        // 恢复：预算从头走（3 次发起 → 第 4 拍转每小时）。
+        assert!(orch.set_network_available(true, at));
+        for _ in 0..ICE_RETRY_MAX {
+            let due = orch.peers[0].guard_next_at_ms;
+            orch.run_once(due).expect("online budget beat");
+            assert!(!orch.peers[0].guard_hourly);
+        }
+        assert_eq!(orch.peers[0].guard_ice_retries, ICE_RETRY_MAX);
+        let exhaust = orch.peers[0].guard_next_at_ms;
+        orch.run_once(exhaust).expect("the exhaust beat");
+        assert!(orch.peers[0].guard_hourly, "a FRESH budget is what the restore grants");
+        assert_eq!(orch.peers[0].guard_ice_retries, ICE_RETRY_MAX + 1);
+    }
+
+    /// 显式 resume 入口：只记录事实（事件计数 + 墙钟 gap），**不改**任何
+    /// 节拍、会话或到期判断——恢复动作仍归既有的 shell 恢复路径。
+    #[test]
+    fn host_resume_is_recorded_without_touching_the_guard_schedule() {
+        let mut orch = silent_peer_orch(8);
+        orch.run_once(1_000).expect("first hop");
+        assert_eq!(orch.host_resumes(), 0, "nothing reported yet");
+        assert_eq!(orch.last_host_resume_gap_ms(), 0);
+        let next = orch.peers[0].guard_next_at_ms;
+        let session_at = orch.peers[0].session_at_ms;
+        orch.note_host_resumed(16_000);
+        assert_eq!(orch.host_resumes(), 1);
+        assert_eq!(orch.last_host_resume_gap_ms(), 16_000);
+        assert_eq!(
+            orch.peers[0].guard_next_at_ms, next,
+            "a resume observation never re-arms the guard ticker"
+        );
+        assert_eq!(
+            orch.peers[0].session_at_ms, session_at,
+            "the existing session (and its ICE deadlines) is untouched"
+        );
     }
 
     /// 上游的**复位事件**把每小时档拉回 fast（`guard.go:141-177` 的每个事件
