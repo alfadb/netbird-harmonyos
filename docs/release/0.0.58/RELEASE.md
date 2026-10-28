@@ -2,7 +2,7 @@
 
 本文记录 0.0.58 这个版本的不可变标识、本版内容、验证证据、已知问题，以及升级与回滚方式。它是**版本记录**，不是上架就绪度门禁；门禁类结论见[0.0.49 发布就绪度门禁](../0.0.49/release-readiness.md)。
 
-> **读之前先看这一条。** 0.0.58 **尚未装机**。代码、构建与两份签名都已完成且可复算，但两端设备在当前网络下不可达（TCP Offline），安装与任何真机功能验证都**没有做**。本文第 3.3 节、第 4.1 节写的都是「待设备恢复后要做的事」，不能读成「已经验过」。
+> **读之前先看这一条。** 0.0.58 **已装机**。代码、构建、两份签名都已完成且可复算；2026-10-27 双端 `install -r` 与 `aa start` 均成功，`bm dump` 根级版本核对为 0.0.58 / 58（原地覆盖，`installTime` 不变）。真机验证在 2026-10-27 晚至 10-28 早完成：R0 / R1 / R2 双端、R3 手机侧都有现场结论（见 3.3、4.1）。仍未覆盖的是真实官方服务端端到端联调与回滚实测（见 3.5）；**tag `v0.0.58` 已打**，指向发布提交 `30055c7`，发布分支 `rel/0.0.58` 跟随 `main`（见 1.1、4.4）。
 
 ## 1. 版本与产物标识
 
@@ -13,7 +13,8 @@
 | 版本 / versionCode | 0.0.58 / 58 |
 | 代码提交 | `a6d4cde`（`feat(core,ets): DNS 可观测性扩展、EPERM reprotect 诊断、快速失败与在线/离线门`） |
 | 升版提交 | `30055c7`（`chore(release): 0.0.58`） |
-| annotated tag | **未打**（0.0.58 未打 tag、未建发布分支，是否补待定；当前仓库 tag 只有 `v0.0.55`） |
+| annotated tag | `v0.0.58`（annotated，指向发布提交 `30055c7`） |
+| 发布分支 | `rel/0.0.58`，跟随 `main`（发布后补的文档提交也会跟到发布线） |
 | 包名 / APP ID | `cn.alfadb.netbird` / `6917608953844302724` |
 | 目标设备类型 | `phone`、`2in1`（ARM64） |
 
@@ -49,10 +50,10 @@
 | client/core 全量 `cargo test` | 已完成，两轮 1179 passed / 0 failed（3.4） |
 | 仓库根 selfcheck 57 套件 | 已完成，两轮 57/57、0 失败（3.4） |
 | ArkTS 编译（hvigorw CompileArkTS） | 已完成，BUILD SUCCESSFUL（3.4） |
-| 双端装机（`install -r`） | **未做**：两端 TCP Offline，待设备恢复后安装（3.3） |
-| 真机连接/路由/DNS 功能验收 | **未做**（4.1） |
-| R1 / R2 / R3 的现场验证 | **未做**（4.1） |
-| 打 tag / 建发布分支 | **未做**（待定，4.4） |
+| 双端装机（`install -r` + `aa start` + `bm dump` 核对） | 已完成：双端均 `install bundle successfully.`、`start ability successfully.`，版本 0.0.58 / 58（3.3） |
+| 真机连接/路由/DNS 功能验收 | 已完成：R0 / R1 / R2 双端有现场结论（3.3、4.1） |
+| R0 / R1 / R2 / R3 的现场验证 | 已完成：R0 / R1 / R2 双端，R3 手机侧（4.1） |
+| 打 tag / 建发布分支 | 已完成：`v0.0.58`（→ `30055c7`）、`rel/0.0.58`（跟随 `main`）（4.4） |
 | 回滚路径实测 | **未做**（5.2） |
 
 ## 2. 本版改了什么
@@ -122,16 +123,21 @@ R1 判非 `ok`（受保护路径不可用）后：
 
 验证日志：`artifacts/build-20261027-0058/signed/logs/sign-pc.log`、`sign-phone.log`、`verify/{pc,phone}/verify-app.log`。
 
-### 3.3 设备：本版尚未装机
+### 3.3 设备：双端已装机，真机验证完成
 
-| 设备 | 序列 | 状态 |
-| --- | --- | --- |
-| PC（SLM-W32 MateBook Fold） | `192.168.50.183:43833` | `hdc list targets -v` 显示 **TCP Offline**；`hdc tconn` `[Fail]Connect failed` |
-| 手机 | `192.168.50.199:37193` | 同上，**TCP Offline** |
+| 设备 | 序列 | 装机 / 启动 | 版本核对（`bm dump` 根级） |
+| --- | --- | --- | --- |
+| PC（SLM-W32 MateBook Fold，MatebookFold 签名包） | `192.168.50.183:43833` | `install -r` → `install bundle successfully.`；`aa start` → `start ability successfully.` | `versionName=0.0.58`、`versionCode=58`；`installTime` 不变（原地覆盖） |
+| 手机（ACL 签名包） | `192.168.50.199:37193` | 同上 → `install bundle successfully.` / `start ability successfully.` | 同上：`versionName=0.0.58`、`versionCode=58`；`installTime` 不变（原地覆盖） |
 
-可达性排查（2026-10-27 02:29 起）：两端 `ping -c 2` 均 100% 丢包；TCP 直连报 `No route to host`；本机是 K8s Pod（`eth0 10.98.0.254/24`），网关 `10.98.0.1` 可达、外网通，但**路由表里没有 `192.168.50.0/24`**，本机也没有可借道的 tun/wg 接口。对照昨晚的 `artifacts/build-20261026-0057/BUILD-RECORD.md`，同一目录下两端 `install -r` 均 rc=0——说明昨晚可达、今晨不可达，阻塞在网络链路而不是包本身。
+连通性波折（如实记录）：2026-10-27 02:29–02:52 装机一度无法进行——本机是 K8s Pod（`eth0 10.98.0.254/24`，网关 `10.98.0.1` 可达、外网通），但路由表里没有 `192.168.50.0/24`，两端 `ping` 100% 丢包、TCP 直连报 `No route to host`，设备当时在睡眠/断网。设备恢复后完成装机。2026-10-28 早间 PC 又一度 `[Fail]Connect failed`，重新 `hdc tconn` 后恢复并补拉日志。这条波折只影响取证时间，不影响装机与验证结论。
 
-因此本版**没有**做：安装、启动、`bm dump` 版本核对、进程存活、任何功能验收。安装步骤与成功判据见 5.1，**待设备恢复后执行**；在此之前不要把本文读成「已装机」或「装机验证通过」。
+双端验证摘要（逐项结论见 4.1，原始日志见 7）：
+
+- **R0**：`protected-dns: eperm` 手机 87 条、PC 51 条，字段完整，样本 `… id=7 fd=45 errno=1 generation=0 net_id=387 protect_generation=1 protect_ms=12`；`VPN_PROTECT_MARK` 手机 85 条、PC 49 条——该行此前实测 0 行，说明 `diagMilestone` 持久化生效。
+- **R1**：reprotect 手机 31 次、PC 15 次，**全部 `result=ok`**（`protect_ms` 3–5 ms，平台接受对同一个 dup fd 的二次 protect）；但紧随的同 socket `resend` 手机 31 次、PC 15 次**全部 `dns:send-failed errno=1`**（`elapsed_ms=0`）⇒ 保护标记能重打但无效，受保护出向路径整体不可用。
+- **R2**：故障期 OS 解析段手机 n=481（p50 502 ms、p90 596 ms、max 974 ms）、PC n=113（p50 507 ms、max 3358 ms），设计目标 ≤500 ms（p50 略超，量级达成，从原来的 3 s 档压下来）；`socket-supply-unusable` 手机 2026 条（其中 1796 次 `elapsed_ms=0` 瞬时拒绝）、PC 357 条；`protected-path-unusable` 手机 44、PC 16；每链一条 `eperm-state`（手机 31、PC 15）；恢复只走既有通道 `socket-supply: usable reason=physical-network-changed`（手机 2 次，age 16 s / 11.2 s；PC 1 次），未新增恢复路径。EPERM 窗口：手机约 5.75 小时，PC 跨两天多段。
+- **R3**（手机侧，2026-10-27）：`connector: network-available|available=0|changed=1|applied=1` → 20 个 peer 各一条 `N5c_ICE|guard|network-offline|…|retries=0|hourly=0`（离线期间预算零消耗）→ `N5c_ICE|guard|network-restored|peers=20` → `available=1`；离线约 7.8 秒。该窗口内 PC 侧没有离线事件，所以 R3 只有手机侧样本。
 
 ### 3.4 测试
 
@@ -147,25 +153,27 @@ R1 判非 `ok`（受保护路径不可用）后：
 
 ### 3.5 这轮验证没有覆盖什么
 
-- 设备侧**零覆盖**：装、启、跑、功能全没做（见 3.3）。
-- R1 / R2 / R3 只有单测与静态校验，**没有**真机现场结论（见 4.1）。
-- 没有与真实官方 NetBird 服务端做端到端联调。
+- **R3 只有手机侧的 1 次离线事件**：该窗口内 PC 侧没有离线事件，未覆盖；「唤醒后零回调」（既无 `netAvailable` 也无 tick）这类场景也没有在真机上构造出来（见 4.1 第 6 项）。
+- 没有与真实官方 NetBird 服务端做端到端联调（本版验证都在自有环境里）。
 - 没有实测回滚路径（见 5.2）。
+- DNS 根因没有解：平台为什么整体拒绝受保护出向（`errno=1`）未知。本轮只确认了「不是代际不匹配 / 标记陈旧」，机理属平台侧（见 4.1）。
 
 ## 4. 已知问题与风险
 
-### 4.1 未装机：本版真机行为未验证
+### 4.1 真机已验证（2026-10-28）：六项结论
 
-R1 / R2 / R3 都有只能在真机上判定的项，单测只能证明「逻辑分支按代码走」，不能证明「平台接受这个调用、现场不会误伤」：
+R1 / R2 / R3 里只能在真机上判定的六项，本版都已取得现场结论（R0 / R1 / R2 为双端，R3 为手机侧）。逐项对照：
 
-1. **同一 dup fd 二次 protect 是否被平台接受**（R1）——若被拒，reprotect 结果恒非 `ok`，R1 会退化成「多等一次超时」。
-2. **重发是否改变 egress**（R1）——同 socket 重发依赖「socket 仍绑定原路由」的假设，未验证。
-3. **快速失败会不会误伤正常 DNS**（R2）——30 s 探针窗口内如果路径其实已恢复，DNS 可能被误拒。
-4. **门禁 liveness 误拒率**（R3）——在线门负责判断网络是否可用，liveness（判活）指靠事件与计时确认链路仍活着；判定过严会把可用网络判成离线，导致不发起连接。
-5. **`netLost` 事件顺序**（R3）——与 VPN 生命周期事件的先后顺序未验证。
-6. **离线位可能卡死**（R3）——离线位就是记录「当前处于离线」的那个状态；若「唤醒后零回调」（既无 `netAvailable` 也无 tick），可能一直没有事件来复位它。这一条是本版最需要现场盯的风险。
+1. **同一 dup fd 二次 protect 是否被平台接受**（R1）——**接受**。reprotect 手机 31 次、PC 15 次全部 `result=ok`，`protect_ms` 3–5 ms。R1 没有退化成「多等一次超时」。
+2. **重发是否改变 egress**（R1）——**不能**。reprotect `ok` 之后紧随的同 socket `resend` 手机 31 次、PC 15 次**全部** `dns:send-failed errno=1`（`elapsed_ms=0`）。结论：保护标记可重打但无效，受保护出向路径整体不可用。因此「代际不匹配 / 标记陈旧」这个假设被双端数据正式排除，这是本版最有价值的技术结论。
+3. **快速失败会不会误伤正常 DNS**（R2）——**没有观察到误伤，量级达成**。故障期 OS 解析段手机 n=481（p50 502 ms、p90 596 ms、max 974 ms）、PC n=113（p50 507 ms、max 3358 ms）；设计目标 ≤500 ms，p50 略超但已从 3 s 档压到 0.5 s 档，PC 的 3.4 s 长尾是少数样本。恢复只走既有通道（`socket-supply: usable reason=physical-network-changed`，手机 2 次、PC 1 次），未新增恢复路径。
+4. **门禁 liveness 误拒率**（R3）——**该次未观察到误拒**。手机侧离线期间 20 个 peer 全部停在 guard，`retries=0|hourly=0`（预算零消耗），恢复后 20 个 peer 一起恢复。样本只有 1 次离线事件，只能说「这次没误拒」，不能外推成长期误拒率。
+5. **`netLost` 事件顺序**（R3）——**顺序符合设计**。手机侧日志顺序为 `connector: network-available|available=0|changed=1|applied=1` → 20 条 guard `network-offline` → `network-restored|peers=20` → `available=1`，离线约 7.8 秒，未见与 VPN 生命周期事件互相打乱。
+6. **离线位可能卡死**（R3）——**该次未卡死**。恢复后 `available=1`、20 个 peer 全部恢复；但只覆盖了「有 `netAvailable` 回调」这一条路径，「唤醒后零回调」仍未被构造，这一条仍是本版最需要继续盯的风险。
 
-另外，R0 ets 半的效果（三条诊断行能否对齐、`VPN_PROTECT_MARK` 是否真的落盘）同样只能在真机日志上确认——「编译通过 + 单测绿」不构成落盘证据。
+R0 ets 半的落盘效果也已确认（见 3.3）：`protected-dns: eperm` 手机 87 条、PC 51 条，`id` / `fd` / `errno` / `generation` / `net_id` / `protect_generation` / `protect_ms` 字段齐全；`VPN_PROTECT_MARK` 手机 85 条、PC 49 条，此前实测 0 行，`diagMilestone` 持久化生效。
+
+仍在的风险：DNS 根因（平台为什么整体拒绝受保护出向）未解，属平台侧；R1 的 ≤500 ms 额外开销没有开关（4.2）；R2 的 EPERM 判定是字符串匹配、fail-open（4.3）。
 
 ### 4.2 R1 没有诊断开关，EPERM 风暴期有额外开销
 
@@ -175,21 +183,23 @@ R1 的 reprotect 每次都真的走一遍（壳层 200 ms box + 核心 250 ms �
 
 R2 仍用 `errno=1 (` 这个**字符串匹配**来认定 EPERM。平台若改措辞（或换错误包装），匹配会静默失效：判定不到 EPERM 就不触发快速失败，行为退回 0.0.57 的旧路径，且**没有任何日志或告警会提示这一点**。方向是 fail-open（不会误拒，只会失去本版收益），但意味着「本版有效」这件事在措辞变化后会悄悄不成立。
 
-### 4.4 未打 tag、未建发布分支
+### 4.4 发布标识：tag 与发布分支
 
-0.0.58 目前只有 `main` 上的两笔提交，**没有** tag，**没有** `rel/0.0.58` 分支。是否补、补在哪个提交上，待定。仓库现有 tag 只有 `v0.0.55`（0.0.56、0.0.57 也没有 tag），因此「tag 指向哪个提交」目前不能作为 0.0.58 的标识来源；可复算的标识是本文 1.2 的三个 SHA-256。
+- **annotated tag `v0.0.58`** 指向发布提交 `30055c7`（`chore(release): 0.0.58`），即两台设备上实际安装的那个提交；tag 只新增、不移动，发布后补的文档提交不打到 tag 上。
+- **发布分支 `rel/0.0.58`** 跟随 `main`（发布记录更新等补提交会跟到发布线），与 0.0.55 之后「发布线跟到 main」的处理方式一致。
+- 历史版本的情况：0.0.56、0.0.57 没有 tag；仓库现有 tag 为 `v0.0.55`、`v0.0.58`。因此跨版本对照时，0.0.56/0.0.57 的标识只能用提交号与产物 SHA-256。
 
 ### 4.5 其他
 
 - **debug 签名**：两份产物都是 debug profile 签名，只用于设备 QA；商店发布需要另走正式签名与渠道流程。
-- **设备功能未验收**：见 3.3、3.5；「构建绿 + 签名过」不等于「组网可用」。
+- **功能验收范围有限**：装机、启动、版本核对与 R0 / R1 / R2（双端）、R3（手机侧）的现场结论见 3.3、4.1；真实服务端端到端联调与回滚仍未覆盖（3.5、5.2）。
 - **回滚未实测**：见 5.2。
 
 ## 5. 升级与回滚
 
 ### 5.1 原地升级（`install -r`）
 
-设备恢复可达后，用 `install -r` 原地覆盖，保留配置与登录态：
+用 `install -r` 原地覆盖，保留配置与登录态（2026-10-27 双端已按这两条命令实测）：
 
 ```bash
 hdc -t <serial> install -r <签名 HAP>
@@ -198,8 +208,8 @@ hdc -t <serial> shell aa start -a EntryAbility -b cn.alfadb.netbird
 
 - PC 与手机必须用各自 profile 签出的包（见 1.3），**不能互换**。
 - 成功判据是输出的字面量 `install bundle successfully.`，不是 hdc 退出码。
-- 升级后可用 `bm dump -n cn.alfadb.netbird` 核对 `versionCode` / `versionName` 为 58 / 0.0.58，并确认 `firstInstallTime` 未变（说明是覆盖安装而非卸载重装）。这一判据来自 0.0.55、0.0.57 的实测行为；**0.0.58 本轮没有实测**，因为设备不可达。
-- 装机后请先按 4.1 的六项做现场核对，再进入功能验收。
+- 升级后用 `bm dump -n cn.alfadb.netbird` 核对 `versionCode` / `versionName` 为 58 / 0.0.58，并确认 `installTime` 未变（说明是覆盖安装而非卸载重装）。0.0.58 本轮双端均核对通过：`versionName=0.0.58`、`versionCode=58`，`installTime` 未变。
+- 4.1 记录了本版六项的现场结论；仍未覆盖的项见 3.5。
 
 ### 5.2 回滚
 
@@ -212,7 +222,7 @@ hdc -t <serial> shell aa start -a EntryAbility -b cn.alfadb.netbird
 
 - 系统对 versionCode 回退有限制，带 `-r` 的降级安装通常会被拒绝；实际回滚多半要先卸载再安装。
 - 卸载重装会清除应用内的配置、登录态与设备凭据，需要重新配置管理地址并重新登录。升级前如需保留退路，应先自行导出/记录配置。
-- 本轮**未实测**回滚（设备不可达），也没有验证「卸载重装后能否恢复既有配置」，所以 5.2 只能作为方向，不能当已验证步骤。
+- 本轮**未实测**回滚（设备已可达，但没有做降级 / 卸载重装试验），也没有验证「卸载重装后能否恢复既有配置」，所以 5.2 只能作为方向，不能当已验证步骤。
 
 ## 6. 与上一版（0.0.57）的差异
 
@@ -235,7 +245,7 @@ hdc -t <serial> shell aa start -a EntryAbility -b cn.alfadb.netbird
 
 | 文件 | 用途 |
 | --- | --- |
-| `BUILD-RECORD.md` | 本轮构建 / 签名 / 设备可达性阻塞的原始记录（安装、版本核实、进程三节为空，标注「待设备可达后补」） |
+| `BUILD-RECORD.md` | 本轮构建 / 签名 / 设备可达性阻塞的原始记录（安装、版本核实、进程三节仍为空、标注「待设备可达后补」；设备侧结果记在本文 3.3、4.1） |
 | `signed/netbird-0.0.58-pc-signed.hap` | PC 签名产物（7839375 B，`58857437…06933b`） |
 | `signed/netbird-0.0.58-phone-signed.hap` | 手机签名产物（7839376 B，`4b72100f…0b5cd566`） |
 | `signed/logs/sign-pc.log`、`sign-phone.log` | 两次 `signApp` |
@@ -244,6 +254,16 @@ hdc -t <serial> shell aa start -a EntryAbility -b cn.alfadb.netbird
 
 未签名 HAP 不在该目录：构建输出在 `client/entry/build/default/outputs/default/entry-default-unsigned.hap`，摘要见 1.2。构建日志在 `/tmp/build-0058.log`，为临时文件，未归档。
 
+真机日志（本机工作区产物，未入库；每个目录都含 `pc/` 与 `phone/` 两侧）：
+
+| 目录 | 内容 |
+| --- | --- |
+| `artifacts/logs-pull-20261027-v058/` | 2026-10-27 晚装机首轮：装机/启动前后的 `netbird-vpn.log`、`hilog-x.txt` |
+| `artifacts/logs-pull-20261027-v058-r3/` | 2026-10-27 晚 R3 离线窗口：`connector: network-available` 与 guard `network-offline` / `network-restored` 的全序列 |
+| `artifacts/logs-pull-20261028-morning/` | 2026-10-28 早灭屏过夜后复现 EPERM：`netbird-vpn.log` 及 `.1`–`.3` 轮转、`hilog-x.txt`、`netbird-ui.log*`、`ifconfig.txt`、`ps.txt`；根目录另有 `SHA256SUMS.txt` 校验清单 |
+
+3.3 / 4.1 里 R0 / R1 / R2 的数字出自 `logs-pull-20261028-morning/`，R3 的数字出自 `logs-pull-20261027-v058-r3/`，两者都是 `pc/` 与 `phone/` 两侧的 `netbird-vpn.log`。
+
 ### 未在本文中记录的内容
 
-以下内容本文没有写，因为没有可用证据，写进去就是编造：真机安装/启动结果、`bm dump` 版本与 `firstInstallTime` 核对、进程与功能验收、R1/R2/R3 的现场验证结论、真实服务器联调结果、回滚实测结果、tag / 发布分支结论。
+以下内容本文没有写，因为没有可用证据，写进去就是编造：真实官方服务端的端到端联调结果、回滚（降级 / 卸载重装）实测结果、DNS EPERM 的平台侧根因。真机安装、启动、`bm dump` 版本核对与 R0 / R1 / R2 / R3 的现场结论已在 3.3、4.1 中如实记录；tag 与发布分支的状态见 1.1、4.4。
