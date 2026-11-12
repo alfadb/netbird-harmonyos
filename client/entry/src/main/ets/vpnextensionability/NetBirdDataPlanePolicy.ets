@@ -34,6 +34,20 @@
 //     not read. The signal clause has no such escape because `signal` is a
 //     REQUIRED section of this core's status document.
 //
+// ESCALATION (0.0.59): a recovery that RUNS and does not heal must eventually
+// get a stronger action. The 2026-11-12 PC capture is exactly that shape: the
+// box said `connected` for up to 2 h 11 m with peers_online 0, the 0.0.54
+// watchdog logged 49 `vpn_dataplane_stale` runs and 93 `vpn_net_recovered`
+// completions (1050 `vpn_recovery_stage` records, every stage ok), and it was a
+// manual disconnect+connect — a FULL new start — that healed it every time.
+// The recovery leg only re-feeds sockets; it never restarts the core's
+// signal/management workers, so a signal worker that is broken ON THE CORE
+// SIDE stays broken. [`shouldRestartConnector`] is the escalation gate: the same
+// stale episode lasting DATA_PLANE_RESTART_AFTER_MS (5 min) AFTER at least one
+// watchdog recovery was actually attempted, outside
+// DATA_PLANE_RESTART_MIN_GAP_MS (10 min) of the previous restart. It stays a
+// pure decision; the caller owns the budget and the action.
+//
 // THRESHOLDS: stale must PERSIST for DATA_PLANE_STALE_AFTER_MS (30 s) — the
 // upstream signal watchdog's own 30 s silence floor
 // (shared/signal/client/grpc.go:29-41) — before any recovery, and
@@ -56,6 +70,12 @@ export const DATA_PLANE_STALE_AFTER_MS: number = 30000;
 export const DATA_PLANE_RECOVER_MIN_GAP_MS: number = 60000;
 /// A wall-clock watcher-tick gap above this is a suspend/wake edge.
 export const DATA_PLANE_RESUME_GAP_MS: number = 15000;
+/// The stale episode must have lasted this long (and at least one watchdog
+/// recovery must already have run) before it is escalated to a connector
+/// restart.
+export const DATA_PLANE_RESTART_AFTER_MS: number = 300000;
+/// Minimum spacing between two watchdog-initiated connector restarts.
+export const DATA_PLANE_RESTART_MIN_GAP_MS: number = 600000;
 
 /// The facts the extension's existing status poll already holds. All required:
 /// the caller has the status document, so there is no "unknown state" input —
@@ -75,6 +95,13 @@ export interface DataPlaneFacts {
   staleSinceMs: number;
   /// When this watchdog last started a recovery (0 = never).
   lastRecoveryMs: number;
+  /// A controlled recreate (N8) is in flight right now: it owns the create leg
+  /// and the platform connection, so a connector restart must not interleave
+  /// with it.
+  recreateInFlight: boolean;
+  /// When this watchdog last started an in-process connector restart
+  /// (0 = never in this process).
+  lastRestartMs: number;
   nowMs: number;
 }
 
@@ -127,6 +154,36 @@ export function shouldRecover(facts: DataPlaneFacts,
     return false;
   }
   if (facts.lastRecoveryMs > 0 && now - facts.lastRecoveryMs < recoverMinGapMs) {
+    return false;
+  }
+  return true;
+}
+
+/// Should the watchdog ESCALATE the still-stale data plane to an in-process
+/// connector restart? Only when ALL of these hold: the data plane is still
+/// stale; the stale episode has lasted at least `restartAfterMs` (the caller's
+/// facts carry the EPISODE start, not the recovery cadence clock); at least one
+/// watchdog recovery already ran (`lastRecoveryMs > 0` — escalation only after
+/// the cheaper action was tried and did not heal); `restartMinGapMs` has passed
+/// since the previous restart (0 = never restarted); and no recovery/recreate is
+/// in flight (both own sockets / the platform connection).
+export function shouldRestartConnector(facts: DataPlaneFacts,
+  restartAfterMs: number = DATA_PLANE_RESTART_AFTER_MS,
+  restartMinGapMs: number = DATA_PLANE_RESTART_MIN_GAP_MS): boolean {
+  if (!dataPlaneStale(facts) || facts.recoveryActive || facts.recreateInFlight) {
+    return false;
+  }
+  const now: number = facts.nowMs;
+  if (!Number.isFinite(now) || now <= 0) {
+    return false;
+  }
+  if (!(facts.staleSinceMs > 0) || !(now - facts.staleSinceMs >= restartAfterMs)) {
+    return false;
+  }
+  if (!(facts.lastRecoveryMs > 0)) {
+    return false;
+  }
+  if (facts.lastRestartMs > 0 && !(now - facts.lastRestartMs >= restartMinGapMs)) {
     return false;
   }
   return true;

@@ -543,6 +543,10 @@ try {
     // data plane gone (signal unregistered / no WG session) — the reason token
     // and how many seconds the stale run had lasted before the recovery started.
     ['vpn_dataplane_stale', ['reason', 'age']],
+    // 0.0.59 data-plane escalation: the stale episode outlived the recovery
+    // (reason = the stale token) or the per-episode restart budget is spent
+    // (reason = restart-budget); `age` is the episode age in seconds.
+    ['vpn_dataplane_restart', ['reason', 'age']],
     // R0 (design `analysis-20261026-dns-structural` §4.2, AC-R0-2): the protect
     // mark, PERSISTED. `detail` carries the verbatim VPN_PROTECT_MARK marker
     // token (this ROM keeps no I-level HiLog line, so the marker was 0 lines in
@@ -897,8 +901,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 24 reviewed names / 29 helper calls',
-    milestones.length === 24 && extText.split('this.diagMilestone(').length === 30);
+  check('the wired milestone surface is exactly the 25 reviewed names / 30 helper calls',
+    milestones.length === 25 && extText.split('this.diagMilestone(').length === 31);
   check('every mirrored lifecycle marker is really wired into the extension',
     mirroredMarkers.every((mk: string) =>
       extText.includes(`this.diagLifecycleMarker('${mk}'`)));

@@ -135,6 +135,9 @@ import { shouldPublishStatus, statusHeartbeatMaxAgeMs, statusPublishChangeKey }
 // watcher by run-network-recovery.mts.
 import { dataPlaneStaleReason, nextStaleSince, resumeGapDetected, shouldRecover }
   from './NetBirdDataPlanePolicy';
+// 0.0.59 escalation gate: the same stale episode, five minutes and one recovery
+// later, escalates from "re-feed sockets" to an in-process connector restart.
+import { shouldRestartConnector } from './NetBirdDataPlanePolicy';
 import type { DataPlaneFacts } from './NetBirdDataPlanePolicy';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
@@ -300,6 +303,12 @@ const PHYSICAL_RECOVERY_RETRY_MIN_MS: number = 15000;
 // box: a hang costs at most this window, then the EXISTING abort stage token is
 // reported and the retry takes over. No new abort token is introduced.
 const RECOVERY_STAGE_TIMEOUT_MS: number = 15000;
+// 0.0.59 data-plane escalation: at most this many in-process connector restarts
+// per stale EPISODE (the episode ends when the stale clock clears, or on a
+// suspend/wake edge). Past the budget the watchdog stops acting and leaves the
+// honest display to the page (「已连接（对端恢复中…）」); the user can still
+// reconnect manually. Bounded because every restart tears down a live connector.
+const DATA_PLANE_RESTART_BUDGET: number = 2;
 // N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
 // evidence collector. The file only carries NON-SENSITIVE window options; its
 // EXISTENCE is the arm request. No arm file ⇒ the collector stays inert.
@@ -1058,6 +1067,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private dataPlaneStaleSinceMs: number = 0;
   private lastDataPlaneRecoveryMs: number = 0;
   private lastWatcherTickMs: number = 0;
+  // 0.0.59 data-plane ESCALATION. `dataPlaneStaleSinceMs` above is the RECOVERY
+  // cadence clock — every completed watchdog recovery restarts it (see the tail
+  // of noteDataPlaneWatchdog), so it can never measure how long an episode has
+  // really been stale. This SECOND clock is the episode start: set at the first
+  // stale observation of a run, left alone by recoveries, cleared with the run
+  // (and on a suspend/wake edge, where the stale clock deliberately restarts).
+  // The 5 min escalation reads it (shouldRestartConnector); the 30 s recovery
+  // floor keeps reading the cadence clock.
+  private dataPlaneStaleEpisodeSinceMs: number = 0;
+  // When this watchdog last STARTED an in-process connector restart (0 = never
+  // in this process) — the 10 min min-gap between restarts.
+  private lastConnectorRestartMs: number = 0;
+  // In-process connector restarts started in the CURRENT stale episode: the
+  // budget is DATA_PLANE_RESTART_BUDGET per episode, reset where the stale run
+  // clears (and on the wake edge, which starts a new run).
+  private connectorRestartCount: number = 0;
+  // One `reason=restart-budget` milestone per episode, not one per 5 s tick.
+  private restartBudgetNoted: boolean = false;
+  // 0.0.59: the EXACT documents the create leg handed
+  // connector_start_with_socket — kept so the in-process connector restart
+  // re-runs the SAME start instead of rebuilding (and possibly diverging from)
+  // what this session was started with. See startConnectorThenCreate's start leg.
+  private connectorStartConfigJson: string = '';
+  private connectorStartSetupKeyJson: string = '';
   // N1(ii): de-duplicates the cheap "already flowing" attempt outcome so a
   // healthy tunnel does not print one line per tick.
   private lastRecoveryOutcome: string = '';
@@ -1959,7 +1992,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // vocabulary: no-connection | recreate-in-flight | network-lost |
   // no-management-endpoint | physical-dns | protected-dns | wg-socket-open |
   // wg-protect | wg-feed | management-address | dns-feed | ice-mux |
-  // signal-resolve | signal-socket-open | signal-feed | spare-socket.
+  // signal-resolve | signal-socket-open | signal-feed | spare-socket |
+  // connector-stop | connector-restart (the two 0.0.59 in-process restart legs).
   private recoveryAbort(stage: string, netId: number, epoch: number): void {
     // N1(i): a FAILED attempt re-arms the retry. `networkDirty` already stays
     // true across a failure, but the retry must not depend on that single latch
@@ -2131,6 +2165,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const now: number = Date.now();
     if (this.lastWatcherTickMs > 0 && resumeGapDetected(now - this.lastWatcherTickMs)) {
       this.dataPlaneStaleSinceMs = now;
+      // 0.0.59: the wake starts a NEW stale run. The escalation's episode clock
+      // and its per-episode budget reset with the restarted stale clock, so a
+      // suspend can neither carry an old episode across the freeze nor spend
+      // restarts that were made before it.
+      this.dataPlaneStaleEpisodeSinceMs = 0;
+      this.connectorRestartCount = 0;
+      this.restartBudgetNoted = false;
       // R3 (REPORT §6.4): the SAME wake edge is handed to the core as an
       // explicit resume observation. The core only records it (an event count
       // + `connector: host-resumed|gap_ms=`); the recovery decision stays with
@@ -2169,14 +2210,70 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       recoveryActive: this.networkRecoveryActive,
       staleSinceMs: this.dataPlaneStaleSinceMs,
       lastRecoveryMs: this.lastDataPlaneRecoveryMs,
+      // 0.0.59: both owned by the shell's own latches, not the status document.
+      recreateInFlight: this.recreateInFlight,
+      lastRestartMs: this.lastConnectorRestartMs,
       nowMs: now
     };
     const since: number = nextStaleSince(facts);
     this.dataPlaneStaleSinceMs = since;
     facts.staleSinceMs = since;
+    // 0.0.59 episode clock. A stale observation (re)starts the episode at the
+    // first stale sample; the recovery cadence clock above is RESTARTED by every
+    // attempt, so only this one can measure "how long has this been broken".
+    // A non-stale sample ends the episode and re-arms the per-episode budget.
+    if (since <= 0) {
+      this.dataPlaneStaleEpisodeSinceMs = 0;
+      this.connectorRestartCount = 0;
+      this.restartBudgetNoted = false;
+    } else if (this.dataPlaneStaleEpisodeSinceMs <= 0 ||
+      this.dataPlaneStaleEpisodeSinceMs > since) {
+      this.dataPlaneStaleEpisodeSinceMs = since;
+    }
     if (this.destroyRequested || !shouldRecover(facts)) {
       return;
     }
+    // 0.0.59 ESCALATION (2026-11-12 capture: 418 recovery stages / 0 recreates,
+    // stale for up to 2 h 11 m): once the SAME stale episode has outlived 5 min
+    // of repeated socket re-feeds, the cheaper recovery is not the action the
+    // evidence supports any more — restart the core connector in-process and
+    // re-run the create leg's start over a freshly protected management socket.
+    // The decision gets the EPISODE start (the cadence clock above is about to
+    // be reset again by the recovery below). The budget is per episode; once it
+    // is spent one `reason=restart-budget` record is written and the existing
+    // recovery keeps running (the page shows 「已连接（对端恢复中…）」).
+    const staleReason: string = dataPlaneStaleReason(facts);
+    facts.staleSinceMs = this.dataPlaneStaleEpisodeSinceMs;
+    if (shouldRestartConnector(facts)) {
+      const ageSeconds: number = Math.floor((now - this.dataPlaneStaleEpisodeSinceMs) / 1000);
+      const budgetLeft: boolean = this.connectorRestartCount < DATA_PLANE_RESTART_BUDGET;
+      if (!budgetLeft && this.restartBudgetNoted) {
+        // this episode's exhaustion was already reported — fall through to the
+        // ordinary recovery; nothing else to do here.
+      } else {
+        const restartFields: DiagFields = {
+          'reason': budgetLeft ? staleReason : 'restart-budget', 'age': ageSeconds
+        };
+        this.diagMilestone('vpn_dataplane_restart', restartFields);
+        if (!budgetLeft) {
+          this.restartBudgetNoted = true;
+        } else {
+          this.lastConnectorRestartMs = now;
+          this.connectorRestartCount++;
+          this.networkDirty = true;
+          this.restartConnectorForDataPlane().catch((error: Error): void => {
+            this.n2NetworkRecoveryFail(error);
+          });
+          // The restart OWNS this tick: its own recovery leg re-feeds the
+          // sockets after the connector is back. The cadence clock restarts so
+          // the watchdog does not add a second recovery on the next tick.
+          this.lastDataPlaneRecoveryMs = now;
+          this.dataPlaneStaleSinceMs = this.lastDataPlaneRecoveryMs;
+          return;
+        }
+      }
+    }
+    facts.staleSinceMs = since;
     // The data-plane facts ARE the reason the recovery is owed. Arming the
     // recovery's own bookkeeping keeps the already-flowing shortcut in
     // recoverPhysicalNetwork from swallowing this call (it would otherwise see
@@ -2417,6 +2514,120 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         });
       }
     }
+  }
+
+  // 0.0.59 data-plane escalation: restart the CORE connector in-process, then
+  // let the EXISTING recovery re-feed the socket set. This is the action the
+  // 2026-11-12 capture supports: every "connected but no data plane" run there
+  // survived 49 socket re-feeds / 93 completed recoveries (1050 stage records,
+  // every stage ok) and healed only on a FULL new start (manual
+  // disconnect+connect). The recovery leg never restarts the core's
+  // signal/management workers, and the controlled recreate (N8) keeps them on
+  // purpose. The VPN connection / TUN object is NOT recreated and the extension
+  // is NOT destroyed (a marker=stopping teardown is what leaves the page unable
+  // to auto-reconnect).
+  //
+  // Contract with the two neighbouring mechanisms:
+  //   * never touches `recreateInFlight` — the guard refuses to interleave with
+  //     one, and nothing here is a recreate;
+  //   * never ACKs a route set (the fresh connector has no applied set, which is
+  //     the core's "shell never ACKed" silence) and never consumes the N8
+  //     budget;
+  //   * never destroys: a failed leg leaves the connector stopped with
+  //     `networkDirty` set, and the existing recovery retry / the user's
+  //     reconnect take it from there.
+  private async restartConnectorForDataPlane(): Promise<void> {
+    if (this.destroyRequested || this.connection === undefined || this.recreateInFlight ||
+      this.networkRecoveryActive) {
+      this.noteRecoverySkip(this.destroyRequested ? 'restart-destroy' :
+        this.connection === undefined ? 'restart-no-connection' :
+          this.recreateInFlight ? 'restart-recreate' : 'restart-active');
+      return;
+    }
+    if (this.managementEndpoint === undefined || this.tunFd < 0 ||
+      this.connectorStartConfigJson.length === 0) {
+      // The create leg owns all three; a session that reached `connected` has
+      // them. Refusing BEFORE the stop keeps a live connector live.
+      this.noteRecoverySkip('restart-not-started');
+      return;
+    }
+    const vpn: vpnExtension.VpnConnection = this.connection;
+    const endpoint: ManagementEndpoint = this.managementEndpoint;
+    const netId: number = this.networkNetId;
+    const epoch: number = this.networkEpoch;
+    // 1. idempotent core stop. The shell's VPN connection and TUN fd outlive it
+    // (only the core session is torn down); every stop path avoids a management
+    // Logout, so this never deregisters the peer.
+    const stopped: boolean = await this.recoveryAwait('connector-stop', false,
+      Promise.resolve(connectorStop().ok === true));
+    if (!stopped) {
+      this.recoveryAbort('connector-stop', netId, epoch);
+      return;
+    }
+    this.recoveryStageRecord('connector-stop', 'ok');
+    if (this.destroyRequested || this.recreateInFlight) { return; }
+    // 2. the create leg's management address: resolve, fall back to the address
+    // this process last installed (0.0.50 C), abort when neither exists.
+    let managementIp: string = await this.recoveryAwait('mgmt-dns', '',
+      resolveProtectedIp(endpoint.host));
+    if (managementIp.length === 0) {
+      managementIp = this.managementLastKnownIp();
+      if (managementIp.length === 0) {
+        this.recoveryAbort('protected-dns', netId, epoch);
+        return;
+      }
+      this.recoveryStageRecord('mgmt-dns', 'last-known-good');
+    } else {
+      this.recoveryStageRecord('mgmt-dns', 'ok');
+    }
+    const addr: string = `${managementIp}:${endpoint.port}`;
+    if (this.destroyRequested || this.recreateInFlight || this.connection !== vpn ||
+      epoch !== this.networkEpoch) { return; }
+    // 3. open + protect the management socket BEFORE the start (production leg
+    // contract, N3-7): the core only accepts connector_start_with_socket.
+    const sock: NativeTcpSocketOpen = mgmtSocketOpen();
+    if (sock.fd < 0 || sock.bind_rc !== 0) {
+      if (sock.fd >= 0) { socketSupplyCloseFd(sock.fd); }
+      this.recoveryAbort('connector-restart', netId, epoch);
+      return;
+    }
+    let start: ConnectorStartResult | undefined = undefined;
+    try {
+      if (!await this.recoveryAwait('connector-restart', false,
+        this.protectSocketWithBox(vpn, sock.fd, 'M'))) {
+        this.recoveryAbort('connector-restart', netId, epoch);
+        return;
+      }
+      if (this.destroyRequested || this.recreateInFlight || this.connection !== vpn ||
+        epoch !== this.networkEpoch) { return; }
+      start = connectorStartWithSocket(sock.fd, this.connectorStartConfigJson,
+        this.connectorStartSetupKeyJson, addr, physicalDefaultDnsServers());
+    } finally {
+      // fd contract: the core dup-consumes; the shell's number is closed here.
+      socketSupplyCloseFd(sock.fd);
+    }
+    if (start === undefined || start.started !== true) {
+      this.recoveryStageRecord('connector-restart', 'fail');
+      this.recoveryAbort('connector-restart', netId, epoch);
+      return;
+    }
+    // 4. the fresh connector owns an EMPTY N7 device: re-attach the platform TUN
+    // fd (unchanged, shell-owned) BEFORE the recovery opens/feeds the WG outer
+    // socket — the core reports device_up only when BOTH halves are present
+    // (client/core/src/connector.rs:8156-8180), exactly like the create leg's
+    // feedWgDataplane (wg socket, then TUN).
+    const tun: WgFeedResult = connectorTunFdFeed(this.tunFd);
+    if (!tun.ok) {
+      this.recoveryStageRecord('connector-restart', 'fail');
+      this.recoveryAbort('connector-restart', netId, epoch);
+      return;
+    }
+    this.recoveryStageRecord('connector-restart', 'ok');
+    // 5. the EXISTING recovery supplies the rest of the create leg's sockets:
+    // management address, physical DNS, WG outer socket, ICE mux, signal feed
+    // and the spare protected socket. It clears `networkDirty` when the whole
+    // leg completes.
+    await this.recoverPhysicalNetwork();
   }
 
   // N3-6/N3-7 start flow. Abort paths leave the VPN un-created and report a
@@ -2705,11 +2916,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // 'unknown'), injected into the SAME config document the page builds.
     device.netbird_version = appVersionName();
     device.os_version = osVersionName();
+    // 0.0.59: the ONE config + credential document pair this start hands the
+    // core. Kept verbatim on the instance: the in-process connector restart
+    // (restartConnectorForDataPlane) must re-run THIS start — the per-server
+    // route selection is fixed at start (loadRouteSelection above runs once)
+    // and the account-mode credential is literally `{}` — so re-reading the
+    // files there could only make the restarted connector diverge from the
+    // session it belongs to.
+    const configJson: string = buildConnectorConfigJson(device, forceDefaultRoute, routeSelection);
+    const setupKeyJson: string = JSON.stringify(creds);
+    this.connectorStartConfigJson = configJson;
+    this.connectorStartSetupKeyJson = setupKeyJson;
     let start: ConnectorStartResult;
     try {
-      start = connectorStartWithSocket(mgmtFd,
-        buildConnectorConfigJson(device, forceDefaultRoute, routeSelection),
-        JSON.stringify(creds), connectAddr, physicalDefaultDnsServers());
+      start = connectorStartWithSocket(mgmtFd, configJson, setupKeyJson, connectAddr,
+        physicalDefaultDnsServers());
     } finally {
       socketSupplyCloseFd(mgmtFd);
     }

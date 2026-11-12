@@ -31,6 +31,7 @@ import { currentPublishedStatus, shouldReapplyPublishedStatus, statusDocumentSta
 import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
   RECONNECT_ACTION_LIMIT, RECONNECT_ACTION_RECONNECT, RECONNECT_ACTION_VERIFY_FAILED,
   RECONNECT_MARKER_OPEN, RECONNECT_MAX_ATTEMPTS, RECONNECT_REASON_MARKER_OPEN,
+  RECONNECT_REASON_STALE_MISMATCH, RECONNECT_REASON_STALE_UNCONFIRMED,
   RECONNECT_RESULT_FAILED, RECONNECT_RESULT_LIMIT, RECONNECT_RESULT_RECONNECTED,
   RECONNECT_RESULT_REQUESTED, RECONNECT_RESULT_SKIPPED,
   RECONNECT_TRIGGER_BACKGROUND, RECONNECT_TRIGGER_FOREGROUND,
@@ -262,6 +263,11 @@ const STATUS_POLL_MS: number = 1000;
 // MainActivity.java:1030-1036) exactly ONCE per verdict; the persistent channels
 // stay the card's official state and the red error line.
 const FAILURE_TOAST_MS: number = 4000;
+// 0.0.59 (A2, 日志坑修复): 同一个自动重连 reason 的记录节流窗口。0.0.15 起是「每个进程
+// 一条」，于是 0.0.58 真机上 19:28 那次 kill-record-absent 之后同一进程里的第二次、第三次
+// 同类故障在日志里是**空白**的。现在改成「同一 reason 至少隔 600 s 才再记一条」：仍不会让
+// 2 s 轮询刷屏，但同一故障的重复 episode 不再被吞掉。
+const AUTO_RECONNECT_REPORT_INTERVAL_MS: number = 600000;
 // Explicit logout channel (stop-time Logout defect, 2026-10-01): the UI
 // process has NO connector (it lives in the VPN extension process), so the
 // management Logout goes through the extension's one-shot ticket file and
@@ -1896,9 +1902,18 @@ struct Index {
   // 平台回调 / onForeground 送来的恢复信号先落在这里，由紧接着的那一刻的那一拍记录成
   // `ui_resume_check`（空串 = 这一拍不是被恢复信号叫醒的）。
   private pendingResumeReason: string = '';
-  // ONE `ui_auto_reconnect` record per SKIP REASON per process: the 2 s tick
-  // would otherwise repeat the same "not this time" line forever.
-  private reconnectReported: Set<string> = new Set<string>();
+  // ONE `ui_auto_reconnect` record per REASON per AUTO_RECONNECT_REPORT_INTERVAL_MS:
+  // the 2 s tick would otherwise repeat the same standing condition forever, while
+  // a plain "once per process" latch (0.0.15-0.0.58) silently swallowed every
+  // later episode of the SAME reason — exactly the 0.0.58 device report's shape.
+  private reconnectReportedAt: Map<string, number> = new Map<string, number>();
+  // 0.0.59（B1）: 最近一次看到活状态文档的时刻（0 = 本进程还没见过）。文档消失之后，
+  // 它是 B1「到底多久没有活文档了」唯一还能用的时钟；每见到一份活文档就刷新成这一拍的
+  // nowMs（同一份文档的重复拍也算：活文档就是活文档）。
+  private lastLiveDocAtMs: number = 0;
+  // 0.0.59（A2）: 本次「状态文档丢失」episode 是否已经记过一条 ui_status_lost。
+  // 活文档回来即复位，所以同一个 episode 只留一条记录，跨 episode 不会互相吞。
+  private statusLostReported: boolean = false;
   // at_ms of the connect-failure notice that matches the current attempt (read
   // together with the rendered class in refreshConnectFailure). 0 = none. The
   // auto-reconnect never starts over a verdict NEWER than the extension marker.
@@ -2275,6 +2290,19 @@ struct Index {
       // document (stale beyond the two-publish-tick gate, or the extension was
       // proven dead) — one record per episode, never one per 1 s tick.
       this.diagStatusReadNoDocument(nowMs);
+      // 0.0.59（A2）: 「活文档没了」这条路径此前只有 kill-record-absent 一个 skip 的
+      // 一次性记录，同一进程里第二次、第三次同类故障就是日志空白。这里补一条
+      // `ui_status_lost`：一个丢失 episode 一条，带「距最后一份活文档多久」与 derived=false
+      // （和 ui_status_read 的读侧记录同一组公开键，见 diagStatusRead）；活文档回来才复位。
+      // 0.0.59（B1）: 同一个 docStaleMs 也是「无 APP_KILLED 时把长期不更新的扩展按已死
+      // 处理」的唯一输入，所以只在没有活文档的这一拍算一次。
+      const docStaleMs: number = this.lastLiveDocAtMs > 0 ? nowMs - this.lastLiveDocAtMs : 0;
+      if (this.observedPublishedStatus && vpnActiveState(this.lastLiveState) &&
+        !this.statusLostReported) {
+        this.statusLostReported = true;
+        const lostFields: DiagFields = { 'age_ms': docStaleMs, 'derived': false };
+        event('ui_status_lost', lostFields);
+      }
       if (this.observedPublishedStatus) {
         // the document disappeared = the extension is gone (stopped or
         // destroyed): release the request latches for an explicit retry
@@ -2316,11 +2344,18 @@ struct Index {
       // suspends the background extension for up to ~94 s with no status write and
       // no log line, and the document expires to null after ~10 s of that. The
       // decision, including the "the process really is gone" proof (criterion ⑦),
-      // is the pure policy's.
-      this.runAutoReconnect(requestInFlight);
+      // is the pure policy's. 0.0.59: the same call also carries how long no live
+      // document has been seen — the ONLY death evidence left when no APP_KILLED
+      // arrives at all (B1).
+      this.runAutoReconnect(requestInFlight, docStaleMs);
       return;
     }
     this.observedPublishedStatus = true;
+    // 0.0.59（B1）: 一份活文档就是「扩展刚刚还在」的证据——记下这一拍的时刻，文档消失
+    // 之后 B1 用它算「多久没有活文档」；同时结束上一个丢失 episode（A2 的 ui_status_lost
+    // 每个 episode 只记一条）。
+    this.lastLiveDocAtMs = nowMs;
+    this.statusLostReported = false;
     // Verification has its own clock and must run even for an unchanged document.
     // A fresh report from the reclaimed writer cannot settle the new attempt.
     if (vpnActiveState(live.state) &&
@@ -2335,7 +2370,9 @@ struct Index {
       }
     } else if (this.reconnectState.verifyingSinceMs > 0) {
       // Keep the 30 s failure verdict reachable for old or non-active reports.
-      this.runAutoReconnect(requestInFlight);
+      // 0.0.59: a LIVE document exists on this tick, so the stale-document clock
+      // is 0 here — only gate (1) is being settled, B1 has nothing to say.
+      this.runAutoReconnect(requestInFlight, 0);
     }
     // 0.0.34 peer-status lag fix (device report §5 F3): the document's own
     // identity — its write stamp plus the core's edge revision. Nothing below
@@ -2511,7 +2548,7 @@ struct Index {
   // reads the facts, acts, and records ONE safe event.
   // ---------------------------------------------------------------------------
 
-  private runAutoReconnect(requestInFlight: boolean): void {
+  private runAutoReconnect(requestInFlight: boolean, docStaleMs: number): void {
     const markerPath: string = recordPath(getContext(this).filesDir, MARKER_BASENAME_VPN);
     let markerState: string = '';
     let markerAtMs: number = 0;
@@ -2561,7 +2598,10 @@ struct Index {
       lastLogoutAtMs: this.lastLogoutAtMs,
       configured: this.configured,
       connectFailureAtMs: this.connectFailureAtMs,
-      killedVpnPid: killedVpn === null ? null : killedVpn.pid
+      killedVpnPid: killedVpn === null ? null : killedVpn.pid,
+      // 0.0.59（B1）: 本拍距最后一份活文档多久（0 = 本进程从未见过活文档）。它只在
+      // 「本进程没有 APP_KILLED」时被策略使用：>= 180 s 即视为扩展已死、直接启动。
+      docStaleMs: docStaleMs
     };
     const decision: ReconnectDecision = decideReconnect(this.reconnectState, facts);
     this.reconnectState = decision.state;
@@ -2580,7 +2620,18 @@ struct Index {
       // flag is what makes a REFUSED start a named auto-reconnect failure (the
       // platform's error code goes into the diagnostic and the attempt stops
       // waiting for its 30 s verification window).
-      this.requestStart(true);
+      // 0.0.59（B1）: without a kill record naming the marker's writer the process
+      // is only "presumed dead" from the stale document, so these reasons start the
+      // extension WITHOUT the stop-first leg (forceDirectStart) — tearing down a
+      // possibly live extension is the bigger mistake here. Both stale reasons share
+      // ONE attempt budget in the policy, so they share this ONE dispatch too; every
+      // other decision keeps the old confirmed-death path unchanged.
+      if (decision.reason === RECONNECT_REASON_STALE_UNCONFIRMED ||
+        decision.reason === RECONNECT_REASON_STALE_MISMATCH) {
+        this.requestStart(true, true);
+      } else {
+        this.requestStart(true);
+      }
       // requestStart() clears the notice (a fresh attempt starts from a clean
       // slate); this is the ONE case where the user must SEE that the retry is
       // already under way instead of being asked for it. 0.0.20: in the background
@@ -2625,13 +2676,19 @@ struct Index {
   }
 
   // A SKIP is a standing condition, not an event: on the 2 s tick it would be
-  // repeated forever, so each reason writes at most one record per process.
+  // repeated forever. 0.0.59 (A2): the latch is a TIME window per reason, not
+  // "once per process" — the same reason may recur legitimately (a second death
+  // of the same kind), and the 0.0.58 report showed that the process-wide latch
+  // made those later episodes invisible. One record per reason per
+  // AUTO_RECONNECT_REPORT_INTERVAL_MS (10 min) still keeps the log bounded.
   private diagAutoReconnectOnce(trigger: string, result: string, reason: string,
     count: number): void {
-    if (this.reconnectReported.has(reason)) {
+    const nowMs: number = Date.now();
+    const lastAtMs: number = this.reconnectReportedAt.get(reason) ?? 0;
+    if (lastAtMs > 0 && nowMs - lastAtMs < AUTO_RECONNECT_REPORT_INTERVAL_MS) {
       return;
     }
-    this.reconnectReported.add(reason);
+    this.reconnectReportedAt.set(reason, nowMs);
     this.diagAutoReconnect(trigger, result, reason, count);
   }
 
@@ -3479,9 +3536,21 @@ struct Index {
       this.published.address.length > 0;
     const ifacePresent: boolean = this.published === null ||
       this.published.iface_present !== false;
-    return homeStateText(state,
+    const text: string = homeStateText(state,
       this.pendingActionTarget === PENDING_TARGET_CONNECTED, this.stopSent,
       hasOverlayIp, ifacePresent, this.loginRequired());
+    // 0.0.59 (PC 2026-11-12 capture): the core can hold `connected` for hours
+    // while every peer is offline (signal never re-registered; the watchdog's
+    // 5 min escalation may also be spent). The page must not claim a working
+    // tunnel then: keep the official 已连接 label but mark the PEER side as
+    // recovering. Only a KNOWN non-empty peer list can say this — absent or []
+    // peers is "unknown", never a guess, and there is deliberately no debounce.
+    const peers: UiPeerEntry[] | undefined = this.published !== null ? this.published.peers : undefined;
+    if (text === '已连接' && peers !== undefined && peers !== null && peers.length > 0 &&
+      peers.every((p: UiPeerEntry): boolean => !p.online)) {
+      return '已连接（对端恢复中…）';
+    }
+    return text;
   }
 
   // upstream's sticky `loginRequired` flag (HomeFragment.java:114, :873-883):
@@ -4523,7 +4592,14 @@ struct Index {
   // its visible error text and its ui_connect record). Everything else about this
   // path is unchanged, and the extension-start call site below is still the ONLY
   // one in this file.
-  private requestStart(fromAutoReconnect: boolean = false): void {
+  // `forceDirectStart`: 0.0.59 — the caller could NOT prove the extension is dead
+  // (no APP_KILLED; only a stale status document), so it must NOT run the
+  // stop-first leg: that leg exists to tear down a possibly live instance, while
+  // here the start itself is the least destructive way to find out. The start is
+  // dispatched exactly like any other and a platform refusal is handled by the
+  // same catch (which already folds it into the reconnect policy).
+  private requestStart(fromAutoReconnect: boolean = false,
+    forceDirectStart: boolean = false): void {
     if (this.requestSent) {
       // Request already sent this attempt: no repeat click, no re-issue.
       return;
@@ -4564,6 +4640,15 @@ struct Index {
     this.noticeSuperseded = false;
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
+    // 0.0.59（B1）: 无 APP_KILLED 的 stale-unconfirmed 路径直接启动。跳过下面的
+    // stop-first 分支是这条路径的定义：那个扩展可能只是被挂起、也可能已经死了，停一条
+    // 还在跑的隧道比一次可能被平台拒绝的 start 代价大得多；成败由既有 30 s 验证窗判定。
+    if (forceDirectStart) {
+      hilog.info(DOMAIN, TAG, 'UI_START_DIRECT|reason=stale-unconfirmed|requestId=%{public}s',
+        this.requestId);
+      this.startVpnExtension(fromAutoReconnect);
+      return;
+    }
     // 2026-10-11 retry re-entry (fix/retry): a repeated startVpnExtensionAbility
     // against a LIVE extension instance is NOT a re-entry — the platform hands
     // `want.parameters` over "when the VPN is started for the FIRST time"

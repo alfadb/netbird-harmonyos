@@ -642,8 +642,10 @@ try {
     '// Packaged public CA roots');
   const publishCode = slice('private publishRouteCatalogForUi(): void {',
     'private async protectSocketWithBox(');
-  check('P1 exactly ONE connector start call site exists',
-    extSource.split('connectorStartWithSocket(').length === 2);
+  check('P1 exactly TWO connector start call sites exist (create leg + 0.0.59 connector restart)',
+    extSource.split('connectorStartWithSocket(').length === 3 &&
+    extSource.includes('connectorStartWithSocket(mgmtFd, configJson, setupKeyJson, connectAddr,') &&
+    extSource.includes('connectorStartWithSocket(sock.fd, this.connectorStartConfigJson,'));
   check('P2 the start call passes the ACTUAL selection object (never JSON.stringify)',
     extSource.includes('buildConnectorConfigJson(device, forceDefaultRoute, routeSelection)') &&
     !extSource.includes('JSON.stringify(routeSelection)'));

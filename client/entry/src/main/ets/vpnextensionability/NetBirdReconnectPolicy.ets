@@ -77,6 +77,40 @@
 // attempt stays counted and the 60 s interval still gates the next one. The
 // caller records result=failed with the platform's own code (or 'none').
 //
+// 0.0.59 (B1, NO KILL RECORD AT ALL). The 2026-11-04 device report (0.0.58,
+// 19:28 `InvalidKillId` batch reclaim) showed the one death the UI process cannot
+// confirm: the whole batch died while the UI received NO APP_KILLED for the
+// `:vpn` process, so criterion (7) answered kill-record-absent forever and
+// nothing recovered until the app was opened again (~4 h later; the borrowed
+// keep-alive task had been suspended in the same window). The status document is
+// then the only clock left. When it has not been live for
+// RECONNECT_STALE_CONFIRM_MS (180 000 ms — comfortably past the ~94 s suspension
+// upper bound measured on device), the extension is treated as DEAD and started
+// DIRECTLY, without the stop-first leg: that leg exists to tear down a possibly
+// live instance, and this path exists precisely because we cannot prove it is
+// alive — a start the platform refuses costs far less than a stop of a live
+// tunnel. The attempt is counted and verified by the SAME 30 s window, 60 s
+// interval and 3-attempt budget as the confirmed-death path. Every other gate —
+// clean/stopping/missing marker, the user guards, a newer connect-failure
+// verdict — still runs FIRST, so a tunnel the user ended is never resurrected
+// this way, and `stale-unconfirmed` is its own reason token: the log must tell
+// the two deaths apart.
+//
+// 0.0.59 (B1, KILL RECORD THAT DOES NOT MATCH). The 2026-11-12 device report
+// (0.0.58) still showed `ui_status_lost age_ms>=180000` up to 598.5 s while
+// `stale-unconfirmed` was never taken: the UI process DID hold an APP_KILLED for
+// a `:vpn` process, just not for the pid that wrote the marker, so criterion (7)
+// answered vpn-pid-mismatch forever (marker-pid-invalid when the marker carried
+// no usable pid). A kill record naming ANOTHER writer is one doubt more than no
+// record at all — the marker's process might still be alive — so the same
+// stale-document verdict needs a LONGER silence: RECONNECT_STALE_MISMATCH_MS
+// (300 000 ms) instead of 180 000 ms, still far past the measured ~94 s
+// suspension upper bound. Past it the extension is treated as dead and started
+// DIRECTLY, exactly like stale-unconfirmed, and with the SAME one attempt budget
+// (3 attempts / 60 s interval / 30 s verification); `stale-mismatch` is its own
+// reason token so the log can tell "the evidence does not reconcile" apart from
+// "there was no evidence at all".
+//
 // REASONS (the closed set a decision can carry; the page writes the token into
 // one safe diagnostic record and never re-invents it):
 //   marker-open         the action was taken, this attempt is attempt N
@@ -96,10 +130,23 @@
 //   cooldown            < RECONNECT_MIN_INTERVAL_MS since the last attempt
 //   attempt-limit       RECONNECT_MAX_ATTEMPTS reached in this process
 //   no-active-in-30s    the previous attempt is a failure (verification window)
-//   kill-record-absent  no VPN APP_KILLED record in this UI process
-//   marker-pid-invalid the marker cannot identify a usable writer pid
-//   vpn-pid-mismatch   the recorded death names another VPN writer
-// These all mean unknown death: never start over a possibly live extension.
+//   kill-record-absent  no VPN APP_KILLED record in this UI process AND no live
+//                       document long enough to prove the death (see
+//                       stale-unconfirmed for what that length buys)
+//   stale-unconfirmed   (0.0.59) no APP_KILLED at all, but no live document for
+//                       RECONNECT_STALE_CONFIRM_MS: the extension is treated as
+//                       dead and started DIRECTLY, never stop-first. Result=
+//                       requested, counted and verified like any other attempt.
+//   stale-mismatch      (0.0.59) a kill record EXISTS but does not name the marker
+//                       writer (or the marker carries no usable pid), and no live
+//                       document for RECONNECT_STALE_MISMATCH_MS: same DIRECT
+//                       start and the SAME attempt budget as stale-unconfirmed.
+//   marker-pid-invalid the marker cannot identify a usable writer pid (the
+//                       conservative verdict until the document is stale enough)
+//   vpn-pid-mismatch   the recorded death names another VPN writer (likewise)
+// A pid we cannot tie to the marker is unknown death: never start over a possibly
+// live extension — unless the document itself has been dead long enough to say
+// that no live extension is left to start over (the stale-mismatch branch).
 
 export const RECONNECT_MIN_INTERVAL_MS: number = 60000;
 export const RECONNECT_MAX_ATTEMPTS: number = 3;
@@ -111,6 +158,18 @@ export const RECONNECT_VERIFY_MS: number = 30000;
 export const RECONNECT_ACTIVE_RESET_MS: number = 300000;
 export const RECONNECT_USER_STOP_GUARD_MS: number = 8000;
 export const RECONNECT_LOGOUT_GUARD_MS: number = 25000;
+// 0.0.59: how long the status document must have been NOT live before "no
+// APP_KILLED record" stops meaning "cannot tell" and starts meaning "the process
+// is gone". The device measured suspensions of up to ~94 s, so 180 s leaves wide
+// margin: a frozen extension is never mistaken for a dead one, and anything
+// older than that is not a pause — the extension publishes every 5 s.
+export const RECONNECT_STALE_CONFIRM_MS: number = 180000;
+// 0.0.59 (B1, MISMATCH): the same stale-document verdict, but with a kill record
+// we could NOT reconcile (it names another `:vpn` writer, or the marker carries no
+// usable pid). That is one more doubt than "no record at all", so the document has
+// to stay dead twice as long. 300 s is still far past the measured ~94 s
+// suspension upper bound plus the reconnect watchdog's margin.
+export const RECONNECT_STALE_MISMATCH_MS: number = 300000;
 
 // The extension marker's state tokens (NetBirdDiagnosticsCore MARKER_STATE_*).
 // Copied as literals on purpose: this module is imported byte-identically into a
@@ -166,6 +225,17 @@ export const RECONNECT_REASON_VERIFY_TIMEOUT: string = 'no-active-in-30s';
 export const RECONNECT_REASON_KILL_RECORD_ABSENT: string = 'kill-record-absent';
 export const RECONNECT_REASON_MARKER_PID_INVALID: string = 'marker-pid-invalid';
 export const RECONNECT_REASON_VPN_PID_MISMATCH: string = 'vpn-pid-mismatch';
+// 0.0.59: the reconnect was decided from the stale-document evidence ALONE (no
+// APP_KILLED record exists in this UI process). Its own token because the page
+// starts this one DIRECTLY (no stop-first leg) and the log has to be able to tell
+// the two deaths apart.
+export const RECONNECT_REASON_STALE_UNCONFIRMED: string = 'stale-unconfirmed';
+// 0.0.59 (B1, MISMATCH): the stale document decided it while a kill record does
+// NOT name the marker writer (mismatch, or no usable marker pid). The action is
+// stale-unconfirmed's exactly — started DIRECTLY, counted and verified by the SAME
+// budget — but the token is its own: the log must tell "the evidence does not
+// reconcile" apart from "there was no evidence at all".
+export const RECONNECT_REASON_STALE_MISMATCH: string = 'stale-mismatch';
 
 // The anti-loop counters of ONE UI process.
 export interface ReconnectPolicyState {
@@ -213,6 +283,12 @@ export interface ReconnectInput {
   // event arrived in this process. Passed in as a plain fact: this module never
   // talks to the platform.
   killedVpnPid: number | null;
+  // 0.0.59: how long ago the last LIVE status document was seen; 0 = no such
+  // evidence in this process (a live document was never observed here). The stale
+  // branches use it to treat a long-unupdated extension as dead — the branch with
+  // NO APP_KILLED at all, and the one whose kill record cannot be tied to the
+  // marker's writer (the longer threshold).
+  docStaleMs: number;
 }
 
 export interface ReconnectDecision {
@@ -338,6 +414,22 @@ function isRecent(nowMs: number, stampMs: number, guardMs: number): boolean {
   return stampMs > 0 && nowMs - stampMs <= guardMs;
 }
 
+// 0.0.59 (B1): the ONE action both stale branches take — "no APP_KILLED at all"
+// and "a kill record that does not name the marker writer" are the same verdict
+// once the status document has been dead long enough. The page starts the
+// extension DIRECTLY: the stop-first leg exists to tear down a possibly LIVE
+// instance, and the whole point of these branches is that we could NOT prove it is
+// alive. The attempt is counted NOW and verified by the SAME one
+// RECONNECT_VERIFY_MS window, RECONNECT_MIN_INTERVAL_MS interval and
+// RECONNECT_MAX_ATTEMPTS budget as the confirmed-death path — the two stale reasons
+// share one anti-loop budget, never a second counter.
+function reconnectStale(reason: string, trigger: string, input: ReconnectInput,
+  state: ReconnectPolicyState): ReconnectDecision {
+  const attempt: number = state.attempts + 1;
+  return reconnectDecision(RECONNECT_ACTION_RECONNECT, reason, trigger, attempt,
+    reconnectState(attempt, input.nowMs, input.nowMs, 0, input.nowMs));
+}
+
 export function decideReconnect(state: ReconnectPolicyState,
   input: ReconnectInput): ReconnectDecision {
   // Where the tick that answered ran. A page that is not visible can only get
@@ -419,13 +511,43 @@ export function decideReconnect(state: ReconnectPolicyState,
   //     start on top of a possibly live process is never guessed. This is also
   //     what makes the 0.0.20 backgrounds trigger and the relaxed criterion (2)
   //     safe: the caller may ask earlier, the answer is still "go" only here.
+  //     0.0.59: the ONE second way to reach "dead" is the stale document itself
+  //     (see the branches below) — it never weakens the kill-record path, it only
+  //     answers the cases where that record will never arrive or cannot be tied to
+  //     the marker's writer.
   if (input.killedVpnPid === null) {
-    return skipped(RECONNECT_REASON_KILL_RECORD_ABSENT, trigger, state);
+    // 0.0.59 (B1): no APP_KILLED for the `:vpn` process at all. That alone only
+    // says "cannot confirm". If the status document has ALSO been dead for
+    // RECONNECT_STALE_CONFIRM_MS, it is no longer a suspension (the device's
+    // measured upper bound is ~94 s) but a process that will never publish again
+    // — the 2026-11-04 batch reclaim left exactly this shape behind. Start it
+    // DIRECTLY: no stop-first leg, because that leg is for a possibly LIVE
+    // instance and here the whole point is that we cannot prove it is alive.
+    // The attempt is counted now and verified by the same window as any other.
+    if (input.docStaleMs < RECONNECT_STALE_CONFIRM_MS) {
+      return skipped(RECONNECT_REASON_KILL_RECORD_ABSENT, trigger, state);
+    }
+    return reconnectStale(RECONNECT_REASON_STALE_UNCONFIRMED, trigger, input, state);
   }
   if (input.markerPid <= 0) {
+    // 0.0.59 (B1, MISMATCH): a kill record exists, we simply cannot tie it to the
+    // marker's writer. One doubt more than "no record at all", so the document must
+    // have been dead for the LONGER RECONNECT_STALE_MISMATCH_MS before the same
+    // stale verdict applies — with the same DIRECT start and the same attempt
+    // budget (reconnectStale), never a second counter.
+    if (input.docStaleMs >= RECONNECT_STALE_MISMATCH_MS) {
+      return reconnectStale(RECONNECT_REASON_STALE_MISMATCH, trigger, input, state);
+    }
     return skipped(RECONNECT_REASON_MARKER_PID_INVALID, trigger, state);
   }
   if (input.killedVpnPid !== input.markerPid) {
+    // 0.0.59 (B1, MISMATCH): the recorded death names ANOTHER `:vpn` writer, so
+    // the marker's process may still be alive — the conservative skip until the
+    // status document itself has been dead for RECONNECT_STALE_MISMATCH_MS; then
+    // the stale-document verdict is the same as everywhere above.
+    if (input.docStaleMs >= RECONNECT_STALE_MISMATCH_MS) {
+      return reconnectStale(RECONNECT_REASON_STALE_MISMATCH, trigger, input, state);
+    }
     return skipped(RECONNECT_REASON_VPN_PID_MISMATCH, trigger, state);
   }
   // (8) Go: one attempt, counted now, verified by the caller within

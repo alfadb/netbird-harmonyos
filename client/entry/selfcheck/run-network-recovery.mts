@@ -474,7 +474,10 @@ try {
   // -------------------------------------------------------------------------
   const recoveryBody = extText.slice(
     extText.indexOf('private async recoverPhysicalNetwork(): Promise<void> {'),
-    extText.indexOf('private async startConnectorThenCreate('));
+    // 0.0.59: the in-process connector restart is its OWN method (with its own
+    // connector-stop/connector-restart stages), so the 13-abort chase ends
+    // where that method begins rather than at the create leg.
+    extText.indexOf('private async restartConnectorForDataPlane('));
   const STAGES = ['no-connection', 'recreate-in-flight', 'network-lost', 'no-management-endpoint',
     'physical-dns', 'protected-dns', 'wg-socket-open', 'wg-protect', 'wg-feed',
     'management-address', 'dns-feed', 'ice-mux', 'signal-resolve', 'signal-socket-open',

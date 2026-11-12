@@ -168,6 +168,49 @@ try {
     m.resumeGapDetected(599000) === true);
 
   // -------------------------------------------------------------------------
+  // H. shouldRestartConnector: the 0.0.59 escalation gate (5 min stale, 10 min
+  //    min-gap, after at least one recovery). These facts carry the EPISODE
+  //    start in staleSinceMs: the extension keeps a separate episode clock
+  //    because the recovery cadence clock is restarted after every attempt.
+  // -------------------------------------------------------------------------
+  const restart = (f: Record<string, unknown>, after?: number, gap?: number): boolean =>
+    after === undefined && gap === undefined ? m.shouldRestartConnector(f) :
+      gap === undefined ? m.shouldRestartConnector(f, after) :
+        m.shouldRestartConnector(f, after, gap);
+  const dueRestart = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    ({ ...noSignal(), staleSinceMs: NOW - 300000, lastRecoveryMs: NOW - 60000,
+      lastRestartMs: 0, recreateInFlight: false, ...over });
+  check('H1 constants: 5 min escalation after, 10 min between restarts',
+    m.DATA_PLANE_RESTART_AFTER_MS === 300000 && m.DATA_PLANE_RESTART_MIN_GAP_MS === 600000);
+  check('H2 stale for 299999 ms does not escalate yet; exactly 300000 does',
+    restart(dueRestart({ staleSinceMs: NOW - 299999 })) === false &&
+    restart(dueRestart()) === true);
+  check('H3 no watchdog recovery yet (lastRecoveryMs=0) never escalates',
+    restart(dueRestart({ lastRecoveryMs: 0 })) === false);
+  check('H4 a recovery in flight owns the next action',
+    restart(dueRestart({ recoveryActive: true })) === false);
+  check('H5 a controlled recreate in flight owns the create leg',
+    restart(dueRestart({ recreateInFlight: true })) === false);
+  check('H6 599999 ms after the last restart is still the gap; 600000 escalates',
+    restart(dueRestart({ lastRestartMs: NOW - 599999 })) === false &&
+    restart(dueRestart({ lastRestartMs: NOW - 600000 })) === true);
+  check('H7 lastRestartMs=0 (never restarted in this process) is eligible',
+    restart(dueRestart({ lastRestartMs: 0 })) === true);
+  check('H8 a non-stale data plane never escalates',
+    restart({ ...dueRestart(), state: 'disconnected' }) === false &&
+    restart({ ...dueRestart(), running: false }) === false &&
+    restart({ ...dueRestart(), signalRegistered: true, wgPeersWithSession: 13 }) === false &&
+    restart({ ...dueRestart(), peerCount: 0, signalRegistered: true,
+      wgPeersWithSession: 0 }) === false);
+  check('H9 an unreadable stale start or now is never trusted',
+    restart(dueRestart({ staleSinceMs: 0 })) === false &&
+    restart(dueRestart({ nowMs: NaN })) === false &&
+    restart(dueRestart({ nowMs: 0 })) === false);
+  check('H10 the thresholds are the shipped defaults and overridable for tests',
+    restart(dueRestart({ staleSinceMs: NOW - 1000 }), 1000, 600000) === true &&
+    restart(dueRestart({ lastRestartMs: NOW - 70000 }), 300000, 120000) === false);
+
+  // -------------------------------------------------------------------------
   // F. The module is PURE (so the host fixture is the shipped code).
   // -------------------------------------------------------------------------
   const policyText = readFileSync(SOURCE, 'utf8');
@@ -253,6 +296,74 @@ try {
   check('G10 the watchdog reuses the watcher status (no second status/core read)',
     watchdogBody.includes('noteDataPlaneWatchdog(status: ConnectorStatusResult)') &&
     !watchdogBody.includes('pollStatusOrNull') && !watchdogBody.includes('connectorStatus()'));
+
+  // -------------------------------------------------------------------------
+  // G (continued). The 0.0.59 ESCALATION wiring in the real extension: a 5 min
+  //    stale episode turns into an in-process connector restart, budgeted per
+  //    episode, and the page marks a connected-but-all-peers-offline tunnel.
+  // -------------------------------------------------------------------------
+  const restartBody = extText.slice(
+    extText.indexOf('private async restartConnectorForDataPlane(): Promise<void> {'),
+    extText.indexOf('private async startConnectorThenCreate('));
+
+  check('G11 the escalation facts are the shell latches and the episode clock is separate',
+    watchdogBody.includes('recreateInFlight: this.recreateInFlight,') &&
+    watchdogBody.includes('lastRestartMs: this.lastConnectorRestartMs,') &&
+    watchdogBody.includes('this.dataPlaneStaleEpisodeSinceMs = since;') &&
+    extText.includes('private dataPlaneStaleEpisodeSinceMs: number = 0;') &&
+    extText.includes('private lastConnectorRestartMs: number = 0;') &&
+    extText.includes('private connectorRestartCount: number = 0;'));
+
+  check('G12 a 5 min stale episode escalates INSTEAD of another socket re-feed, budgeted',
+    watchdogBody.includes('shouldRestartConnector(facts)') &&
+    watchdogBody.includes('this.connectorRestartCount < DATA_PLANE_RESTART_BUDGET') &&
+    watchdogBody.indexOf('shouldRestartConnector(facts)') <
+      watchdogBody.indexOf('this.recoverPhysicalNetwork()') &&
+    watchdogBody.includes('this.connectorRestartCount++;') &&
+    watchdogBody.includes("this.diagMilestone('vpn_dataplane_restart', restartFields);") &&
+    watchdogBody.includes("'restart-budget'") &&
+    watchdogBody.includes('this.restartConnectorForDataPlane().catch((error: Error): void => {'));
+
+  check('G13 the restart re-runs the create leg in-process and reattaches the TUN',
+    restartBody.includes("this.recoveryAwait('connector-stop', false,") &&
+    restartBody.includes('connectorStop()') &&
+    restartBody.includes("this.recoveryAwait('connector-restart', false,") &&
+    restartBody.includes('this.protectSocketWithBox(vpn, sock.fd, \'M\')') &&
+    restartBody.includes('connectorStartWithSocket(sock.fd, this.connectorStartConfigJson,') &&
+    restartBody.includes('connectorTunFdFeed(this.tunFd)') &&
+    restartBody.includes('await this.recoverPhysicalNetwork();') &&
+    restartBody.indexOf('connectorTunFdFeed(this.tunFd)') <
+      restartBody.indexOf('await this.recoverPhysicalNetwork();'));
+
+  check('G14 the restart never recreates/destroys/ACKs (the create leg stays the owner)',
+    !restartBody.includes('recreateInFlight = true') &&
+    !restartBody.includes('connectorRouteSetApplied') &&
+    !restartBody.includes('destroyOnce') && !restartBody.includes('connection.destroy') &&
+    !restartBody.includes('performControlledRecreate'));
+
+  check('G15 the restart reuses the EXACT config/setup-key documents of the create leg',
+    restartBody.includes('this.connectorStartConfigJson') &&
+    restartBody.includes('this.connectorStartSetupKeyJson') &&
+    extText.includes('this.connectorStartConfigJson = configJson;') &&
+    extText.includes('this.connectorStartSetupKeyJson = setupKeyJson;') &&
+    extText.includes('const configJson: string = buildConnectorConfigJson(device, ' +
+      'forceDefaultRoute, routeSelection);'));
+
+  check('G16 the per-episode budget is reset where the stale run clears and at a wake edge',
+    watchdogBody.includes('this.connectorRestartCount = 0;') &&
+    extText.slice(extText.indexOf('private noteWatcherTick(): void {'),
+      extText.indexOf('  // 0.0.54 data-plane watchdog, part 2'))
+      .includes('this.connectorRestartCount = 0;'));
+
+  // The page-side half: a connected tunnel whose known peers are ALL offline is
+  // shown as recovering instead of a bare 已连接 (unknown/empty = untouched).
+  const pageText = readFileSync(
+    join(HERE, '..', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
+  check('G17 the page marks 已连接 with every known peer offline as 对端恢复中',
+    pageText.includes("return '已连接（对端恢复中…）';") &&
+    pageText.includes('peers.every((p: UiPeerEntry): boolean => !p.online)') &&
+    pageText.includes("if (text === '已连接' && peers !== undefined && peers !== null &&") &&
+    pageText.includes('const text: string = homeStateText(state,'));
 } catch (error) {
   failedCount++;
   console.log('FAIL harness — ' + (error as Error).message);

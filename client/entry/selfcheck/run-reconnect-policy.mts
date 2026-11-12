@@ -95,7 +95,11 @@ try {
     lastLogoutAtMs: 0,
     configured: true,
     connectFailureAtMs: 0,
-    killedVpnPid: MARKER_PID
+    killedVpnPid: MARKER_PID,
+    // 0.0.59: the base fixture is the CONFIRMED-death case, so the stale-document
+    // clock is 0 (a live document was just seen) — it is the input of the
+    // no-kill-record branch only, checked in its own section below.
+    docStaleMs: 0
   };
   const input = (overrides: object): object => Object.assign({}, base, overrides);
   const fresh = (): object => policy.reconnectInitialState();
@@ -231,6 +235,177 @@ try {
     decided(failed2.state, { nowMs: T0 + 60000, killedVpnPid: null }).reason ===
       policy.RECONNECT_REASON_KILL_RECORD_ABSENT &&
     decided(failed2.state, { nowMs: T0 + 60000 }).action === policy.RECONNECT_ACTION_RECONNECT);
+
+  // -- 0.0.59 (B1): no kill record at all — the STALE document is the evidence ---
+  // The 2026-11-04 19:28 batch reclaim (`InvalidKillId`) delivered NO APP_KILLED
+  // for this app's `:vpn` process, so criterion (7) answered kill-record-absent
+  // forever while the tunnel was long gone. Past RECONNECT_STALE_CONFIRM_MS with
+  // the marker still open, the absence of a live document for that long is
+  // itself the death evidence: the extension publishes every 5 s and its measured
+  // suspension upper bound is ~94 s. The extension is then started DIRECTLY (the
+  // page's forceDirectStart), never stop-first.
+  check('the stale-document threshold and its reason token are the documented ones',
+    policy.RECONNECT_STALE_CONFIRM_MS === 180000 &&
+    policy.RECONNECT_REASON_STALE_UNCONFIRMED === 'stale-unconfirmed');
+  const staleAlmost = decided(fresh(), { killedVpnPid: null, docStaleMs: 179999 });
+  check('one ms short of 180 s still means "cannot confirm"',
+    staleAlmost.action === policy.RECONNECT_ACTION_SKIPPED &&
+    staleAlmost.reason === policy.RECONNECT_REASON_KILL_RECORD_ABSENT &&
+    staleAlmost.attempt === 0 && staleAlmost.state.attempts === 0 &&
+    staleAlmost.state.verifyingSinceMs === 0);
+  const stale = decided(fresh(), { killedVpnPid: null, docStaleMs: 180000 });
+  check('at exactly 180 s without a live document the extension is presumed dead',
+    stale.action === policy.RECONNECT_ACTION_RECONNECT &&
+    stale.reason === policy.RECONNECT_REASON_STALE_UNCONFIRMED &&
+    stale.attempt === 1);
+  check('the stale attempt is counted and opens the same 30 s verification window',
+    stale.state.attempts === 1 && stale.state.lastAttemptAtMs === T0 &&
+    stale.state.verifyingSinceMs === T0 && stale.state.attemptDispatchedAtMs === T0 &&
+    stale.state.attemptMarkerPid === 0);
+  check('the stale attempt increments an existing counter (attempt N+1)',
+    decided(policy.reconnectOnStartRejected(stale.state),
+      { nowMs: T0 + 60000, killedVpnPid: null, docStaleMs: 180000 }).attempt === 2);
+  check('the user\u2019s stop guard still wins over the stale evidence',
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, lastUserStopAtMs: T0 - 1000 })
+      .reason === policy.RECONNECT_REASON_RECENT_STOP);
+  check('the logout guard, the in-flight latch and the marker gates still win',
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, lastLogoutAtMs: T0 - 1000 })
+      .reason === policy.RECONNECT_REASON_RECENT_LOGOUT &&
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, startOrStopInFlight: true })
+      .reason === policy.RECONNECT_REASON_REQUEST_IN_FLIGHT &&
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, markerState: 'clean' })
+      .reason === policy.RECONNECT_REASON_MARKER_CLEAN &&
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, markerState: 'stopping' })
+      .reason === policy.RECONNECT_REASON_MARKER_STOPPING &&
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, markerState: '' })
+      .reason === policy.RECONNECT_REASON_MARKER_MISSING);
+  check('an unconfigured client / a newer failure verdict still refuses',
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, configured: false })
+      .reason === policy.RECONNECT_REASON_NOT_CONFIGURED &&
+    decided(fresh(), { killedVpnPid: null, docStaleMs: 180000, connectFailureAtMs: T0 - 1000 })
+      .reason === policy.RECONNECT_REASON_CONNECT_FAILURE);
+  const stale2 = decided(policy.reconnectOnStartRejected(stale.state),
+    { nowMs: T0 + 60000, killedVpnPid: null, docStaleMs: 180000 });
+  const stale3 = decided(policy.reconnectOnStartRejected(stale2.state),
+    { nowMs: T0 + 120000, killedVpnPid: null, docStaleMs: 180000 });
+  const stale4 = decided(policy.reconnectOnStartRejected(stale3.state),
+    { nowMs: T0 + 180000, killedVpnPid: null, docStaleMs: 180000 });
+  check('the attempt budget and the 60 s interval still bound the stale path',
+    decided(policy.reconnectOnStartRejected(stale.state),
+      { nowMs: T0 + 59999, killedVpnPid: null, docStaleMs: 180000 }).reason ===
+      policy.RECONNECT_REASON_COOLDOWN &&
+    stale2.attempt === 2 && stale3.attempt === 3 &&
+    stale4.action === policy.RECONNECT_ACTION_LIMIT &&
+    stale4.reason === policy.RECONNECT_REASON_ATTEMPT_LIMIT);
+  check('a kill record still takes its OWN path, never stale-unconfirmed',
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 180000 }).reason ===
+      policy.RECONNECT_REASON_MARKER_OPEN &&
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 180000 }).action ===
+      policy.RECONNECT_ACTION_RECONNECT &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 180000 }).reason ===
+      policy.RECONNECT_REASON_VPN_PID_MISMATCH &&
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 0 }).reason ===
+      policy.RECONNECT_REASON_MARKER_OPEN);
+  check('the stale reason token is not any of the kill-record tokens',
+    policy.RECONNECT_REASON_STALE_UNCONFIRMED !== policy.RECONNECT_REASON_KILL_RECORD_ABSENT &&
+    policy.RECONNECT_REASON_STALE_UNCONFIRMED !== policy.RECONNECT_REASON_MARKER_OPEN &&
+    policy.RECONNECT_REASON_STALE_UNCONFIRMED !== policy.RECONNECT_REASON_VPN_PID_MISMATCH);
+
+  // -- 0.0.59 (B1, MISMATCH): a kill record that does NOT name the marker writer --
+  // The 2026-11-12 device report showed `ui_status_lost age_ms>=180000` up to
+  // 598.5 s while `stale-unconfirmed` was never taken: a kill record EXISTED, it
+  // just named another `:vpn` pid (or the marker carried no usable pid), so
+  // criterion (7) answered vpn-pid-mismatch / marker-pid-invalid forever. The same
+  // stale-document verdict therefore needs a LONGER silence (300 s) on that path,
+  // with the SAME action and the SAME attempt budget as stale-unconfirmed: one
+  // budget, one interval, one verification window — never a second counter.
+  check('the mismatch threshold and its reason token are the documented ones',
+    policy.RECONNECT_STALE_MISMATCH_MS === 300000 &&
+    policy.RECONNECT_REASON_STALE_MISMATCH === 'stale-mismatch');
+  const mismatchAlmost = decided(fresh(),
+    { killedVpnPid: MARKER_PID + 7, docStaleMs: 299999 });
+  check('a mismatching kill record + 299.999 s of silence is still the mismatch skip',
+    mismatchAlmost.action === policy.RECONNECT_ACTION_SKIPPED &&
+    mismatchAlmost.reason === policy.RECONNECT_REASON_VPN_PID_MISMATCH &&
+    mismatchAlmost.attempt === 0 && mismatchAlmost.state.attempts === 0 &&
+    mismatchAlmost.state.verifyingSinceMs === 0);
+  const mismatchStale = decided(fresh(),
+    { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 });
+  check('at exactly 300 s the unreconciled kill record no longer withholds the start',
+    mismatchStale.action === policy.RECONNECT_ACTION_RECONNECT &&
+    mismatchStale.reason === policy.RECONNECT_REASON_STALE_MISMATCH &&
+    mismatchStale.attempt === 1);
+  check('the mismatch attempt is counted and opens the SAME 30 s verification window',
+    mismatchStale.state.attempts === 1 && mismatchStale.state.lastAttemptAtMs === T0 &&
+    mismatchStale.state.verifyingSinceMs === T0 &&
+    mismatchStale.state.attemptDispatchedAtMs === T0 &&
+    mismatchStale.state.attemptMarkerPid === 0 &&
+    decided(mismatchStale.state, { nowMs: T0 + 30000, killedVpnPid: MARKER_PID + 7,
+      docStaleMs: 300000 }).reason === policy.RECONNECT_REASON_VERIFY_TIMEOUT);
+  const invalidAlmost = decided(fresh(), { markerPid: 0, docStaleMs: 299999 });
+  check('an unusable marker pid + 299.999 s of silence is still the invalid-pid skip',
+    invalidAlmost.action === policy.RECONNECT_ACTION_SKIPPED &&
+    invalidAlmost.reason === policy.RECONNECT_REASON_MARKER_PID_INVALID &&
+    invalidAlmost.attempt === 0);
+  const invalidStale = decided(fresh(), { markerPid: 0, docStaleMs: 300000 });
+  check('... and at exactly 300 s it takes the same stale-mismatch start',
+    invalidStale.action === policy.RECONNECT_ACTION_RECONNECT &&
+    invalidStale.reason === policy.RECONNECT_REASON_STALE_MISMATCH &&
+    invalidStale.attempt === 1 && invalidStale.state.verifyingSinceMs === T0);
+  check('the user\u2019s stop guard still wins over the mismatching stale evidence',
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      lastUserStopAtMs: T0 - 1000 }).reason === policy.RECONNECT_REASON_RECENT_STOP);
+  check('... and so do the logout guard, the in-flight latch, the marker gates and setup',
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      lastLogoutAtMs: T0 - 1000 }).reason === policy.RECONNECT_REASON_RECENT_LOGOUT &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      startOrStopInFlight: true }).reason === policy.RECONNECT_REASON_REQUEST_IN_FLIGHT &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      markerState: 'clean' }).reason === policy.RECONNECT_REASON_MARKER_CLEAN &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      markerState: 'stopping' }).reason === policy.RECONNECT_REASON_MARKER_STOPPING &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      markerState: '' }).reason === policy.RECONNECT_REASON_MARKER_MISSING &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      configured: false }).reason === policy.RECONNECT_REASON_NOT_CONFIGURED &&
+    decided(fresh(), { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000,
+      connectFailureAtMs: T0 - 1000 }).reason === policy.RECONNECT_REASON_CONNECT_FAILURE);
+  const exhausted = Object.assign({}, policy.reconnectInitialState(), { attempts: 3 });
+  check('mismatch + attempts=3 is the attempt limit: gate (6) still precedes (7)',
+    decided(exhausted, { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 }).action ===
+      policy.RECONNECT_ACTION_LIMIT &&
+    decided(exhausted, { killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 }).reason ===
+      policy.RECONNECT_REASON_ATTEMPT_LIMIT);
+  check('a kill record naming the marker writer is unchanged at ANY stale length',
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 300000 }).reason ===
+      policy.RECONNECT_REASON_MARKER_OPEN &&
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 299999 }).reason ===
+      policy.RECONNECT_REASON_MARKER_OPEN &&
+    decided(fresh(), { killedVpnPid: MARKER_PID, docStaleMs: 300000 }).attempt === 1);
+  // One budget for both stale reasons: a stale-unconfirmed attempt and a
+  // stale-mismatch attempt are the SAME chain (N+1), share the 60 s interval and
+  // the third one is refused by the same limit.
+  const shared1 = decided(fresh(), { killedVpnPid: null, docStaleMs: 180000 });
+  const shared2 = decided(policy.reconnectOnStartRejected(shared1.state),
+    { nowMs: T0 + 60000, killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 });
+  check('both stale reasons draw from ONE attempt budget (N+1 across the two)',
+    shared1.reason === policy.RECONNECT_REASON_STALE_UNCONFIRMED && shared1.attempt === 1 &&
+    shared2.reason === policy.RECONNECT_REASON_STALE_MISMATCH && shared2.attempt === 2 &&
+    shared2.state.attempts === 2 && shared2.state.lastAttemptAtMs === T0 + 60000 &&
+    decided(policy.reconnectOnStartRejected(shared2.state),
+      { nowMs: T0 + 119999, killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 }).reason ===
+      policy.RECONNECT_REASON_COOLDOWN);
+  const shared3 = decided(policy.reconnectOnStartRejected(shared2.state),
+    { nowMs: T0 + 120000, killedVpnPid: null, docStaleMs: 180000 });
+  check('... and the third one across the two reasons still hits the same limit',
+    shared3.reason === policy.RECONNECT_REASON_STALE_UNCONFIRMED && shared3.attempt === 3 &&
+    decided(policy.reconnectOnStartRejected(shared3.state),
+      { nowMs: T0 + 180000, killedVpnPid: MARKER_PID + 7, docStaleMs: 300000 }).action ===
+      policy.RECONNECT_ACTION_LIMIT);
+  check('stale-mismatch is none of the conservative tokens nor stale-unconfirmed',
+    policy.RECONNECT_REASON_STALE_MISMATCH !== policy.RECONNECT_REASON_VPN_PID_MISMATCH &&
+    policy.RECONNECT_REASON_STALE_MISMATCH !== policy.RECONNECT_REASON_MARKER_PID_INVALID &&
+    policy.RECONNECT_REASON_STALE_MISMATCH !== policy.RECONNECT_REASON_STALE_UNCONFIRMED);
 
   // -- foreground only -------------------------------------------------------
   check('a tick that slips through while the page is hidden never reconnects',
@@ -415,6 +590,13 @@ try {
   const model = await loadPure('NetBirdUiModel');
   const statusPolicy = await loadPure('NetBirdStatusPolicy');
   const core = await loadPure('NetBirdDiagnosticsCore');
+  // 0.0.59 A2: `ui_status_lost` may only carry keys on the public field set —
+  // the writer drops the WHOLE record for an unknown key, so a typo here would
+  // make the new record silently vanish on device. Both keys are the ones the
+  // existing `ui_status_read` already uses.
+  check('the status-lost record keys are on the public field set',
+    core.PUBLIC_FIELD_KEYS.indexOf('age_ms') >= 0 &&
+    core.PUBLIC_FIELD_KEYS.indexOf('derived') >= 0);
   function method(source: string, name: string): string {
     const hit = new RegExp('^  private (?:async )?' + name + '\\(', 'm').exec(source);
     if (hit === null) { throw new Error('missing method: ' + name); }
@@ -431,17 +613,23 @@ try {
   let doc: any = null;
   let markerText = '';
   let rejectStart = false;
+  // 0.0.59 (B1): switchable, so the no-kill-record branch can be driven through
+  // the REAL page methods exactly like the confirmed-death one below.
+  let killedRecord: any = { pid: MARKER_PID };
   const calls: string[] = [];
   const records: any[] = [];
   const env = { ...policy, ...model, ...statusPolicy, ...core,
     Date: { now: () => clock, parse: Date.parse },
     fs: { accessSync: () => true, readTextSync: () => markerText },
     getContext: () => ({ filesDir: '/fixture' }),
-    lastKilledVpnProcess: () => ({ pid: MARKER_PID }),
+    lastKilledVpnProcess: () => killedRecord,
     readPublishedStatus: () => doc,
     keepAlivePollGapMs: () => 0, keepAliveResumedAfterGap: () => false,
     keepAliveOnUserConnect: (s: any) => s,
     DOMAIN: 0, TAG: 'fixture', BUNDLE_NAME: 'fixture', EXTENSION_ABILITY: 'fixture',
+    // 0.0.59 (A2): the page's own module-level constant (pinned in section B). It
+    // is not a class field, so the extracted methods read it from this scope.
+    AUTO_RECONNECT_REPORT_INTERVAL_MS: 600000,
     hilog: { info: () => {}, warn: () => {}, error: () => {} },
     event: (_name: string, fields: any) => {
       records.push(fields); calls.push('auto:' + fields.result);
@@ -449,6 +637,11 @@ try {
     vpnExtension: { startVpnExtensionAbility: () => {
       calls.push('platform-start');
       return rejectStart ? Promise.reject({ code: 16000050 }) : Promise.resolve();
+    }, stopVpnExtensionAbility: () => {
+      // 0.0.59 (B1): a stop is the ONE thing the stale path must never issue —
+      // recorded so its absence can be asserted, not merely assumed.
+      calls.push('platform-stop');
+      return Promise.resolve();
     } }
   };
   const Adapter = new Function('env', 'with (env) { ' + stripTypeScriptTypes(adapterTs) +
@@ -461,7 +654,8 @@ try {
       configured: true, pageVisible: true, bgKeepAliveState: { taskPresent: false },
       connectFailureClass: '', connectFailureAtMs: 0, actionError: '', disconnectNotice: '',
       lastUserStopAtMs: 0, lastLogoutAtMs: 0, lastRestartLegAtMs: 0,
-      reconnectState: policy.reconnectInitialState(), reconnectReported: new Set(),
+      reconnectState: policy.reconnectInitialState(), reconnectReportedAt: new Map(),
+      lastLiveDocAtMs: 0, statusLostReported: false,
       lastPollAtMs: 0, pendingResumeReason: '', routeSelectionOpen: false,
       observedPublishedStatus: false, lastLiveState: '', published: null,
       appliedStatusStamp: '', diagActionCount: 0,
@@ -479,7 +673,7 @@ try {
   };
   const connected = (updated: number, pid?: number): any =>
     ({ updated_at_ms: updated, status_revision: 228, state: 'connected', pid: pid });
-  const p = page(); p.runAutoReconnect(false);
+  const p = page(); p.runAutoReconnect(false, 0);
   check('REAL dispatch logs requested before requestStart and platform start, never reconnected',
     calls.join(',') === 'auto:requested,ui-connect,platform-start' &&
     p.reconnectState.attemptDispatchedAtMs === T0);
@@ -506,7 +700,7 @@ try {
     records.filter(r => r.result === 'reconnected').length === 1);
 
   for (const pid of [undefined, MARKER_PID]) {
-    const q = page(); q.runAutoReconnect(false); newMarker();
+    const q = page(); q.runAutoReconnect(false, 0); newMarker();
     const old = connected(T0 - 4747, pid);
     tick(q, T0 + 1001, old);
     // Supply a fresh but wrong-pid document at the deadline. Repeating the same
@@ -521,17 +715,82 @@ try {
     check('REAL later ticks are ungated after verify-failed',
       q.reconnectState.activeSinceMs === T0 + 31000);
   }
-  const legacyPage = page(); legacyPage.runAutoReconnect(false); newMarker();
+  const legacyPage = page(); legacyPage.runAutoReconnect(false, 0); newMarker();
   tick(legacyPage, T0 + 1000, connected(T0 - 1000));
   check('REAL pid-absent document can verify via the time fallback',
     legacyPage.reconnectState.verifyingSinceMs === 0 &&
     records.filter(r => r.result === 'reconnected').length === 1);
-  const refused = page(); rejectStart = true; refused.runAutoReconnect(false);
+  const refused = page(); rejectStart = true; refused.runAutoReconnect(false, 0);
   await Promise.resolve(); await Promise.resolve(); rejectStart = false;
   check('REAL platform rejection records requested then failed and clears attempt latches',
     records.map(r => r.result).join(',') === 'requested,failed' &&
     refused.reconnectState.attemptDispatchedAtMs === 0 &&
     refused.reconnectState.attemptMarkerPid === 0);
+  // 0.0.59 (B1): the REAL stale path through the REAL page methods. No APP_KILLED
+  // in this process, no live document for 180 s, marker still open: the poll's
+  // null branch must decide stale-unconfirmed and start DIRECTLY — the platform
+  // stop leg must never run.
+  killedRecord = null;
+  const stalePage = page();
+  stalePage.lastLiveDocAtMs = T0 - 180000;
+  stalePage.pollConnectorStatusPass();
+  await Promise.resolve(); await Promise.resolve();
+  check('REAL stale page starts directly with the stale-unconfirmed reason',
+    records.map(r => r.reason + ':' + r.result).join(',') === 'stale-unconfirmed:requested' &&
+    calls.join(',') === 'auto:requested,ui-connect,platform-start' &&
+    !calls.includes('platform-stop'));
+  check('REAL stale dispatch is counted and verified like any other attempt',
+    stalePage.reconnectState.attempts === 1 &&
+    stalePage.reconnectState.verifyingSinceMs === T0 &&
+    stalePage.reconnectState.attemptDispatchedAtMs === T0);
+  // One ms short of the threshold keeps the old, conservative verdict — and, as
+  // before, that skip is recorded through the (now time-windowed) latch.
+  const quietPage = page();
+  quietPage.lastLiveDocAtMs = T0 - 179999;
+  quietPage.pollConnectorStatusPass();
+  check('REAL stale page one ms short of 180 s still skips kill-record-absent',
+    records.map(r => r.reason + ':' + r.result).join(',') === 'kill-record-absent:skipped' &&
+    calls.join(',') === 'auto:skipped' && !calls.includes('platform-start') &&
+    quietPage.reconnectState.attempts === 0);
+  // 0.0.59 (B1, MISMATCH): the same REAL null-document branch, but the kill record
+  // names ANOTHER `:vpn` writer. At 300 s of silence the page must take the
+  // stale-mismatch decision and the SAME direct start (no platform stop leg).
+  killedRecord = { pid: MARKER_PID + 7 };
+  const mismatchPage = page();
+  mismatchPage.lastLiveDocAtMs = T0 - 300000;
+  mismatchPage.pollConnectorStatusPass();
+  await Promise.resolve(); await Promise.resolve();
+  check('REAL mismatch page starts directly with the stale-mismatch reason',
+    records.map(r => r.reason + ':' + r.result).join(',') === 'stale-mismatch:requested' &&
+    calls.join(',') === 'auto:requested,ui-connect,platform-start' &&
+    !calls.includes('platform-stop') &&
+    mismatchPage.reconnectState.attempts === 1 &&
+    mismatchPage.reconnectState.verifyingSinceMs === T0);
+  killedRecord = { pid: MARKER_PID + 7 };
+  const mismatchQuiet = page();
+  mismatchQuiet.lastLiveDocAtMs = T0 - 299999;
+  mismatchQuiet.pollConnectorStatusPass();
+  check('REAL mismatch page one ms short of 300 s still skips vpn-pid-mismatch',
+    records.map(r => r.reason + ':' + r.result).join(',') === 'vpn-pid-mismatch:skipped' &&
+    !calls.includes('platform-start') && mismatchQuiet.reconnectState.attempts === 0);
+  killedRecord = { pid: MARKER_PID };
+  // 0.0.59 (A2): the REAL latch. Same reason inside the 10-minute window writes
+  // nothing; at exactly the window's end the SAME reason is recorded again (the
+  // old process-wide Set would have kept it silent forever).
+  clock = T0;
+  const latchPage = page();
+  latchPage.diagAutoReconnectOnce('foreground', 'skipped', 'cooldown', 0);
+  latchPage.diagAutoReconnectOnce('foreground', 'skipped', 'cooldown', 0);
+  check('REAL the same skip reason is recorded once inside the 10-minute window',
+    records.length === 1 && records[0].reason === 'cooldown');
+  clock = T0 + 599999;
+  latchPage.diagAutoReconnectOnce('foreground', 'skipped', 'cooldown', 0);
+  check('REAL ... and still nothing one ms before it ends', records.length === 1);
+  clock = T0 + 600000;
+  latchPage.diagAutoReconnectOnce('foreground', 'skipped', 'cooldown', 0);
+  check('REAL at exactly 600 s the same reason is recorded again',
+    records.length === 2 && latchPage.reconnectReportedAt.get('cooldown') === T0 + 600000);
+  killedRecord = { pid: MARKER_PID };
   // The real publication exit adds pid without defeating the existing debounce.
   const vpe = readFileSync(join(ets, 'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
   const writerTs = 'class Writer {\n' + method(vpe, 'publishStatusForUi') + '\n}';
@@ -583,7 +842,8 @@ const pollBody = sliceFrom(PAGE, 'private pollConnectorStatus(): void {',
 const nullBranch = sliceFrom(pollBody,
   'const status: PublishedStatus | null = currentPublishedStatus(',
   'this.observedPublishedStatus = true;');
-const autoBody = sliceFrom(PAGE, 'private runAutoReconnect(requestInFlight: boolean): void {',
+const autoBody = sliceFrom(PAGE,
+  'private runAutoReconnect(requestInFlight: boolean, docStaleMs: number): void {',
   'private diagAutoReconnect(');
 const diagBody = sliceFrom(PAGE, 'private diagAutoReconnect(trigger: string, result: string',
   'private diagAutoReconnectOnce(');
@@ -591,7 +851,7 @@ const onceBody = sliceFrom(PAGE, 'private diagAutoReconnectOnce(trigger: string,
   '// ---- derived view state');
 const deadBody = sliceFrom(PAGE, 'private extensionConfirmedDead(): boolean {',
   'private refreshConnectFailure(): void {');
-const startBody = sliceFrom(PAGE, 'private requestStart(fromAutoReconnect: boolean = false): void {',
+const startBody = sliceFrom(PAGE, 'private requestStart(fromAutoReconnect: boolean = false,',
   'private requestStop(): void {');
 
 check('Index imports the pure reconnect policy',
@@ -607,7 +867,7 @@ check('the page passes the marker state through verbatim (no token vocabulary of
   autoBody.indexOf('markerState: markerState') >= 0 &&
   !/'(open|clean|stopping)'/.test(autoBody));
 check('the decision is taken inside the poll\'s "no fresh document" branch',
-  nullBranch.indexOf('this.runAutoReconnect(requestInFlight);') >= 0);
+  nullBranch.indexOf('this.runAutoReconnect(requestInFlight, docStaleMs);') >= 0);
 // 0.0.20 判据②放宽: with a kill event naming the marker's pid the page no longer
 // waits for the document to age out — it hands the decision the same "there is no
 // usable document" fact it would have had ~10 s later. Criterion (7) inside the
@@ -630,16 +890,87 @@ check('a kill of a DIFFERENT pid never covers a live document (no prefix, exact 
   deadBody.indexOf('killed === null') >= 0);
 check('the decision is taken after the failure notice has been read',
   nullBranch.indexOf('this.refreshConnectFailure();') <
-    nullBranch.indexOf('this.runAutoReconnect(requestInFlight);'));
+    nullBranch.indexOf('this.runAutoReconnect(requestInFlight, docStaleMs);'));
 check('the in-flight latch is captured BEFORE the branch releases it',
   pollBody.indexOf('const requestInFlight: boolean = this.requestSent || this.stopSent;') >= 0 &&
   pollBody.indexOf('const requestInFlight') < pollBody.indexOf('this.requestSent = false;'));
 check('the action goes through requestStart and nothing else',
   autoBody.indexOf('decideReconnect(this.reconnectState, facts)') >= 0 &&
+  autoBody.split('this.requestStart(').length === 3 &&
   autoBody.split('this.requestStart(true);').length === 2 &&
   autoBody.indexOf('decideReconnect(') < autoBody.indexOf('this.requestStart(true);'));
 check('the auto path never copies the extension start call',
   autoBody.indexOf('startVpnExtensionAbility') < 0 && autoBody.indexOf('buildWant') < 0);
+// 0.0.59 (B1): the stale-document death has its own token and its own start leg —
+// the confirmed-death path must keep `requestStart(true)` EXACTLY as it was, and
+// only the stale one may take the direct start (forceDirectStart = no stop-first).
+check('the stale-document death is wired with its own reason token',
+  PAGE.indexOf('RECONNECT_REASON_STALE_UNCONFIRMED') >= 0 &&
+  PAGE.indexOf('stale-unconfirmed') >= 0 &&
+  autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_UNCONFIRMED') >= 0);
+check('only the stale decision starts DIRECTLY; the confirmed-death path is unchanged',
+  autoBody.split('this.requestStart(true, true);').length === 2 &&
+  autoBody.split('this.requestStart(true);').length === 2 &&
+  autoBody.indexOf('this.requestStart(true, true);') <
+    autoBody.indexOf('this.requestStart(true);') &&
+  autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_UNCONFIRMED') <
+    autoBody.indexOf('this.requestStart(true, true);'));
+// 0.0.59 (B1, MISMATCH): the SECOND stale reason goes through the SAME one direct
+// start — a mismatch branch that never reached this condition would leave the
+// device symptom (a kill record naming another writer) exactly where it was.
+check('the unreconciled-kill reason shares the SAME direct start (mismatch wired)',
+  PAGE.indexOf('RECONNECT_REASON_STALE_MISMATCH') >= 0 &&
+  autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_MISMATCH') >= 0 &&
+  autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_UNCONFIRMED') <
+    autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_MISMATCH') &&
+  autoBody.indexOf('decision.reason === RECONNECT_REASON_STALE_MISMATCH') <
+    autoBody.indexOf('this.requestStart(true, true);') &&
+  autoBody.indexOf('this.requestStart(true, true);') <
+    autoBody.indexOf('this.requestStart(true);'));
+check('the mismatch branch also skips the stop-first leg through the same flag',
+  startBody.indexOf('forceDirectStart: boolean = false') >= 0 &&
+  startBody.indexOf('if (forceDirectStart) {') >= 0 &&
+  startBody.indexOf('this.startVpnExtension(fromAutoReconnect);') <
+    startBody.indexOf('connectStartLeg(this.extensionGone())'));
+check('the direct-start flag skips the stop-first leg and adds no start call site',
+  startBody.indexOf('forceDirectStart: boolean = false') >= 0 &&
+  startBody.indexOf('if (forceDirectStart) {') >= 0 &&
+  startBody.indexOf('UI_START_DIRECT|reason=stale-unconfirmed') >= 0 &&
+  startBody.indexOf('this.startVpnExtension(fromAutoReconnect);') >= 0 &&
+  startBody.indexOf('if (forceDirectStart) {') <
+    startBody.indexOf('connectStartLeg(this.extensionGone())') &&
+  // the request-owning half only: the ONE platform call lives in the helper below.
+  startBody.slice(0, startBody.indexOf('private startVpnExtension('))
+    .indexOf('startVpnExtensionAbility(') < 0);
+check('the page measures the stale clock off the last LIVE document',
+  PAGE.indexOf('private lastLiveDocAtMs: number = 0;') >= 0 &&
+  pollBody.indexOf('this.lastLiveDocAtMs = nowMs;') >= 0 &&
+  pollBody.indexOf('const docStaleMs: number = this.lastLiveDocAtMs > 0 ? ' +
+    'nowMs - this.lastLiveDocAtMs : 0;') >= 0 &&
+  nullBranch.indexOf('this.runAutoReconnect(requestInFlight, docStaleMs);') >= 0 &&
+  autoBody.indexOf('docStaleMs: docStaleMs') >= 0);
+// 0.0.59 (A2): one `ui_status_lost` per loss episode, on the whitelisted scalar
+// keys the existing ui_status_read already uses, emitted before the episode is
+// reset; the per-reason latch is now a 10-minute TIME window.
+check('a status-loss episode leaves ONE record with whitelisted scalar keys',
+  PAGE.indexOf("event('ui_status_lost', lostFields)") >= 0 &&
+  PAGE.indexOf("const lostFields: DiagFields = { 'age_ms': docStaleMs, 'derived': false };") >= 0 &&
+  PAGE.indexOf('private statusLostReported: boolean = false;') >= 0 &&
+  pollBody.indexOf('this.statusLostReported = false;') >= 0 &&
+  pollBody.indexOf('!this.statusLostReported) {') >= 0 &&
+  pollBody.indexOf('this.diagStatusReadNoDocument(nowMs);') <
+    pollBody.indexOf("event('ui_status_lost', lostFields)") &&
+  pollBody.indexOf("event('ui_status_lost', lostFields)") <
+    pollBody.indexOf('if (this.observedPublishedStatus) {'));
+check('the skip latch is a per-reason TIME window, not one record per process',
+  PAGE.indexOf('private reconnectReportedAt: Map<string, number> = ' +
+    'new Map<string, number>();') >= 0 &&
+  PAGE.indexOf('const AUTO_RECONNECT_REPORT_INTERVAL_MS: number = 600000;') >= 0 &&
+  onceBody.indexOf('this.reconnectReportedAt.get(reason)') >= 0 &&
+  onceBody.indexOf('this.reconnectReportedAt.set(reason, nowMs)') >= 0 &&
+  onceBody.indexOf('nowMs - lastAtMs < AUTO_RECONNECT_REPORT_INTERVAL_MS') >= 0 &&
+  onceBody.indexOf('return;') < onceBody.indexOf('this.reconnectReportedAt.set(reason, nowMs)') &&
+  PAGE.indexOf('reconnectReported: Set<string>') < 0);
 // 0.0.20: the ONE fact that opens the foreground gate in the background — the
 // borrowed keep-alive task, mirrored from the adapter into the page's policy state.
 check('the page hands the held keep-alive task to the decision (background trigger)',
@@ -690,11 +1021,6 @@ check('the decision records ONE safe diagnostic event on the public key set',
   diagBody.indexOf("fields['result']") >= 0 &&
   diagBody.indexOf("fields['reason']") >= 0 && diagBody.indexOf("fields['count']") >= 0 &&
   autoBody.indexOf('this.diagAutoReconnect(decision.trigger,') >= 0);
-check('a repeated skip reason is never logged twice in one process',
-  PAGE.indexOf('private reconnectReported: Set<string> = new Set<string>();') >= 0 &&
-  onceBody.indexOf('this.reconnectReported.has(reason)') >= 0 &&
-  onceBody.indexOf('this.reconnectReported.add(reason)') >= 0 &&
-  onceBody.indexOf('return;') < onceBody.indexOf('this.reconnectReported.add(reason)'));
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) { process.exitCode = 1; }
